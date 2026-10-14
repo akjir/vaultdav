@@ -1,0 +1,256 @@
+import type { App, PluginManifest } from "obsidian";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import VaultDavPlugin from "../src/main";
+import { DEFAULT_SETTINGS, VaultDavSettingTab } from "../src/settings";
+import { Setting as MockSetting } from "./obsidian_mock";
+
+function createTestPlugin(): { app: App; plugin: VaultDavPlugin } {
+    const mockApp: App = {
+        vault: {
+            adapter: {
+                exists: async (): Promise<boolean> => false,
+                mkdir: async (): Promise<void> => undefined,
+                read: async (): Promise<string> => "{}",
+                write: async (): Promise<void> => undefined
+            },
+            getName: (): string => "MyVault"
+        }
+    } as unknown as App;
+
+    const mockManifest: PluginManifest = {
+        author: "Test",
+        description: "Test",
+        id: "vaultdav",
+        isDesktopOnly: false,
+        minAppVersion: "1.5.0",
+        name: "VaultDAV",
+        version: "0.1.0"
+    };
+
+    const plugin: VaultDavPlugin = new VaultDavPlugin(mockApp, mockManifest);
+    return { app: mockApp, plugin };
+}
+
+function getSettingByName(name: string): MockSetting {
+    const found: MockSetting | undefined = MockSetting.instances.find(
+        (item: MockSetting): boolean => item.name === name
+    );
+    if (found === undefined) {
+        throw new Error(`Expected setting "${name}" to be rendered`);
+    }
+    return found;
+}
+
+describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
+    beforeEach(() => {
+        MockSetting.instances.length = 0;
+    });
+
+    it("defines expected DEFAULT_SETTINGS keys and default values", () => {
+        expect(Object.keys(DEFAULT_SETTINGS).sort()).toEqual([
+            "appPassword",
+            "conflictStrategy",
+            "remoteBaseDir",
+            "syncInterval",
+            "url",
+            "username"
+        ]);
+        expect(DEFAULT_SETTINGS).toEqual({
+            appPassword: "",
+            conflictStrategy: "keep_both",
+            remoteBaseDir: "",
+            syncInterval: 0,
+            url: "",
+            username: ""
+        });
+    });
+
+    it("clears containerEl via empty() without touching innerHTML, and falls back to replaceChildren()", () => {
+        const { app, plugin } = createTestPlugin();
+        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
+
+        const emptySpy = vi.spyOn(tab.containerEl, "empty");
+        let innerHtmlTouched: boolean = false;
+        Object.defineProperty(tab.containerEl, "innerHTML", {
+            configurable: true,
+            get(): string {
+                return "";
+            },
+            set(): void {
+                innerHtmlTouched = true;
+                throw new Error("innerHTML must not be used");
+            }
+        });
+
+        tab.display();
+        expect(emptySpy).toHaveBeenCalledTimes(1);
+        expect(innerHtmlTouched).toBe(false);
+        expect(tab.containerEl.children.length).toBe(7);
+
+        const replaceChildrenSpy = vi.spyOn(tab.containerEl, "replaceChildren");
+        (tab.containerEl as Partial<HTMLElement>).empty = undefined;
+        tab.display();
+        expect(replaceChildrenSpy).toHaveBeenCalledTimes(1);
+        expect(tab.containerEl.children.length).toBe(7);
+    });
+
+    it("renders all settings with strict Obsidian Sentence case names and descriptions", () => {
+        const { app, plugin } = createTestPlugin();
+        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
+
+        tab.display();
+
+        const names: string[] = MockSetting.instances.map(
+            (item: MockSetting): string => item.name
+        );
+        expect(names).toEqual([
+            "Server URL",
+            "Username",
+            "App password",
+            "Remote base directory",
+            "Sync interval",
+            "Conflict strategy",
+            "Test connection"
+        ]);
+
+        expect(getSettingByName("Server URL").desc).toBe(
+            "Nextcloud base URL or WebDAV endpoint (https://<domain>)."
+        );
+        expect(getSettingByName("Username").desc).toBe("Nextcloud account username.");
+        expect(getSettingByName("App password").desc).toBe(
+            "Nextcloud app password for HTTP Basic authentication."
+        );
+        expect(getSettingByName("Remote base directory").desc).toBe(
+            "Target remote folder path inside the Nextcloud user files root."
+        );
+        expect(getSettingByName("Sync interval").desc).toBe(
+            "Automatic synchronization interval in minutes (0 to disable)."
+        );
+        expect(getSettingByName("Conflict strategy").desc).toBe(
+            "Resolution mode for concurrent edits (keep_both or newest_wins)."
+        );
+        expect(getSettingByName("Test connection").desc).toBe(
+            "Verify Nextcloud WebDAV credentials and remote directory access."
+        );
+        expect(
+            getSettingByName("Test connection").buttonComponent?.buttonEl.textContent
+        ).toBe("Test connection");
+    });
+
+    it("configures mobile input hygiene and input types on text controls", () => {
+        const { app, plugin } = createTestPlugin();
+        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
+
+        tab.display();
+
+        for (const label of [
+            "Server URL",
+            "Username",
+            "App password",
+            "Remote base directory"
+        ]) {
+            const setting: MockSetting = getSettingByName(label);
+            const inputEl: HTMLInputElement | undefined = setting.textComponent?.inputEl;
+            expect(inputEl).toBeDefined();
+            expect(inputEl?.autocapitalize).toBe("none");
+            expect(inputEl?.spellcheck).toBe(false);
+        }
+
+        const passwordInput: HTMLInputElement | undefined =
+            getSettingByName("App password").textComponent?.inputEl;
+        expect(passwordInput?.type).toBe("password");
+
+        const intervalInput: HTMLInputElement | undefined =
+            getSettingByName("Sync interval").textComponent?.inputEl;
+        expect(intervalInput?.type).toBe("number");
+        expect(intervalInput?.min).toBe("0");
+    });
+
+    it("normalizes and persists setting changes across all controls", async () => {
+        const { app, plugin } = createTestPlugin();
+        const saveSpy = vi.spyOn(plugin, "saveSettings").mockResolvedValue(undefined);
+        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
+
+        tab.display();
+
+        await getSettingByName("Server URL").textOnChange?.("  https://nc.example.com/  ");
+        expect(plugin.settings.url).toBe("https://nc.example.com/");
+
+        await getSettingByName("Username").textOnChange?.("  alice  ");
+        expect(plugin.settings.username).toBe("alice");
+
+        await getSettingByName("App password").textOnChange?.("  secret-token  ");
+        expect(plugin.settings.appPassword).toBe("secret-token");
+
+        await getSettingByName("Remote base directory").textOnChange?.(
+            "  /Notes//Subfolder/  "
+        );
+        expect(plugin.settings.remoteBaseDir).toBe("Notes/Subfolder");
+
+        const intervalSetting: MockSetting = getSettingByName("Sync interval");
+        await intervalSetting.textOnChange?.("15");
+        expect(plugin.settings.syncInterval).toBe(15);
+
+        await intervalSetting.textOnChange?.("15.8");
+        expect(plugin.settings.syncInterval).toBe(15);
+
+        await intervalSetting.textOnChange?.("15abc");
+        expect(plugin.settings.syncInterval).toBe(0);
+
+        await intervalSetting.textOnChange?.("-5");
+        expect(plugin.settings.syncInterval).toBe(0);
+
+        await intervalSetting.textOnChange?.("   ");
+        expect(plugin.settings.syncInterval).toBe(0);
+
+        const conflictSetting: MockSetting = getSettingByName("Conflict strategy");
+        await conflictSetting.dropdownOnChange?.("newest_wins");
+        expect(plugin.settings.conflictStrategy).toBe("newest_wins");
+
+        await conflictSetting.dropdownOnChange?.("invalid_value");
+        expect(plugin.settings.conflictStrategy).toBe("keep_both");
+
+        expect(saveSpy).toHaveBeenCalledTimes(11);
+    });
+
+    it("disables Test connection button during execution and restores state in finally", async () => {
+        const { app, plugin } = createTestPlugin();
+        let resolveTest: (value: boolean) => void = (): void => undefined;
+        vi.spyOn(plugin, "testConnection").mockImplementation(
+            (): Promise<boolean> =>
+                new Promise<boolean>((resolve: (value: boolean) => void) => {
+                    resolveTest = resolve;
+                })
+        );
+
+        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
+        tab.display();
+
+        const testSetting: MockSetting = getSettingByName("Test connection");
+        const buttonComp = testSetting.buttonComponent;
+        expect(buttonComp).not.toBeNull();
+        expect(buttonComp?.disabled).toBe(false);
+        expect(buttonComp?.buttonEl.textContent).toBe("Test connection");
+
+        const clickPromise: Promise<unknown> = Promise.resolve(
+            testSetting.buttonOnClick?.()
+        );
+        expect(buttonComp?.disabled).toBe(true);
+        expect(buttonComp?.buttonEl.textContent).toBe("Testing...");
+
+        resolveTest(true);
+        await clickPromise;
+
+        expect(buttonComp?.disabled).toBe(false);
+        expect(buttonComp?.buttonEl.textContent).toBe("Test connection");
+
+        vi.spyOn(plugin, "testConnection").mockRejectedValueOnce(
+            new Error("Network error")
+        );
+        await expect(
+            Promise.resolve(testSetting.buttonOnClick?.())
+        ).rejects.toThrow("Network error");
+        expect(buttonComp?.disabled).toBe(false);
+        expect(buttonComp?.buttonEl.textContent).toBe("Test connection");
+    });
+});

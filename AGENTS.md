@@ -37,6 +37,13 @@
 - **Strict Path Boundary & Traversal Safety:** Always verify `/` or end-of-string boundaries when stripping URL/path prefixes. Reject any path containing `.` or `..` segments.
 - **Defensive Numeric Guards:** Validate numeric inputs (`timestamp`, `mtime`, `size`, `concurrency`) with `Number.isFinite()` before arithmetic or `Date` construction.
 
+## Obsidian Plugin Linter Rules (eslint-plugin-obsidianmd)
+- **`no-inner-html`:** Never use `innerHTML`, `outerHTML`, or `insertAdjacentHTML`. Always use Obsidian's `containerEl.empty()`, `createEl()`, `createDiv()`, or `Setting`.
+- **`ui/sentence-case`:** Use strict Sentence case for all UI strings (`Setting.setName`, `Setting.setDesc`, `setButtonText`, command `name`, ribbon tooltip, `Notice`). Capitalize only the first word and proper nouns/acronyms (`Nextcloud`, `WebDAV`, `HTTP`, `URL`). Never use Title Case (write `"App password"`, `"Remote base directory"`, `"Sync interval"`, `"Conflict strategy"`, `"Test connection"`).
+- **`settings-tab/no-manual-html-headings` & `no-problematic-settings-headings`:** Never create `<h1..h6>` elements manually in `PluginSettingTab`. If headings are needed, use `new Setting(containerEl).setName("...").setHeading()` and never include `"VaultDAV"` or `"settings"` in the heading text.
+- **`commands/no-plugin-id-in-command-id` & `no-plugin-name-in-command-name` & `no-default-hotkeys`:** Never prefix command `id` with `vaultdav`, never include `VaultDAV` in command `name`, and never define default `hotkeys`.
+- **`detach-leaves` & Lifecycle Hygiene:** Never call `detachLeavesOfType` in `onunload()`. Always wrap intervals in `this.registerInterval(window.setInterval(...))` and events in `this.registerEvent(...)`.
+
 ## Workflows
 - Proposals: Use **`proposal-workflow`** to manage `.agents/proposals/`.
 - Development & Build: Use **`vaultdav-dev-workflow`** to build, test, and develop.

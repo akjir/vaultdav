@@ -48,6 +48,31 @@ export class Plugin {
     }
 }
 
+export interface MockButtonComponent {
+    buttonEl: HTMLButtonElement;
+    cta: boolean;
+    disabled: boolean;
+    onClick: (handler: () => unknown) => MockButtonComponent;
+    setButtonText: (text: string) => MockButtonComponent;
+    setCta: () => MockButtonComponent;
+    setDisabled: (disabled: boolean) => MockButtonComponent;
+}
+
+export interface MockDropdownComponent {
+    addOption: (value: string, display: string) => MockDropdownComponent;
+    onChange: (handler: (value: string) => unknown) => MockDropdownComponent;
+    options: Map<string, string>;
+    selectEl: HTMLSelectElement;
+    setValue: (value: string) => MockDropdownComponent;
+}
+
+export interface MockTextComponent {
+    inputEl: HTMLInputElement;
+    onChange: (handler: (value: string) => unknown) => MockTextComponent;
+    setPlaceholder: (placeholder: string) => MockTextComponent;
+    setValue: (value: string) => MockTextComponent;
+}
+
 export class PluginSettingTab {
     public app: unknown;
     public containerEl: HTMLElement;
@@ -56,7 +81,11 @@ export class PluginSettingTab {
     public constructor(app: unknown, plugin: unknown) {
         this.app = app;
         this.plugin = plugin;
-        this.containerEl = document.createElement("div");
+        const el: HTMLElement = document.createElement("div");
+        el.empty = (): void => {
+            el.replaceChildren();
+        };
+        this.containerEl = el;
     }
 
     public display(): void {
@@ -69,41 +98,114 @@ export class PluginSettingTab {
 }
 
 export class Setting {
+    public static instances: Setting[] = [];
+
+    public buttonComponent: MockButtonComponent | null = null;
+    public buttonOnClick: (() => unknown) | null = null;
+    public controlEl: HTMLElement;
+    public desc: string = "";
+    public descEl: HTMLElement;
+    public dropdownComponent: MockDropdownComponent | null = null;
+    public dropdownOnChange: ((value: string) => unknown) | null = null;
+    public isHeading: boolean = false;
+    public name: string = "";
+    public nameEl: HTMLElement;
     public settingEl: HTMLElement;
+    public textComponent: MockTextComponent | null = null;
+    public textOnChange: ((value: string) => unknown) | null = null;
 
     public constructor(containerEl: HTMLElement) {
         this.settingEl = document.createElement("div");
+        this.nameEl = document.createElement("div");
+        this.descEl = document.createElement("div");
+        this.controlEl = document.createElement("div");
+        this.settingEl.appendChild(this.nameEl);
+        this.settingEl.appendChild(this.descEl);
+        this.settingEl.appendChild(this.controlEl);
         containerEl.appendChild(this.settingEl);
+        Setting.instances.push(this);
     }
 
-    public addButton(cb: (button: unknown) => unknown): this {
-        const buttonObj = {
-            onClick: (_handler: () => unknown) => buttonObj,
-            setButtonText: (_text: string) => buttonObj,
-            setCta: () => buttonObj
+    public addButton(cb: (button: MockButtonComponent) => unknown): this {
+        const buttonEl: HTMLButtonElement = document.createElement("button");
+        this.controlEl.appendChild(buttonEl);
+        const buttonObj: MockButtonComponent = {
+            buttonEl,
+            cta: false,
+            disabled: false,
+            onClick: (handler: () => unknown): MockButtonComponent => {
+                this.buttonOnClick = handler;
+                return buttonObj;
+            },
+            setButtonText: (text: string): MockButtonComponent => {
+                buttonEl.textContent = text;
+                return buttonObj;
+            },
+            setCta: (): MockButtonComponent => {
+                buttonObj.cta = true;
+                buttonEl.classList.add("mod-cta");
+                return buttonObj;
+            },
+            setDisabled: (disabled: boolean): MockButtonComponent => {
+                buttonObj.disabled = disabled;
+                buttonEl.disabled = disabled;
+                return buttonObj;
+            }
         };
+        this.buttonComponent = buttonObj;
         cb(buttonObj);
         return this;
     }
 
-    public addDropdown(cb: (dropdown: unknown) => unknown): this {
-        const dropdownObj = {
-            addOption: (_value: string, _display: string) => dropdownObj,
-            onChange: (_handler: (value: string) => unknown) => dropdownObj,
-            setValue: (_value: string) => dropdownObj
+    public addDropdown(cb: (dropdown: MockDropdownComponent) => unknown): this {
+        const selectEl: HTMLSelectElement = document.createElement("select");
+        this.controlEl.appendChild(selectEl);
+        const options: Map<string, string> = new Map<string, string>();
+        const dropdownObj: MockDropdownComponent = {
+            addOption: (value: string, display: string): MockDropdownComponent => {
+                options.set(value, display);
+                const opt: HTMLOptionElement = document.createElement("option");
+                opt.value = value;
+                opt.textContent = display;
+                selectEl.appendChild(opt);
+                return dropdownObj;
+            },
+            onChange: (handler: (value: string) => unknown): MockDropdownComponent => {
+                this.dropdownOnChange = handler;
+                return dropdownObj;
+            },
+            options,
+            selectEl,
+            setValue: (value: string): MockDropdownComponent => {
+                selectEl.value = value;
+                return dropdownObj;
+            }
         };
+        this.dropdownComponent = dropdownObj;
         cb(dropdownObj);
         return this;
     }
 
-    public addText(cb: (text: unknown) => unknown): this {
+    public addText(cb: (text: MockTextComponent) => unknown): this {
         const inputEl: HTMLInputElement = document.createElement("input");
-        const textObj = {
+        inputEl.type = "text";
+        this.controlEl.appendChild(inputEl);
+        const textObj: MockTextComponent = {
             inputEl,
-            onChange: (_handler: (value: string) => unknown) => textObj,
-            setPlaceholder: (_placeholder: string) => textObj,
-            setValue: (_value: string) => textObj
+            onChange: (handler: (value: string) => unknown): MockTextComponent => {
+                this.textOnChange = handler;
+                return textObj;
+            },
+            setPlaceholder: (placeholder: string): MockTextComponent => {
+                inputEl.placeholder = placeholder;
+                return textObj;
+            },
+            setValue: (value: string): MockTextComponent => {
+                inputEl.value = value;
+                return textObj;
+            }
         };
+        this.textComponent = textObj;
         cb(textObj);
         return this;
     }
@@ -117,11 +219,20 @@ export class Setting {
         return this;
     }
 
-    public setDesc(_desc: string): this {
+    public setDesc(desc: string): this {
+        this.desc = desc;
+        this.descEl.textContent = desc;
         return this;
     }
 
-    public setName(_name: string): this {
+    public setHeading(): this {
+        this.isHeading = true;
+        return this;
+    }
+
+    public setName(name: string): this {
+        this.name = name;
+        this.nameEl.textContent = name;
         return this;
     }
 }

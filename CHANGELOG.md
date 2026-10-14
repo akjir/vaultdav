@@ -10,10 +10,12 @@ All notable changes to this project will be documented in this file.
 - Implement native `DOMParser` XML parser for WebDAV `207 Multi-Status` responses.
 - Implement local sync state store (`sync-state.json`) and 4-phase bidirectional synchronization engine with `keep_both` and `newest_wins` conflict resolution.
 - Add plugin settings tab, ribbon trigger, commands (`sync-now`, `test-connection`), and automatic synchronization interval.
+- Add `VaultDavSettingTab` unit tests (`tests/settings.test.ts`) and static `eslint-plugin-obsidianmd` compliance tests (`tests/obsidian_linter.test.ts`).
 
 ### Changed
 - Standardize plugin ID and package name to `vaultdav`.
 - Move static `Set` and `RegExp` instances to module scope to eliminate hot-path allocations.
+- Refactor `VaultDavSettingTab` to clear the DOM via `containerEl.empty()`, enforce strict Obsidian Sentence case labels, disable mobile auto-capitalization and spellcheck on technical inputs, normalize `remoteBaseDir`, and guard `Test connection` against concurrent clicks.
 
 ### Fixed
 - Prevent `/remote.php/dav/files/` duplication when the configured Nextcloud URL omits the trailing username segment.

@@ -10,10 +10,10 @@ Follow this checklist to prepare a deterministic Obsidian plugin release.
 ## 1. Pre-Release Verification Gate
 Run all verification checks before modifying version numbers:
 1. Run `npm run typecheck`.
-2. Run `npm test`.
+2. Run `npm test` (verify all unit, zero-dependency, and `tests/obsidian_linter.test.ts` Obsidian linter compliance checks pass).
 3. Run `npm run build`.
 4. Run `git status` to inspect modified or untracked files.
-If any test or build step fails, abort the release process immediately and report the error.
+If any test, linter check, or build step fails, abort the release process immediately and report the error.
 
 ## 2. Version Bump & Metadata Alignment
 When the target version `X.Y.Z` is specified:

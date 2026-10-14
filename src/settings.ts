@@ -1,6 +1,7 @@
 import { type App, PluginSettingTab, Setting } from "obsidian";
 import type VaultDavPlugin from "./main";
 import type { ConflictStrategy, VaultDavSettings } from "./types";
+import { util } from "./utilities";
 
 export const DEFAULT_SETTINGS: VaultDavSettings = {
     appPassword: "",
@@ -21,39 +22,49 @@ export class VaultDavSettingTab extends PluginSettingTab {
 
     public display(): void {
         const { containerEl } = this;
-        containerEl.innerHTML = "";
+        if (typeof containerEl.empty === "function") {
+            containerEl.empty();
+        } else {
+            containerEl.replaceChildren();
+        }
 
         new Setting(containerEl)
             .setName("Server URL")
             .setDesc("Nextcloud base URL or WebDAV endpoint (https://<domain>).")
-            .addText((text) =>
-                text
+            .addText((text) => {
+                text.inputEl.autocapitalize = "none";
+                text.inputEl.spellcheck = false;
+                return text
                     .setPlaceholder("https://cloud.example.com")
                     .setValue(this.pluginInstance.settings.url)
                     .onChange(async (value: string): Promise<void> => {
                         this.pluginInstance.settings.url = value.trim();
                         await this.pluginInstance.saveSettings();
-                    })
-            );
+                    });
+            });
 
         new Setting(containerEl)
             .setName("Username")
             .setDesc("Nextcloud account username.")
-            .addText((text) =>
-                text
+            .addText((text) => {
+                text.inputEl.autocapitalize = "none";
+                text.inputEl.spellcheck = false;
+                return text
                     .setPlaceholder("username")
                     .setValue(this.pluginInstance.settings.username)
                     .onChange(async (value: string): Promise<void> => {
                         this.pluginInstance.settings.username = value.trim();
                         await this.pluginInstance.saveSettings();
-                    })
-            );
+                    });
+            });
 
         new Setting(containerEl)
-            .setName("App Password")
-            .setDesc("Nextcloud App Password for HTTP Basic authentication.")
+            .setName("App password")
+            .setDesc("Nextcloud app password for HTTP Basic authentication.")
             .addText((text) => {
                 text.inputEl.type = "password";
+                text.inputEl.autocapitalize = "none";
+                text.inputEl.spellcheck = false;
                 return text
                     .setPlaceholder("xxxxx-xxxxx-xxxxx-xxxxx-xxxxx")
                     .setValue(this.pluginInstance.settings.appPassword)
@@ -64,35 +75,44 @@ export class VaultDavSettingTab extends PluginSettingTab {
             });
 
         new Setting(containerEl)
-            .setName("Remote Base Directory")
+            .setName("Remote base directory")
             .setDesc("Target remote folder path inside the Nextcloud user files root.")
-            .addText((text) =>
-                text
+            .addText((text) => {
+                text.inputEl.autocapitalize = "none";
+                text.inputEl.spellcheck = false;
+                return text
                     .setPlaceholder(this.app.vault.getName())
                     .setValue(this.pluginInstance.settings.remoteBaseDir)
                     .onChange(async (value: string): Promise<void> => {
-                        this.pluginInstance.settings.remoteBaseDir = value.trim();
+                        this.pluginInstance.settings.remoteBaseDir =
+                            util.normalizeVaultPath(value);
                         await this.pluginInstance.saveSettings();
-                    })
-            );
+                    });
+            });
 
         new Setting(containerEl)
-            .setName("Sync Interval")
+            .setName("Sync interval")
             .setDesc("Automatic synchronization interval in minutes (0 to disable).")
-            .addText((text) =>
-                text
+            .addText((text) => {
+                text.inputEl.type = "number";
+                text.inputEl.min = "0";
+                return text
                     .setPlaceholder("0")
                     .setValue(String(this.pluginInstance.settings.syncInterval))
                     .onChange(async (value: string): Promise<void> => {
-                        const parsed: number = Number.parseInt(value.trim(), 10);
+                        const trimmed: string = value.trim();
+                        const parsed: number =
+                            trimmed === "" ? Number.NaN : Number(trimmed);
                         this.pluginInstance.settings.syncInterval =
-                            !Number.isFinite(parsed) || parsed < 0 ? 0 : parsed;
+                            !Number.isFinite(parsed) || parsed < 0
+                                ? 0
+                                : Math.floor(parsed);
                         await this.pluginInstance.saveSettings();
-                    })
-            );
+                    });
+            });
 
         new Setting(containerEl)
-            .setName("Conflict Strategy")
+            .setName("Conflict strategy")
             .setDesc("Resolution mode for concurrent edits (keep_both or newest_wins).")
             .addDropdown((dropdown) =>
                 dropdown
@@ -108,14 +128,21 @@ export class VaultDavSettingTab extends PluginSettingTab {
             );
 
         new Setting(containerEl)
-            .setName("Test Connection")
+            .setName("Test connection")
             .setDesc("Verify Nextcloud WebDAV credentials and remote directory access.")
             .addButton((button) =>
                 button
                     .setButtonText("Test connection")
                     .setCta()
                     .onClick(async (): Promise<void> => {
-                        await this.pluginInstance.testConnection();
+                        button.setDisabled(true);
+                        button.setButtonText("Testing...");
+                        try {
+                            await this.pluginInstance.testConnection();
+                        } finally {
+                            button.setDisabled(false);
+                            button.setButtonText("Test connection");
+                        }
                     })
             );
     }

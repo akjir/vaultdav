@@ -20,9 +20,10 @@ Execute changes autonomously in this strict sequence until all checks pass with 
    - **Zero Hot-Path Allocations:** Define static `Set`, `Map`, and `RegExp` instances at module top-level (`UPPER_SNAKE_CASE`), never inside functions called per-file or per-request.
    - **Strict Path Boundary & Traversal Safety:** Always verify `/` or end-of-string boundaries when stripping URL/path prefixes. Reject any path containing `.` or `..` segments.
    - **Defensive Numeric Guards:** Validate numeric inputs (`timestamp`, `mtime`, `size`, `concurrency`) with `Number.isFinite()` before arithmetic or `Date` construction.
+   - **Obsidian Linter Compliance (`eslint-plugin-obsidianmd`):** Verify all changes against `no-inner-html`, `ui/sentence-case`, command naming (`no-plugin-id-in-command-id`, `no-plugin-name-in-command-name`, `no-default-hotkeys`), settings headings, and lifecycle registration (`registerInterval`, `registerEvent`, no `detachLeavesOfType` in `onunload`).
 3. **Run Closed-Loop Verification:**
    - Run `npm run typecheck` (must exit with 0 errors).
-   - Run `npm test` (all unit and zero-dependency tests must pass).
+   - Run `npm test` (all unit, zero-dependency, and `tests/obsidian_linter.test.ts` checks must pass).
    - Run `npm run build` (must bundle `main.js` cleanly via ESBuild `zero-external-dependencies` guard).
 4. **Self-Correction:** If any check fails, analyze the output, fix the root cause in `src/` or `tests/`, and re-run step 3 until all three checks pass.
 
