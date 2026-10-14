@@ -11,6 +11,10 @@ interface SourceFileEntry {
     relativePath: string;
 }
 
+const ADD_COMMAND_NAME_REGEX: RegExp =
+    /\.addCommand\(\s*\{[\s\S]*?\bname:\s*["']([^"']+)["']/g;
+const ADD_RIBBON_ICON_REGEX: RegExp =
+    /\.addRibbonIcon\(\s*["'][^"']+["']\s*,\s*["']([^"']+)["']/g;
 const ALLOWED_CAPITALIZED_WORDS: ReadonlySet<string> = new Set<string>([
     "Basic",
     "HTTP",
@@ -24,6 +28,7 @@ const FORBIDDEN_DOM_HTML_REGEX: RegExp = /\.(innerHTML|outerHTML|insertAdjacentH
 const FORBIDDEN_GLOBAL_NETWORK_REGEX: RegExp = /\b(fetch\s*\(|XMLHttpRequest\b)/;
 const FORBIDDEN_NODE_IMPORT_REGEX: RegExp =
     /from\s+["'](node:|fs\b|path\b|http\b|https\b|crypto\b)/;
+const LOG_NOTIFY_REGEX: RegExp = /\blog\.notify\(\s*["']([^"']+)["']/g;
 const MANUAL_HEADING_REGEX: RegExp = /\.createEl\(\s*["']h[1-6]["']/;
 const NON_ALPHA_STRIP_REGEX: RegExp = /^[^A-Za-z]+|[^A-Za-z]+$/g;
 const ONUNLOAD_BLOCK_REGEX: RegExp = /onunload\s*\([^)]*\)[^{]*\{([\s\S]*?)\n    \}/;
@@ -154,21 +159,36 @@ describe("Obsidian Plugin Linter static guard (eslint-plugin-obsidianmd)", () =>
         }
     });
 
-    it("enforces strict Obsidian Sentence case on all .setName() and .setButtonText() literals (ui/sentence-case)", () => {
+    it("enforces strict Obsidian Sentence case on UI literals (ui/sentence-case)", () => {
         expect(isSentenceCase("Server URL")).toBe(true);
         expect(isSentenceCase("App password")).toBe(true);
         expect(isSentenceCase("Remote base directory")).toBe(true);
         expect(isSentenceCase("Test connection")).toBe(true);
         expect(isSentenceCase("Testing...")).toBe(true);
+        expect(isSentenceCase("Synchronize with Nextcloud")).toBe(true);
+        expect(isSentenceCase("Configure server URL, username, and app password first.")).toBe(
+            true
+        );
         expect(isSentenceCase("App Password")).toBe(false);
         expect(isSentenceCase("Remote Base Directory")).toBe(false);
         expect(isSentenceCase("Sync Interval")).toBe(false);
         expect(isSentenceCase("Conflict Strategy")).toBe(false);
         expect(isSentenceCase("Test Connection")).toBe(false);
+        expect(isSentenceCase("VaultDAV: Synchronize now")).toBe(false);
+        expect(isSentenceCase("Configure Server URL, Username, and App Password first.")).toBe(
+            false
+        );
 
+        const uiLiteralRegexes: ReadonlyArray<RegExp> = [
+            ADD_COMMAND_NAME_REGEX,
+            ADD_RIBBON_ICON_REGEX,
+            LOG_NOTIFY_REGEX,
+            SET_BUTTON_TEXT_REGEX,
+            SET_NAME_REGEX
+        ];
         const extractedLiterals: string[] = [];
         for (const file of sourceFiles) {
-            for (const regex of [SET_NAME_REGEX, SET_BUTTON_TEXT_REGEX]) {
+            for (const regex of uiLiteralRegexes) {
                 regex.lastIndex = 0;
                 let match: RegExpExecArray | null = regex.exec(file.content);
                 while (match !== null) {
@@ -182,6 +202,12 @@ describe("Obsidian Plugin Linter static guard (eslint-plugin-obsidianmd)", () =>
                 }
             }
         }
-        expect(extractedLiterals.length).toBeGreaterThanOrEqual(8);
+        expect(extractedLiterals).toContain("Synchronize with Nextcloud");
+        expect(extractedLiterals).toContain("Synchronize now");
+        expect(extractedLiterals).toContain("Test Nextcloud WebDAV connection");
+        expect(extractedLiterals).toContain(
+            "Configure server URL, username, and app password first."
+        );
+        expect(extractedLiterals.length).toBeGreaterThanOrEqual(19);
     });
 });
