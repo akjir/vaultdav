@@ -1,0 +1,41 @@
+# VaultDAV AI Assistant Rules
+
+> [!IMPORTANT]
+> Update this file when the architecture or file names change.
+
+- **Goal:** Synchronize Obsidian vaults bidirectionally with Nextcloud via WebDAV.
+- **Zero External Dependencies:** Prohibit all runtime, peer, and optional dependencies (`package.json` must never contain `dependencies`, `peerDependencies`, or `optionalDependencies`). Restrict `devDependencies` strictly to `esbuild`, `happy-dom`, `obsidian`, `typescript`, and `vitest`. In `src/`, allow imports exclusively from `"obsidian"` and relative local modules (`./`, `../`). Prohibit all native Node.js modules (`fs`, `path`, `http`, `crypto`, `node:*`) and third-party npm packages.
+- **Core Rules:** Support Desktop and Mobile (`isDesktopOnly: false`). Support Nextcloud WebDAV only (no S3, Dropbox, OneDrive, or Google Drive). Edit modular files in `src/`. NEVER edit the bundled `main.js` directly.
+- **Version Control:** NEVER commit changes unless the user explicitly instructs you to do so.
+- **Language & Tone:** Write all responses, code, comments, documentation, tests, skills, and commits in English. Follow ASD-STE100 (80%). Be concise and precise. Do not use emojis.
+- **Style:** Indent with 4 spaces. Remove trailing spaces. Sort functions and methods alphabetically. Avoid globals. Initialize all variables explicitly (do not leave them implicitly `undefined`). Prohibit the `any` type.
+- **Reqs:** TypeScript 5.x (`strict: true`, `noImplicitAny: true`, `strictNullChecks: true`), ESBuild, Obsidian API (`>=1.5.0`).
+- **Testing (TDD):** Write comprehensive tests in `tests/` for every new feature, logic branch, XML parser routine, sync state transition, or bug fix.
+- **Docs & Metadata:** Keep `README.md`, `manifest.json`, and `versions.json` in sync with code changes per **`update-documentation`**.
+- **Changelog:** Follow **`vaultdav-dev-workflow`** rules for `CHANGELOG.md`.
+- **Efficiency:** Optimize for token efficiency. Avoid redundant information across code, docs, rules, and skills.
+
+## Architecture & Naming
+- `src/main.ts`: Plugin lifecycle (`onload`, `onunload`), commands, ribbon icon, auto-sync interval registration.
+- `src/settings.ts`: `VaultDavSettingTab` and settings persistence (`URL`, `username`, `appPassword`, `remoteBaseDir`, `syncInterval`, `conflictStrategy`).
+- `src/types.ts`: Strict TypeScript interfaces and type definitions (`VaultDavSettings`, `RemoteItem`, `SyncStateRecord`, `SyncAction`, `SyncPlan`).
+- `src/log.ts`: `log.*` logging utilities (includes `log.debugEnabled`) and user notifications via Obsidian `Notice`.
+- `src/utilities.ts`: `util.*` helper functions (path normalization via Obsidian `normalizePath`, Base64 encoding, concurrency queue).
+- `src/webdav/client.ts`: WebDAV protocol client (`PROPFIND`, `GET`, `PUT`, `MKCOL`, `DELETE`).
+- `src/webdav/xml_parser.ts`: Native `DOMParser` routines for WebDAV `207 Multi-Status` XML responses (`d:href`, `d:getlastmodified`, `d:getcontentlength`, `d:getetag`, `d:resourcetype`).
+- `src/sync/state.ts`: Local metadata index persistence (`localMtime`, `remoteMtime`, `etag`, `size`, `lastSyncTime`) to track deletions (tombstones) and modifications.
+- `src/sync/engine.ts`: Bidirectional delta calculation, conflict resolution (`keep_both` or `newest_wins`), and rate-limited execution queue.
+
+## Technical Constraints
+- **Network & CORS:** Execute all HTTP/WebDAV requests exclusively via Obsidian `requestUrl`. Do not use `fetch`, `XMLHttpRequest`, or external HTTP libraries.
+- **Binary Safety:** Transfer all file payloads (`GET` and `PUT`) as `ArrayBuffer` with `Content-Type: application/octet-stream` to prevent encoding corruption.
+- **File System:** Execute all local file operations via `app.vault.adapter` (`DataAdapter`) and `app.vault`.
+- **Authentication:** Use HTTP Basic Auth (`Authorization: Basic <base64>`) with Nextcloud username and App Password against `https://<domain>/remote.php/dav/files/<user>/<remote-base-dir>/`.
+- **Concurrency & Locks:** Limit parallel WebDAV transfers (max 3-5 concurrent requests) to prevent Nextcloud rate limits and `423 Locked` (`Sabre\DAV\Exception\Locked`) errors.
+- **Exclusions:** Exclude the local sync state file and `.obsidian/workspace*.json` from synchronization to prevent infinite sync loops.
+
+## Workflows
+- Proposals: Use **`proposal-workflow`** to manage `.agents/proposals/`.
+- Development & Build: Use **`vaultdav-dev-workflow`** to build, test, and develop.
+- Documentation: Use **`update-documentation`** to update `README.md`, `manifest.json`, and `versions.json`.
+- Release: Use **`vaultdav-release`** to create official releases.

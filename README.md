@@ -1,2 +1,38 @@
-# vaultdav
-VaultDAV
+# VaultDAV
+
+Synchronize Obsidian vaults bidirectionally with Nextcloud via WebDAV.
+
+## Nextcloud Setup
+
+1. Open Nextcloud and go to **Settings > Security > Devices & sessions**.
+2. Enter a device name (for example, `Obsidian VaultDAV`) and click **Create new app password**.
+3. Copy the generated App Password.
+4. Configure the WebDAV endpoint using the Nextcloud URL format:
+   `https://<domain>/remote.php/dav/files/<user>/<remote-base-dir>/`
+
+## Settings
+
+| Setting | Property (`VaultDavSettings`) | Description |
+| :--- | :--- | :--- |
+| Server URL | `url` | Nextcloud base URL or WebDAV endpoint (`https://<domain>`). |
+| Username | `username` | Nextcloud account username. |
+| App Password | `appPassword` | Nextcloud App Password for HTTP Basic authentication. |
+| Remote Base Directory | `remoteBaseDir` | Target remote folder path inside the Nextcloud user files root. |
+| Sync Interval | `syncInterval` | Automatic synchronization interval in minutes (`0` to disable). |
+| Conflict Strategy | `conflictStrategy` | Resolution mode for concurrent edits (`keep_both` or `newest_wins`). |
+
+## Sync Behavior
+
+- Transfers files as binary payloads (`ArrayBuffer`) over Obsidian `requestUrl`.
+- Tracks local and remote modification times and ETags to detect creations, modifications, and deletions (tombstones).
+- Excludes the local sync state file and `.obsidian/workspace*.json` to prevent sync loops.
+
+## Development & Build
+
+```bash
+npm install
+npm run typecheck
+npm test
+npm run build
+npm run dev
+```

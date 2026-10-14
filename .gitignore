@@ -1,0 +1,11 @@
+# Dependencies
+node_modules/
+
+# Build and runtime artifacts
+main.js
+main.js.map
+data.json
+
+# OS-specific artifacts
+.DS_Store
+Thumbs.db
