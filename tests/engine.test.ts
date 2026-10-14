@@ -1,5 +1,6 @@
 import type { DataAdapter, ListedFiles, Stat, Vault } from "obsidian";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { log } from "../src/log";
 import {
     SyncEngine,
     buildSyncPlan,
@@ -555,5 +556,297 @@ describe("SyncEngine delta calculation and execution", () => {
                 size: 0
             }
         ]);
+    });
+
+    it("batches stateStore.save calls once per depth-level phase and once after 10 concurrent transfers", async () => {
+        const t0: number = Date.UTC(2026, 9, 14, 20, 0, 0);
+        const textFiles: Map<string, string> = new Map<string, string>();
+
+        const adapter: Partial<DataAdapter> = {
+            exists: async (p: string): Promise<boolean> =>
+                textFiles.has(p) || !p.endsWith("sync-state.json"),
+            mkdir: async (): Promise<void> => undefined,
+            read: async (p: string): Promise<string> => textFiles.get(p) ?? "",
+            readBinary: async (): Promise<ArrayBuffer> => new Uint8Array([1, 2, 3]).buffer,
+            stat: async (): Promise<Stat | null> => ({
+                ctime: t0,
+                mtime: t0,
+                size: 3,
+                type: "file"
+            }),
+            write: async (p: string, d: string): Promise<void> => {
+                textFiles.set(p, d);
+            },
+            writeBinary: async (): Promise<void> => undefined
+        };
+
+        const mockClient: Partial<WebDavClient> = {
+            createDirectory: async (): Promise<void> => undefined,
+            downloadFile: async (): Promise<ArrayBuffer> => new Uint8Array([4, 5, 6]).buffer,
+            uploadFile: async (
+                p: string,
+                content: ArrayBuffer,
+                mtime: number
+            ): Promise<RemoteItem> => makeRemote(p, mtime, content.byteLength, `etag-${p}`)
+        };
+
+        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+        await stateStore.load();
+        const saveSpy = vi.spyOn(stateStore, "save");
+
+        const localItems: LocalItem[] = [
+            makeLocal("DirA", t0, 0, true),
+            makeLocal("DirA/Sub1", t0, 0, true),
+            makeLocal("DirB", t0, 0, true),
+            makeLocal("DirB/Sub2", t0, 0, true)
+        ];
+        const remoteItems: RemoteItem[] = [];
+
+        for (let i: number = 0; i < 5; i += 1) {
+            localItems.push(makeLocal(`DirA/Sub1/up-${i}.md`, t0, 3, false));
+            remoteItems.push(
+                makeRemote(`DirB/Sub2/down-${i}.md`, t0, 3, `etag-down-${i}`, false)
+            );
+        }
+
+        const plan: SyncPlan = buildSyncPlan(localItems, remoteItems, {}, t0);
+        const engine: SyncEngine = new SyncEngine(
+            { adapter: adapter as DataAdapter } as Vault,
+            mockClient as WebDavClient,
+            stateStore,
+            {
+                appPassword: "pw",
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        const result = await engine.executePlan(plan, localItems, remoteItems);
+        expect(result.uploaded).toBe(5);
+        expect(result.downloaded).toBe(5);
+        expect(result.errors).toEqual([]);
+        // 2 directory creation depth levels (depth 0 and depth 1) + 1 save after 10 concurrent transfers = 3 saves total
+        expect(saveSpy).toHaveBeenCalledTimes(3);
+
+        saveSpy.mockClear();
+        const transferOnlyActions: SyncAction[] = plan.actions.filter(
+            (a: SyncAction) => a.type === "upload" || a.type === "download"
+        );
+        expect(transferOnlyActions.length).toBe(10);
+
+        await engine.executePlan(
+            { actions: transferOnlyActions, timestamp: t0 },
+            localItems,
+            remoteItems
+        );
+        expect(saveSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("handles adapter.list errors in walkLocal by logging a warning and continuing sibling traversal", async () => {
+        const warnSpy = vi.spyOn(log, "warn").mockImplementation((): void => undefined);
+        const permissionError: Error = new Error("EACCES: permission denied");
+
+        const adapter: Partial<DataAdapter> = {
+            list: async (dir: string): Promise<ListedFiles> => {
+                if (dir === "") {
+                    return {
+                        files: ["root.md"],
+                        folders: ["RestrictedDir", "SiblingDir"]
+                    };
+                }
+                if (dir === "RestrictedDir") {
+                    throw permissionError;
+                }
+                if (dir === "SiblingDir") {
+                    return {
+                        files: ["SiblingDir/note.md"],
+                        folders: []
+                    };
+                }
+                return { files: [], folders: [] };
+            },
+            stat: async (p: string): Promise<Stat | null> => ({
+                ctime: 1000,
+                mtime: 1000,
+                size: p.endsWith(".md") ? 42 : 0,
+                type: p.endsWith(".md") ? "file" : "folder"
+            })
+        };
+
+        const engine: SyncEngine = new SyncEngine(
+            { adapter: adapter as DataAdapter } as Vault,
+            {} as WebDavClient,
+            new SyncStateStore(adapter as DataAdapter),
+            {
+                appPassword: "pw",
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        try {
+            const items: LocalItem[] = await engine.walkLocal();
+            const discoveredPaths: string[] = items.map((i: LocalItem) => i.path);
+
+            expect(warnSpy).toHaveBeenCalledWith(
+                "Failed to list directory RestrictedDir",
+                permissionError
+            );
+            expect(discoveredPaths).toEqual([
+                "RestrictedDir",
+                "SiblingDir",
+                "root.md",
+                "SiblingDir/note.md"
+            ]);
+        } finally {
+            warnSpy.mockRestore();
+        }
+    });
+
+    it("calls adapter.rmdir(path, false) in deleteLocalItem and bubbles up directory not empty errors", async () => {
+        const rmdirCalls: Array<{ path: string; recursive: boolean }> = [];
+
+        const adapter: Partial<DataAdapter> = {
+            exists: async (): Promise<boolean> => true,
+            rmdir: async (path: string, recursive: boolean): Promise<void> => {
+                rmdirCalls.push({ path, recursive });
+                if (path === "NonEmptyDir" && !recursive) {
+                    throw new Error("ENOTEMPTY: Directory not empty");
+                }
+            }
+        };
+
+        const engine: SyncEngine = new SyncEngine(
+            { adapter: adapter as DataAdapter } as Vault,
+            {} as WebDavClient,
+            new SyncStateStore(adapter as DataAdapter),
+            {
+                appPassword: "pw",
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        await engine.deleteLocalItem("EmptyDir", true);
+        expect(rmdirCalls).toEqual([{ path: "EmptyDir", recursive: false }]);
+
+        await expect(engine.deleteLocalItem("NonEmptyDir", true)).rejects.toThrow(
+            "Directory not empty"
+        );
+        expect(rmdirCalls).toEqual([
+            { path: "EmptyDir", recursive: false },
+            { path: "NonEmptyDir", recursive: false }
+        ]);
+    });
+
+    it("registers planned conflictCopyPath in existingPaths so concurrent transfers cannot overwrite it", async () => {
+        const t1: number = Date.UTC(2026, 9, 14, 19, 0, 0);
+        const textFiles: Map<string, string> = new Map<string, string>();
+        const uploadedConflictPaths: string[] = [];
+
+        const localItems: LocalItem[] = [makeLocal("Note.md", t1, 10, false)];
+        const remoteItems: RemoteItem[] = [
+            makeRemote("Note.md", t1 + 1000, 20, "etag-remote", false)
+        ];
+
+        const plan: SyncPlan = buildSyncPlan(localItems, remoteItems, {}, t1);
+        const plannedAction: SyncAction | undefined = plan.actions.find(
+            (a: SyncAction) => a.path === "Note.md" && a.type === "conflict"
+        );
+        const reservedConflictPath: string = "Note.conflict-20261014-190000.md";
+        expect(plannedAction?.conflictCopyPath).toBe(reservedConflictPath);
+
+        // Prepend an unreserved concurrent conflict action for the same base file
+        plan.actions.unshift({
+            depth: 0,
+            isDirectory: false,
+            path: "Note.md",
+            type: "conflict"
+        });
+
+        const adapter: Partial<DataAdapter> = {
+            exists: async (p: string): Promise<boolean> =>
+                textFiles.has(p) || !p.endsWith("sync-state.json"),
+            read: async (p: string): Promise<string> => textFiles.get(p) ?? "",
+            readBinary: async (): Promise<ArrayBuffer> =>
+                new TextEncoder().encode("local-data").buffer,
+            stat: async (): Promise<Stat | null> => ({
+                ctime: t1,
+                mtime: t1,
+                size: 10,
+                type: "file"
+            }),
+            write: async (p: string, d: string): Promise<void> => {
+                textFiles.set(p, d);
+            },
+            writeBinary: async (): Promise<void> => undefined
+        };
+
+        const mockClient: Partial<WebDavClient> = {
+            downloadFile: async (): Promise<ArrayBuffer> =>
+                new TextEncoder().encode("remote-data").buffer,
+            uploadFile: async (
+                p: string,
+                content: ArrayBuffer,
+                mtime: number
+            ): Promise<RemoteItem> => {
+                uploadedConflictPaths.push(p);
+                return makeRemote(p, mtime, content.byteLength, `etag-${p}`);
+            }
+        };
+
+        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+        await stateStore.load();
+        const engine: SyncEngine = new SyncEngine(
+            { adapter: adapter as DataAdapter } as Vault,
+            mockClient as WebDavClient,
+            stateStore,
+            {
+                appPassword: "pw",
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        let initialHasReservedPath: boolean = false;
+        const originalExecuteConflict = engine.executeConflict.bind(engine);
+        vi.spyOn(engine, "executeConflict").mockImplementation(
+            async (
+                action: SyncAction,
+                localMap: ReadonlyMap<string, LocalItem>,
+                remoteMap: ReadonlyMap<string, RemoteItem>,
+                existingPaths: Set<string>,
+                now: number
+            ): Promise<void> => {
+                if (existingPaths.has(reservedConflictPath)) {
+                    initialHasReservedPath = true;
+                }
+                await originalExecuteConflict(
+                    action,
+                    localMap,
+                    remoteMap,
+                    existingPaths,
+                    now
+                );
+            }
+        );
+
+        await engine.executePlan(plan, localItems, remoteItems);
+
+        expect(initialHasReservedPath).toBe(true);
+        expect(uploadedConflictPaths).not.toContain(reservedConflictPath);
+        expect(uploadedConflictPaths).toContain("Note.conflict-20261014-190000-2.md");
     });
 });

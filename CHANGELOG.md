@@ -26,3 +26,4 @@ All notable changes to this project will be documented in this file.
 - Guard timestamps, file sizes, modification times, notice durations, and concurrency limits with `Number.isFinite()`.
 - Harden WebDAV XML parsing to validate the `multistatus` root element, support `HTTP/2 200` status lines and multi-`propstat` `200` blocks, deduplicate response paths, and eliminate hot-path child lookup allocations.
 - Harden `WebDavClient` with root-path mutation guards, retry and directory verification in `ensureRemoteBaseDir`, precomputed Basic auth headers, non-empty ETag header extraction, and BFS cycle/duplicate protection in `walkRemote`.
+- Harden `SyncEngine` to batch state saves after concurrent transfer phases, guard local directory traversal against permission errors, use non-recursive folder deletion to protect untracked files, and reserve planned conflict paths before execution.

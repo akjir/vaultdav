@@ -352,7 +352,7 @@ export class SyncEngine {
             return;
         }
         if (isDirectory) {
-            await this.vault.adapter.rmdir(path, true);
+            await this.vault.adapter.rmdir(path, false);
         } else {
             await this.vault.adapter.remove(path);
         }
@@ -497,7 +497,10 @@ export class SyncEngine {
         );
         const existingPaths: Set<string> = new Set<string>([
             ...localMap.keys(),
-            ...remoteMap.keys()
+            ...remoteMap.keys(),
+            ...plan.actions
+                .map((a: SyncAction) => a.conflictCopyPath)
+                .filter((p): p is string => p !== undefined && p !== "")
         ]);
 
         const result: SyncResult = {
@@ -671,7 +674,6 @@ export class SyncEngine {
                         );
                         result.conflictsResolved += 1;
                     }
-                    await this.stateStore.save();
                 } catch (err: unknown) {
                     const msg: string =
                         err instanceof Error ? err.message : String(err);
@@ -682,6 +684,7 @@ export class SyncEngine {
         );
         if (transferTasks.length > 0) {
             await util.runConcurrent(transferTasks, TRANSFER_CONCURRENCY);
+            await this.stateStore.save();
         }
 
         return result;
@@ -744,7 +747,12 @@ export class SyncEngine {
             const batchLists: ListedFiles[] = await util.runConcurrent(
                 currentBatch.map(
                     (dirPath: string) => async (): Promise<ListedFiles> => {
-                        return await this.vault.adapter.list(dirPath);
+                        try {
+                            return await this.vault.adapter.list(dirPath);
+                        } catch (err: unknown) {
+                            log.warn(`Failed to list directory ${dirPath}`, err);
+                            return { files: [], folders: [] };
+                        }
                     }
                 ),
                 TRANSFER_CONCURRENCY
