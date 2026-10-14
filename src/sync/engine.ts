@@ -68,9 +68,6 @@ export function buildSyncPlan(
         }
         stateMap.set(norm, { ...record, path: norm });
         allPathsSet.add(norm);
-        if (record.isDirectory) {
-            directoryPaths.add(norm);
-        }
     }
 
     const sortedPaths: string[] = Array.from(allPathsSet).sort(
@@ -103,11 +100,30 @@ export function buildSyncPlan(
         const remote: RemoteItem | undefined = remoteMap.get(path);
         const state: SyncStateRecord | undefined = stateMap.get(path);
         const depth: number = util.getPathDepth(path);
+
+        if (
+            (local !== undefined &&
+                remote !== undefined &&
+                local.isDirectory !== remote.isDirectory) ||
+            (local !== undefined && !local.isDirectory && directoryPaths.has(path)) ||
+            (remote !== undefined && !remote.isDirectory && directoryPaths.has(path))
+        ) {
+            log.warn(`Skipping path with file/directory type conflict: ${path}`);
+            markParentKept(path);
+            actions.push({
+                depth,
+                isDirectory: Boolean(local?.isDirectory || remote?.isDirectory),
+                path,
+                type: "noop"
+            });
+            continue;
+        }
+
         const isDirectory: boolean =
             directoryPaths.has(path) ||
             Boolean(local?.isDirectory) ||
             Boolean(remote?.isDirectory) ||
-            Boolean(state?.isDirectory);
+            (local === undefined && remote === undefined && Boolean(state?.isDirectory));
 
         if (isDirectory) {
             if (keptFolders.has(path)) {
@@ -284,7 +300,7 @@ export function buildSyncPlan(
 }
 
 export function isLocalModified(local: LocalItem, state: SyncStateRecord): boolean {
-    if (local.size !== state.size) {
+    if (local.isDirectory !== state.isDirectory || local.size !== state.size) {
         return true;
     }
     return (
@@ -302,6 +318,9 @@ export function isMetadataEqual(local: LocalItem, remote: RemoteItem): boolean {
 }
 
 export function isRemoteModified(remote: RemoteItem, state: SyncStateRecord): boolean {
+    if (remote.isDirectory !== state.isDirectory) {
+        return true;
+    }
     if (remote.etag !== "" && state.etag !== "") {
         return remote.etag !== state.etag || remote.size !== state.size;
     }
@@ -316,6 +335,7 @@ export function isRemoteModified(remote: RemoteItem, state: SyncStateRecord): bo
 
 export class SyncEngine {
     private readonly client: WebDavClient;
+    private readonly planReservedConflictPaths: Set<string> = new Set<string>();
     private readonly settings: VaultDavSettings;
     private readonly stateStore: SyncStateStore;
     private readonly vault: Vault;
@@ -333,7 +353,11 @@ export class SyncEngine {
     }
 
     public async createLocalDirectory(path: string): Promise<void> {
-        const levels: string[] = util.getFolderLevels(path, true);
+        const normalizedPath: string = util.normalizeVaultPath(path);
+        if (normalizedPath === "" || util.isExcludedPath(normalizedPath)) {
+            throw new Error(`Local mkdir refused on invalid or excluded path: ${path}`);
+        }
+        const levels: string[] = util.getFolderLevels(normalizedPath, true);
         for (const folder of levels) {
             const exists: boolean = await this.vault.adapter.exists(folder);
             if (!exists) {
@@ -343,18 +367,30 @@ export class SyncEngine {
     }
 
     public async deleteLocalItem(path: string, isDirectory: boolean): Promise<void> {
-        const exists: boolean = await this.vault.adapter.exists(path);
+        const normalizedPath: string = util.normalizeVaultPath(path);
+        if (normalizedPath === "" || util.isExcludedPath(normalizedPath)) {
+            throw new Error(`Local delete refused on invalid or excluded path: ${path}`);
+        }
+        const exists: boolean = await this.vault.adapter.exists(normalizedPath);
         if (!exists) {
             return;
         }
+        if (isDirectory && typeof this.vault.adapter.list === "function") {
+            const listed: ListedFiles = await this.vault.adapter.list(normalizedPath);
+            if (listed.files.length > 0 || listed.folders.length > 0) {
+                throw new Error(
+                    `ENOTEMPTY: Local directory not empty: ${normalizedPath}`
+                );
+            }
+        }
         if (typeof this.vault.adapter.trashLocal === "function") {
-            await this.vault.adapter.trashLocal(path);
+            await this.vault.adapter.trashLocal(normalizedPath);
             return;
         }
         if (isDirectory) {
-            await this.vault.adapter.rmdir(path, false);
+            await this.vault.adapter.rmdir(normalizedPath, false);
         } else {
-            await this.vault.adapter.remove(path);
+            await this.vault.adapter.remove(normalizedPath);
         }
     }
 
@@ -365,8 +401,14 @@ export class SyncEngine {
         existingPaths: Set<string>,
         now: number
     ): Promise<void> {
-        const local: LocalItem | undefined = localMap.get(action.path);
-        const remote: RemoteItem | undefined = remoteMap.get(action.path);
+        const normalizedPath: string = util.normalizeVaultPath(action.path);
+        if (normalizedPath === "" || util.isExcludedPath(normalizedPath)) {
+            throw new Error(
+                `Conflict resolution refused on invalid or excluded path: ${action.path}`
+            );
+        }
+        const local: LocalItem | undefined = localMap.get(normalizedPath);
+        const remote: RemoteItem | undefined = remoteMap.get(normalizedPath);
         if (local === undefined || remote === undefined) {
             return;
         }
@@ -376,17 +418,17 @@ export class SyncEngine {
                 util.toSecondPrecision(local.mtime) >=
                 util.toSecondPrecision(remote.mtime)
             ) {
-                await this.executeUpload(action.path, localMap, now);
+                await this.executeUpload(normalizedPath, localMap, now);
             } else {
-                await this.executeDownload(action.path, remoteMap, now);
+                await this.executeDownload(normalizedPath, remoteMap, now);
             }
             return;
         }
 
         const [localBuffer, remoteBuffer]: [ArrayBuffer, ArrayBuffer] =
             await Promise.all([
-                this.vault.adapter.readBinary(action.path),
-                this.client.downloadFile(action.path)
+                this.vault.adapter.readBinary(normalizedPath),
+                this.client.downloadFile(normalizedPath)
             ]);
 
         if (
@@ -398,18 +440,23 @@ export class SyncEngine {
                 isDirectory: false,
                 lastSyncTime: now,
                 localMtime: local.mtime,
-                path: action.path,
+                path: normalizedPath,
                 remoteMtime: remote.mtime,
                 size: remoteBuffer.byteLength
             });
             return;
         }
 
-        const conflictPath: string =
+        const canUsePlannedConflictPath: boolean =
             action.conflictCopyPath !== undefined &&
-            !existingPaths.has(action.conflictCopyPath)
+            action.conflictCopyPath !== "" &&
+            !util.isExcludedPath(action.conflictCopyPath) &&
+            (!existingPaths.has(action.conflictCopyPath) ||
+                this.planReservedConflictPaths.delete(action.conflictCopyPath));
+        const conflictPath: string =
+            canUsePlannedConflictPath && action.conflictCopyPath !== undefined
                 ? action.conflictCopyPath
-                : util.getConflictPath(action.path, now, existingPaths);
+                : util.getConflictPath(normalizedPath, now, existingPaths);
         existingPaths.add(conflictPath);
 
         const parentDir: string = util.getParentPath(conflictPath);
@@ -438,17 +485,17 @@ export class SyncEngine {
             size: localBuffer.byteLength
         });
 
-        await this.vault.adapter.writeBinary(action.path, remoteBuffer, {
+        await this.vault.adapter.writeBinary(normalizedPath, remoteBuffer, {
             mtime: remote.mtime
         });
-        const mainStat: Stat | null = await this.vault.adapter.stat(action.path);
+        const mainStat: Stat | null = await this.vault.adapter.stat(normalizedPath);
 
         this.stateStore.upsertRecord({
             etag: remote.etag,
             isDirectory: false,
             lastSyncTime: now,
             localMtime: mainStat?.mtime ?? remote.mtime,
-            path: action.path,
+            path: normalizedPath,
             remoteMtime: remote.mtime,
             size: remoteBuffer.byteLength
         });
@@ -459,25 +506,29 @@ export class SyncEngine {
         remoteMap: ReadonlyMap<string, RemoteItem>,
         now: number
     ): Promise<void> {
-        const remote: RemoteItem | undefined = remoteMap.get(path);
-        const content: ArrayBuffer = await this.client.downloadFile(path);
-        const parentDir: string = util.getParentPath(path);
+        const normalizedPath: string = util.normalizeVaultPath(path);
+        if (normalizedPath === "" || util.isExcludedPath(normalizedPath)) {
+            throw new Error(`Download refused on invalid or excluded path: ${path}`);
+        }
+        const remote: RemoteItem | undefined = remoteMap.get(normalizedPath);
+        const content: ArrayBuffer = await this.client.downloadFile(normalizedPath);
+        const parentDir: string = util.getParentPath(normalizedPath);
         if (parentDir !== "") {
             await this.createLocalDirectory(parentDir);
         }
 
         const targetMtime: number = remote?.mtime ?? now;
-        await this.vault.adapter.writeBinary(path, content, {
+        await this.vault.adapter.writeBinary(normalizedPath, content, {
             mtime: targetMtime
         });
-        const localStat: Stat | null = await this.vault.adapter.stat(path);
+        const localStat: Stat | null = await this.vault.adapter.stat(normalizedPath);
 
         this.stateStore.upsertRecord({
             etag: remote?.etag ?? "",
             isDirectory: false,
             lastSyncTime: now,
             localMtime: localStat?.mtime ?? targetMtime,
-            path,
+            path: normalizedPath,
             remoteMtime: targetMtime,
             size: content.byteLength
         });
@@ -495,13 +546,21 @@ export class SyncEngine {
         const remoteMap: Map<string, RemoteItem> = new Map<string, RemoteItem>(
             remoteItems.map((i: RemoteItem) => [util.normalizeVaultPath(i.path), i])
         );
+        this.planReservedConflictPaths.clear();
         const existingPaths: Set<string> = new Set<string>([
             ...localMap.keys(),
-            ...remoteMap.keys(),
-            ...plan.actions
-                .map((a: SyncAction) => a.conflictCopyPath)
-                .filter((p): p is string => p !== undefined && p !== "")
+            ...remoteMap.keys()
         ]);
+        for (const action of plan.actions) {
+            if (
+                action.conflictCopyPath !== undefined &&
+                action.conflictCopyPath !== "" &&
+                !existingPaths.has(action.conflictCopyPath)
+            ) {
+                existingPaths.add(action.conflictCopyPath);
+                this.planReservedConflictPaths.add(action.conflictCopyPath);
+            }
+        }
 
         const result: SyncResult = {
             conflictsResolved: 0,
@@ -526,7 +585,8 @@ export class SyncEngine {
                 if (
                     existing === undefined &&
                     local !== undefined &&
-                    remote !== undefined
+                    remote !== undefined &&
+                    local.isDirectory === remote.isDirectory
                 ) {
                     this.stateStore.upsertRecord({
                         etag: remote.etag,
@@ -695,11 +755,15 @@ export class SyncEngine {
         localMap: ReadonlyMap<string, LocalItem>,
         now: number
     ): Promise<void> {
-        const local: LocalItem | undefined = localMap.get(path);
-        const content: ArrayBuffer = await this.vault.adapter.readBinary(path);
+        const normalizedPath: string = util.normalizeVaultPath(path);
+        if (normalizedPath === "" || util.isExcludedPath(normalizedPath)) {
+            throw new Error(`Upload refused on invalid or excluded path: ${path}`);
+        }
+        const local: LocalItem | undefined = localMap.get(normalizedPath);
+        const content: ArrayBuffer = await this.vault.adapter.readBinary(normalizedPath);
         const localMtime: number = local?.mtime ?? now;
         const remoteItem: RemoteItem = await this.client.uploadFile(
-            path,
+            normalizedPath,
             content,
             localMtime
         );
@@ -709,7 +773,7 @@ export class SyncEngine {
             isDirectory: false,
             lastSyncTime: now,
             localMtime,
-            path,
+            path: normalizedPath,
             remoteMtime: remoteItem.mtime,
             size: content.byteLength
         });
@@ -738,6 +802,8 @@ export class SyncEngine {
 
     public async walkLocal(): Promise<LocalItem[]> {
         const discovered: LocalItem[] = [];
+        const seenPaths: Set<string> = new Set<string>();
+        const visitedDirs: Set<string> = new Set<string>([""]);
         let queue: string[] = [""];
 
         while (queue.length > 0) {
@@ -750,8 +816,8 @@ export class SyncEngine {
                         try {
                             return await this.vault.adapter.list(dirPath);
                         } catch (err: unknown) {
-                            log.warn(`Failed to list directory ${dirPath}`, err);
-                            return { files: [], folders: [] };
+                            log.error(`Failed to list directory ${dirPath}`, err);
+                            throw err;
                         }
                     }
                 ),
@@ -761,9 +827,16 @@ export class SyncEngine {
             for (const listed of batchLists) {
                 for (const folderRaw of listed.folders) {
                     const folderPath: string = util.normalizeVaultPath(folderRaw);
-                    if (util.isExcludedPath(folderPath)) {
+                    const depth: number = util.getPathDepth(folderPath);
+                    if (
+                        folderPath === "" ||
+                        util.isExcludedPath(folderPath) ||
+                        seenPaths.has(folderPath) ||
+                        depth > util.MAX_WALK_DEPTH
+                    ) {
                         continue;
                     }
+                    seenPaths.add(folderPath);
                     const stat: Stat | null = await this.vault.adapter.stat(folderPath);
                     const mtime: number =
                         stat !== null && Number.isFinite(stat.mtime) && stat.mtime > 0
@@ -780,18 +853,28 @@ export class SyncEngine {
                         path: folderPath,
                         size: 0
                     });
-                    queue.push(folderPath);
+                    if (!visitedDirs.has(folderPath) && depth < util.MAX_WALK_DEPTH) {
+                        visitedDirs.add(folderPath);
+                        queue.push(folderPath);
+                    }
                 }
 
                 for (const fileRaw of listed.files) {
                     const filePath: string = util.normalizeVaultPath(fileRaw);
-                    if (util.isExcludedPath(filePath)) {
+                    const depth: number = util.getPathDepth(filePath);
+                    if (
+                        filePath === "" ||
+                        util.isExcludedPath(filePath) ||
+                        seenPaths.has(filePath) ||
+                        depth > util.MAX_WALK_DEPTH
+                    ) {
                         continue;
                     }
                     const stat: Stat | null = await this.vault.adapter.stat(filePath);
                     if (stat === null) {
                         continue;
                     }
+                    seenPaths.add(filePath);
                     const safeMtime: number =
                         Number.isFinite(stat.mtime) && stat.mtime > 0 ? stat.mtime : 0;
                     const safeCtime: number =

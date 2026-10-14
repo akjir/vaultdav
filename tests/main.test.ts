@@ -313,6 +313,20 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         expect(notifySpy).toHaveBeenLastCalledWith(
             "Connection failed: raw string failure"
         );
+
+        const { plugin: emptyNamePlugin } = createTestPlugin("..");
+        emptyNamePlugin.settings = createConfiguredSettings({ remoteBaseDir: ".." });
+        checkSpy.mockImplementationOnce(
+            async function (this: WebDavClient): Promise<boolean> {
+                capturedBaseUrl = this.buildResourceUrl("", false);
+                return true;
+            }
+        );
+        const fallbackVaultDavResult: boolean = await emptyNamePlugin.testConnection();
+        expect(fallbackVaultDavResult).toBe(true);
+        expect(capturedBaseUrl).toBe(
+            "https://cloud.example.com/remote.php/dav/files/alice/VaultDAV"
+        );
     });
 
     it("guards concurrent runs, checks configuration, reports SyncResult summaries, and resets isSyncing in triggerSync()", async () => {

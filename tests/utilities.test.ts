@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { log } from "../src/log";
 import {
+    MAX_WALK_DEPTH,
     PLUGIN_DATA_FILE_PATH,
     SYNC_STATE_FILE_PATH,
     util
@@ -8,8 +9,10 @@ import {
 
 describe("utilities and logging", () => {
     it("exports top-level file path constants sorted alphabetically", () => {
+        expect(MAX_WALK_DEPTH).toBe(64);
         expect(PLUGIN_DATA_FILE_PATH).toBe(".obsidian/plugins/vaultdav/data.json");
         expect(SYNC_STATE_FILE_PATH).toBe(".obsidian/plugins/vaultdav/sync-state.json");
+        expect(util.MAX_WALK_DEPTH).toBe(MAX_WALK_DEPTH);
         expect(util.PLUGIN_DATA_FILE_PATH).toBe(PLUGIN_DATA_FILE_PATH);
         expect(util.SYNC_STATE_FILE_PATH).toBe(SYNC_STATE_FILE_PATH);
     });
@@ -21,19 +24,34 @@ describe("utilities and logging", () => {
         );
     });
 
-    it("normalizes vault paths and encodes WebDAV path segments safely", () => {
+    it("normalizes vault paths and rejects traversal, control characters, drive prefixes, and prototype keys", () => {
         expect(util.normalizeVaultPath("/notes//daily/2026-10-14.md/")).toBe(
             "notes/daily/2026-10-14.md"
         );
         expect(util.normalizeVaultPath("/")).toBe("");
         expect(util.normalizeVaultPath("")).toBe("");
+        expect(util.normalizeVaultPath(".")).toBe("");
+        expect(util.normalizeVaultPath("..")).toBe("");
+        expect(util.normalizeVaultPath("../secret.md")).toBe("");
+        expect(util.normalizeVaultPath("a/../../b")).toBe("");
+        expect(util.normalizeVaultPath("a/../b")).toBe("");
+        expect(util.normalizeVaultPath("..\\secret.md")).toBe("");
+        expect(util.normalizeVaultPath("note\0.md")).toBe("");
+        expect(util.normalizeVaultPath("note\n.md")).toBe("");
+        expect(util.normalizeVaultPath("C:/Windows/System32")).toBe("");
+        expect(util.normalizeVaultPath("__proto__")).toBe("");
+        expect(util.normalizeVaultPath("Notes/__proto__/file.md")).toBe("");
+        expect(util.normalizeVaultPath("constructor")).toBe("");
+        expect(util.normalizeVaultPath("prototype")).toBe("");
 
         expect(util.encodeWebDavPath("Notes/C# Programming & Q?.md")).toBe(
             "Notes/C%23%20Programming%20%26%20Q%3F.md"
         );
+        expect(util.encodeWebDavPath("..")).toBe("");
+        expect(util.encodeWebDavPath("../OtherFolder")).toBe("");
     });
 
-    it("builds Nextcloud WebDAV base URLs from root, partial DAV, or full DAV endpoints", () => {
+    it("builds Nextcloud WebDAV base URLs and rejects non-HTTPS, embedded credentials, and empty usernames", () => {
         expect(
             util.buildNextcloudWebDavBaseUrl(
                 "https://cloud.example.com/",
@@ -73,9 +91,41 @@ describe("utilities and logging", () => {
                 "Notes"
             )
         ).toBe("https://cloud.example.com/remote.php/dav/files/m%C3%BCller/Notes");
+
+        expect(() =>
+            util.buildNextcloudWebDavBaseUrl(
+                "http://cloud.example.com",
+                "alice",
+                "Notes"
+            )
+        ).toThrow(/HTTPS/i);
+
+        expect(() =>
+            util.buildNextcloudWebDavBaseUrl(
+                "https://alice:secret@cloud.example.com",
+                "alice",
+                "Notes"
+            )
+        ).toThrow(/credentials/i);
+
+        expect(() =>
+            util.buildNextcloudWebDavBaseUrl(
+                "https://cloud.example.com",
+                "   ",
+                "Notes"
+            )
+        ).toThrow(/username/i);
+
+        expect(() =>
+            util.buildNextcloudWebDavBaseUrl(
+                "not-a-valid-url",
+                "alice",
+                "Notes"
+            )
+        ).toThrow(/Invalid/i);
     });
 
-    it("decodes WebDAV href values and enforces username boundaries and traversal safety", () => {
+    it("decodes WebDAV href values and enforces username boundaries, traversal, null-byte, and URIError safety", () => {
         expect(
             util.decodeWebDavHref(
                 "/remote.php/dav/files/alice/Obsidian%20Vault/",
@@ -91,6 +141,14 @@ describe("utilities and logging", () => {
                 "Obsidian Vault"
             )
         ).toBe("Folder/C# Note?.md");
+
+        expect(
+            util.decodeWebDavHref(
+                "HTTPS://cloud.example.com/remote.php/dav/files/Alice/Obsidian%20Vault/Note.md",
+                "alice",
+                "Obsidian Vault"
+            )
+        ).toBe("Note.md");
 
         expect(
             util.decodeWebDavHref(
@@ -127,6 +185,30 @@ describe("utilities and logging", () => {
         expect(
             util.decodeWebDavHref(
                 "https://cloud.example.com/remote.php/dav/files/alice/Obsidian%20Vault/Notes/../secret.md",
+                "alice",
+                "Obsidian Vault"
+            )
+        ).toBeNull();
+
+        expect(
+            util.decodeWebDavHref(
+                "HTTPS://cloud.example.com/remote.php/dav/files/alice/Obsidian%20Vault/Notes/../secret.md",
+                "alice",
+                "Obsidian Vault"
+            )
+        ).toBeNull();
+
+        expect(
+            util.decodeWebDavHref(
+                "/remote.php/dav/files/alice/Obsidian%20Vault/note%00.md",
+                "alice",
+                "Obsidian Vault"
+            )
+        ).toBeNull();
+
+        expect(
+            util.decodeWebDavHref(
+                "/remote.php/dav/files/alice/Obsidian%20Vault/%E0%A4%A",
                 "alice",
                 "Obsidian Vault"
             )
@@ -175,17 +257,28 @@ describe("utilities and logging", () => {
         );
     });
 
-    it("excludes sync state, trash, workspace files, traversal segments, and OS artifacts while allowing .github/.gitlab", () => {
+    it("excludes sync state, plugin files, case variations, trash, workspace files, traversal segments, and null-byte paths while allowing .github/.gitlab", () => {
         expect(util.isExcludedPath(".obsidian/plugins/vaultdav/sync-state.json")).toBe(true);
         expect(util.isExcludedPath(".obsidian/plugins/vaultdav/data.json")).toBe(true);
+        expect(util.isExcludedPath(".obsidian/plugins/VaultDAV/data.json")).toBe(true);
+        expect(util.isExcludedPath(".obsidian/plugins/vaultdav/DATA.JSON")).toBe(true);
+        expect(util.isExcludedPath(".obsidian/plugins/vaultdav/main.js")).toBe(true);
+        expect(util.isExcludedPath(".obsidian/plugins/vaultdav/data.json.bak")).toBe(true);
+        expect(util.isExcludedPath(".obsidian/plugins/vaultdav")).toBe(true);
+        expect(util.isExcludedPath(".obsidian/plugins/other/data.json")).toBe(true);
+        expect(util.isExcludedPath(".obsidian/plugins/other/sync-state.json")).toBe(true);
         expect(util.isExcludedPath(".obsidian/workspace.json")).toBe(true);
+        expect(util.isExcludedPath(".OBSIDIAN/workspace.json")).toBe(true);
         expect(util.isExcludedPath(".obsidian/workspace-mobile.json")).toBe(true);
         expect(util.isExcludedPath(".trash/note.md")).toBe(true);
+        expect(util.isExcludedPath(".TRASH/note.md")).toBe(true);
         expect(util.isExcludedPath("sub/.DS_Store")).toBe(true);
         expect(util.isExcludedPath(".git/config")).toBe(true);
+        expect(util.isExcludedPath(".GIT/config")).toBe(true);
         expect(util.isExcludedPath("../outside.md")).toBe(true);
         expect(util.isExcludedPath("Notes/../outside.md")).toBe(true);
         expect(util.isExcludedPath("./note.md")).toBe(true);
+        expect(util.isExcludedPath("note\0.md")).toBe(true);
 
         expect(util.isExcludedPath(".github/workflows/ci.yml")).toBe(false);
         expect(util.isExcludedPath(".gitlab/issue_templates/bug.md")).toBe(false);

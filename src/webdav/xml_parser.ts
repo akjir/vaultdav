@@ -2,6 +2,7 @@ import type { RemoteItem } from "../types";
 import { util } from "../utilities";
 
 const DIGITS_ONLY_REGEX: RegExp = /^\d+$/;
+const MAX_PARSER_ERROR_LENGTH: number = 200;
 const PROPFIND_XML_BODY: string = [
     '<?xml version="1.0" encoding="utf-8"?>',
     '<d:propfind xmlns:d="DAV:">',
@@ -24,10 +25,22 @@ export function findChildByLocalName(
     localName: string
 ): Element | null {
     const targetLower: string = localName.toLowerCase();
-    const allElements: HTMLCollectionOf<Element> = parent.getElementsByTagName("*");
+    let children: HTMLCollection | null = null;
+    if ("documentElement" in parent) {
+        const root: Element | null = parent.documentElement;
+        if (root === null) {
+            return null;
+        }
+        if (getElementLocalName(root) === targetLower) {
+            return root;
+        }
+        children = root.children;
+    } else {
+        children = parent.children;
+    }
 
-    for (let i: number = 0; i < allElements.length; i += 1) {
-        const element: Element | undefined = allElements[i];
+    for (let i: number = 0; i < children.length; i += 1) {
+        const element: Element | undefined = children[i];
         if (element !== undefined && getElementLocalName(element) === targetLower) {
             return element;
         }
@@ -53,16 +66,40 @@ export function findChildrenByLocalName(
     localName: string
 ): Element[] {
     const targetLower: string = localName.toLowerCase();
-    const allElements: HTMLCollectionOf<Element> = parent.getElementsByTagName("*");
     const matched: Element[] = [];
+    let children: HTMLCollection | null = null;
+    if ("documentElement" in parent) {
+        const root: Element | null = parent.documentElement;
+        if (root === null) {
+            return matched;
+        }
+        if (getElementLocalName(root) === targetLower) {
+            matched.push(root);
+            return matched;
+        }
+        children = root.children;
+    } else {
+        children = parent.children;
+    }
 
-    for (let i: number = 0; i < allElements.length; i += 1) {
-        const element: Element | undefined = allElements[i];
+    for (let i: number = 0; i < children.length; i += 1) {
+        const element: Element | undefined = children[i];
         if (element !== undefined && getElementLocalName(element) === targetLower) {
             matched.push(element);
         }
     }
     return matched;
+}
+
+function findParserError(doc: Document): Element | null {
+    const allElements: HTMLCollectionOf<Element> = doc.getElementsByTagName("*");
+    for (let i: number = 0; i < allElements.length; i += 1) {
+        const element: Element | undefined = allElements[i];
+        if (element !== undefined && getElementLocalName(element) === "parsererror") {
+            return element;
+        }
+    }
+    return null;
 }
 
 function getElementLocalName(element: Element): string {
@@ -82,6 +119,7 @@ export function parseMultiStatus(
     const responses: Element[] = findChildrenByLocalName(doc, "response");
     const seenPaths: Set<string> = new Set<string>();
     const items: RemoteItem[] = [];
+    let inScopeCount: number = 0;
 
     for (const responseEl of responses) {
         const parsed: RemoteItem | null = parseResponseElement(
@@ -92,15 +130,26 @@ export function parseMultiStatus(
         if (parsed === null) {
             continue;
         }
+        if (parsed.path === normalizedQueriedDir) {
+            inScopeCount += 1;
+            continue;
+        }
         if (
             parsed.path === "" ||
-            parsed.path === normalizedQueriedDir ||
+            util.getParentPath(parsed.path) !== normalizedQueriedDir ||
             seenPaths.has(parsed.path)
         ) {
             continue;
         }
+        inScopeCount += 1;
         seenPaths.add(parsed.path);
         items.push(parsed);
+    }
+
+    if (responses.length > 0 && inScopeCount === 0) {
+        throw new Error(
+            "Invalid WebDAV XML response: no in-scope responses for queried directory"
+        );
     }
 
     return items;
@@ -216,11 +265,14 @@ export function parseXmlDocument(xmlText: string): Document {
 
     const parser: DOMParser = new DOMParser();
     const doc: Document = parser.parseFromString(xmlText, "application/xml");
-    const parserError: Element | null = findChildByLocalName(doc, "parsererror");
+    const parserError: Element | null = findParserError(doc);
     if (parserError !== null) {
-        throw new Error(
-            `Invalid WebDAV XML response: ${parserError.textContent ?? "parse error"}`
-        );
+        const rawError: string = (parserError.textContent ?? "parse error").trim();
+        const boundedError: string =
+            rawError.length > MAX_PARSER_ERROR_LENGTH
+                ? `${rawError.slice(0, MAX_PARSER_ERROR_LENGTH)}...`
+                : rawError;
+        throw new Error(`Invalid WebDAV XML response: ${boundedError}`);
     }
 
     const rootEl: Element | null = doc.documentElement;

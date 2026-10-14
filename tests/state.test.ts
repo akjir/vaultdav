@@ -307,4 +307,29 @@ describe("SyncStateStore", () => {
         await reloadedStore.load();
         expect(Object.keys(reloadedStore.getAll())).toHaveLength(5);
     });
+
+    it("returns undefined for Object.prototype keys, strips null-byte padding in load(), and rethrows adapter.read() I/O errors", async () => {
+        const paddedJson: string =
+            '\0\0{"version":1,"records":{"Notes/Padded.md":{"etag":"e1","isDirectory":false,"lastSyncTime":1000,"localMtime":1000,"path":"Notes/Padded.md","remoteMtime":1000,"size":12}}}\0\0';
+        const { adapter } = createMockAdapter({
+            [SYNC_STATE_FILE_PATH]: paddedJson
+        });
+        const store: SyncStateStore = new SyncStateStore(adapter);
+
+        expect(store.getRecord("constructor")).toBeUndefined();
+        expect(store.getRecord("toString")).toBeUndefined();
+        expect(store.getRecord("valueOf")).toBeUndefined();
+        expect(store.getRecord("hasOwnProperty")).toBeUndefined();
+        expect(store.getRecord("__proto__")).toBeUndefined();
+
+        const loaded: SyncStateData = await store.load();
+        expect(loaded.records["Notes/Padded.md"]?.etag).toBe("e1");
+        expect(store.getRecord("toString")).toBeUndefined();
+
+        vi.spyOn(adapter, "read").mockRejectedValueOnce(
+            new Error("EIO: i/o error reading sync-state.json")
+        );
+        await expect(store.load()).rejects.toThrow(/EIO/);
+        expect(store.getRecord("Notes/Padded.md")?.etag).toBe("e1");
+    });
 });

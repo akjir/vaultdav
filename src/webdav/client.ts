@@ -63,6 +63,9 @@ export class WebDavClient {
         if (normalizedPath === "") {
             throw new Error("WebDAV MKCOL refused on empty root path");
         }
+        if (util.isExcludedPath(normalizedPath)) {
+            throw new Error(`WebDAV MKCOL refused on excluded path: ${normalizedPath}`);
+        }
         const response: RequestUrlResponse = await this.requestWithRetry(
             {
                 method: "MKCOL",
@@ -80,6 +83,9 @@ export class WebDavClient {
         const normalizedPath: string = util.normalizeVaultPath(path);
         if (normalizedPath === "") {
             throw new Error("WebDAV DELETE refused on empty root path");
+        }
+        if (util.isExcludedPath(normalizedPath)) {
+            throw new Error(`WebDAV DELETE refused on excluded path: ${normalizedPath}`);
         }
         const response: RequestUrlResponse = await this.requestWithRetry(
             {
@@ -103,6 +109,9 @@ export class WebDavClient {
         if (normalizedPath === "") {
             throw new Error("WebDAV GET refused on empty root path");
         }
+        if (util.isExcludedPath(normalizedPath)) {
+            throw new Error(`WebDAV GET refused on excluded path: ${normalizedPath}`);
+        }
         const response: RequestUrlResponse = await this.requestWithRetry(
             {
                 method: "GET",
@@ -118,6 +127,9 @@ export class WebDavClient {
 
     public async ensureRemoteBaseDir(): Promise<void> {
         const levels: string[] = util.getFolderLevels(this.settings.remoteBaseDir, true);
+        if (levels.length === 0) {
+            throw new Error("WebDAV remoteBaseDir must not be empty");
+        }
 
         for (const levelPath of levels) {
             const encodedLevel: string = util.encodeWebDavPath(levelPath);
@@ -319,6 +331,9 @@ export class WebDavClient {
         if (normalizedPath === "") {
             throw new Error("WebDAV PUT refused on empty root path");
         }
+        if (util.isExcludedPath(normalizedPath)) {
+            throw new Error(`WebDAV PUT refused on excluded path: ${normalizedPath}`);
+        }
         const safeMtime: number =
             Number.isFinite(localMtime) && localMtime > 0
                 ? util.toSecondPrecision(localMtime)
@@ -398,16 +413,22 @@ export class WebDavClient {
 
             for (const children of batchResults) {
                 for (const item of children) {
+                    const depth: number = util.getPathDepth(item.path);
                     if (
                         item.path === "" ||
                         util.isExcludedPath(item.path) ||
-                        seenPaths.has(item.path)
+                        seenPaths.has(item.path) ||
+                        depth > util.MAX_WALK_DEPTH
                     ) {
                         continue;
                     }
                     seenPaths.add(item.path);
                     discovered.push(item);
-                    if (item.isDirectory && !visitedDirs.has(item.path)) {
+                    if (
+                        item.isDirectory &&
+                        !visitedDirs.has(item.path) &&
+                        depth < util.MAX_WALK_DEPTH
+                    ) {
                         visitedDirs.add(item.path);
                         currentQueue.push(item.path);
                     }

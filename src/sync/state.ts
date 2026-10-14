@@ -4,6 +4,11 @@ import type { SyncStateData, SyncStateRecord } from "../types";
 import { SYNC_STATE_FILE_PATH, util } from "../utilities";
 
 const CURRENT_STATE_VERSION: number = 1;
+const NULL_PADDING_REGEX: RegExp = /^\0+|\0+$/g;
+
+function createRecordMap(): Record<string, SyncStateRecord> {
+    return Object.create(null) as Record<string, SyncStateRecord>;
+}
 
 export class SyncStateStore {
     private readonly adapter: DataAdapter;
@@ -18,11 +23,11 @@ export class SyncStateStore {
     ) {
         this.adapter = adapter;
         this.stateFilePath = util.normalizeVaultPath(stateFilePath);
-        this.records = {};
+        this.records = createRecordMap();
     }
 
     public async clear(): Promise<void> {
-        this.records = {};
+        this.records = createRecordMap();
         await this.save();
     }
 
@@ -46,22 +51,36 @@ export class SyncStateStore {
 
     public getRecord(path: string): SyncStateRecord | undefined {
         const normalized: string = util.normalizeVaultPath(path);
+        if (
+            normalized === "" ||
+            !Object.prototype.hasOwnProperty.call(this.records, normalized)
+        ) {
+            return undefined;
+        }
         return this.records[normalized];
     }
 
     public async load(): Promise<SyncStateData> {
         const exists: boolean = await this.adapter.exists(this.stateFilePath);
         if (!exists) {
-            this.records = {};
+            this.records = createRecordMap();
             return {
                 records: {},
                 version: CURRENT_STATE_VERSION
             };
         }
 
+        let raw: string = "";
         try {
-            const raw: string = await this.adapter.read(this.stateFilePath);
-            const parsed: unknown = JSON.parse(raw);
+            raw = await this.adapter.read(this.stateFilePath);
+        } catch (err: unknown) {
+            log.error("Failed to read sync state file:", err);
+            throw err;
+        }
+
+        try {
+            const sanitizedRaw: string = raw.replace(NULL_PADDING_REGEX, "").trim();
+            const parsed: unknown = JSON.parse(sanitizedRaw);
             if (
                 typeof parsed === "object" &&
                 parsed !== null &&
@@ -72,7 +91,7 @@ export class SyncStateStore {
                 const rawRecords: Record<string, unknown> = (
                     parsed as { records: Record<string, unknown> }
                 ).records;
-                const validated: Record<string, SyncStateRecord> = {};
+                const validated: Record<string, SyncStateRecord> = createRecordMap();
 
                 for (const [key, val] of Object.entries(rawRecords)) {
                     if (typeof val === "object" && val !== null) {
@@ -124,7 +143,7 @@ export class SyncStateStore {
             log.warn("Failed to parse sync state file; resetting state.", err);
         }
 
-        this.records = {};
+        this.records = createRecordMap();
         return {
             records: {},
             version: CURRENT_STATE_VERSION
@@ -133,14 +152,19 @@ export class SyncStateStore {
 
     public removeRecord(path: string): void {
         const normalized: string = util.normalizeVaultPath(path);
-        delete this.records[normalized];
+        if (
+            normalized !== "" &&
+            Object.prototype.hasOwnProperty.call(this.records, normalized)
+        ) {
+            delete this.records[normalized];
+        }
     }
 
     public save(): Promise<void> {
         const writeTask = async (): Promise<void> => {
             await this.ensureParentDirectory();
             const payload: SyncStateData = {
-                records: this.records,
+                records: { ...this.records },
                 version: CURRENT_STATE_VERSION
             };
             // Use unformatted JSON to save space and I/O time on mobile

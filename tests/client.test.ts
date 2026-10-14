@@ -368,29 +368,62 @@ describe("WebDavClient", () => {
         expect(uploaded.mtime).toBeGreaterThan(0);
     });
 
-    it("rejects empty or root paths in deleteItem, createDirectory, downloadFile, and uploadFile without sending requests", async () => {
+    it("rejects empty, root, traversal, or excluded paths in deleteItem, createDirectory, downloadFile, and uploadFile without sending requests", async () => {
         const requestSpy = vi.spyOn(obsidian, "requestUrl");
         const client: WebDavClient = new WebDavClient(DEFAULT_TEST_SETTINGS, 1);
 
-        for (const rootPath of ["", "/"]) {
-            await expect(client.deleteItem(rootPath, false)).rejects.toThrow(
+        for (const rootOrTraversalPath of ["", "/", ".", "..", "../OtherFolder", "a/../.."]) {
+            await expect(client.deleteItem(rootOrTraversalPath, true)).rejects.toThrow(
                 /refused on empty root path/
             );
-            await expect(client.createDirectory(rootPath)).rejects.toThrow(
+            await expect(client.createDirectory(rootOrTraversalPath)).rejects.toThrow(
                 /refused on empty root path/
             );
-            await expect(client.downloadFile(rootPath)).rejects.toThrow(
+            await expect(client.downloadFile(rootOrTraversalPath)).rejects.toThrow(
                 /refused on empty root path/
             );
             await expect(
-                client.uploadFile(rootPath, new ArrayBuffer(4), 1728928291000)
+                client.uploadFile(rootOrTraversalPath, new ArrayBuffer(4), 1728928291000)
             ).rejects.toThrow(/refused on empty root path/);
+        }
+
+        for (const excludedPath of [
+            ".obsidian/plugins/vaultdav/data.json",
+            ".obsidian/plugins/VaultDAV/data.json",
+            ".obsidian/plugins/vaultdav/sync-state.json",
+            ".git/config"
+        ]) {
+            await expect(client.deleteItem(excludedPath, false)).rejects.toThrow(
+                /refused on excluded path/
+            );
+            await expect(client.createDirectory(excludedPath)).rejects.toThrow(
+                /refused on excluded path/
+            );
+            await expect(client.downloadFile(excludedPath)).rejects.toThrow(
+                /refused on excluded path/
+            );
+            await expect(
+                client.uploadFile(excludedPath, new ArrayBuffer(4), 1728928291000)
+            ).rejects.toThrow(/refused on excluded path/);
         }
 
         expect(requestSpy).not.toHaveBeenCalled();
     });
 
-    it("retries 423 Locked in ensureRemoteBaseDir and rejects when remoteBaseDir segment is a file", async () => {
+    it("retries 423 Locked in ensureRemoteBaseDir, rejects when remoteBaseDir is empty or '..', and rejects when segment is a file", async () => {
+        for (const badBaseDir of ["", "   ", ".", ".."]) {
+            const badClient: WebDavClient = new WebDavClient(
+                {
+                    ...DEFAULT_TEST_SETTINGS,
+                    remoteBaseDir: badBaseDir
+                },
+                1
+            );
+            await expect(badClient.ensureRemoteBaseDir()).rejects.toThrow(
+                /remoteBaseDir must not be empty/
+            );
+        }
+
         let vaultPropfindAttempts: number = 0;
         const fileStatXml: string = `<?xml version="1.0"?>
 <d:multistatus xmlns:d="DAV:">
@@ -491,7 +524,7 @@ describe("WebDavClient", () => {
         ).toBe("WebDAV PUT Notes/ZeroMtime.md failed (507 Insufficient Storage)");
     });
 
-    it("prevents infinite loops and duplicate entries when walkRemote encounters already-visited directories", async () => {
+    it("prevents infinite loops on cyclic directories and stops traversing deeper than MAX_WALK_DEPTH", async () => {
         const rootXml: string = `<?xml version="1.0"?>
 <d:multistatus xmlns:d="DAV:">
     <d:response>
@@ -572,5 +605,31 @@ describe("WebDavClient", () => {
             "Cycle/Sub",
             "Cycle/Sub/Note.md"
         ]);
+
+        const basePrefix: string = "https://cloud.example.com/remote.php/dav/files/alice/Vault/SubVault/";
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (req: RequestUrlParam | string): RequestUrlResponsePromise => {
+                const param: RequestUrlParam =
+                    typeof req === "string" ? { url: req } : req;
+                const relDir: string = param.url
+                    .slice(basePrefix.length)
+                    .replace(/\/+$/, "");
+                const childDir: string = relDir === "" ? "d" : `${relDir}/d`;
+                const xml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/SubVault/${childDir}/</d:href>
+        <d:propstat>
+            <d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+                return createMockResponse(207, xml);
+            }
+        );
+
+        const deepItems: RemoteItem[] = await client.walkRemote();
+        expect(deepItems.length).toBe(64);
     });
 });

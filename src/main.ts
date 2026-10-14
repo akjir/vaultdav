@@ -44,10 +44,15 @@ export default class VaultDavPlugin extends Plugin {
         const normalizedRemoteBaseDir: string = util.normalizeVaultPath(
             this.settings.remoteBaseDir
         );
+        const normalizedVaultName: string = util.normalizeVaultPath(
+            this.app.vault.getName()
+        );
         const fallbackBaseDir: string =
             normalizedRemoteBaseDir !== ""
                 ? normalizedRemoteBaseDir
-                : util.normalizeVaultPath(this.app.vault.getName());
+                : normalizedVaultName !== ""
+                  ? normalizedVaultName
+                  : "VaultDAV";
         return {
             ...this.settings,
             remoteBaseDir: fallbackBaseDir

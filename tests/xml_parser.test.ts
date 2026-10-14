@@ -304,4 +304,84 @@ describe("webdav xml_parser", () => {
         expect(items[2]?.path).toBe("EmptySize.md");
         expect(items[2]?.size).toBe(0);
     });
+
+    it("rejects non-direct children of queriedDirPath, ignores nested spoofed tags, and throws when all responses are out of scope", () => {
+        const outOfScopeHierarchyXml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:custom="http://example.com/ns">
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/Notes/Sub/</d:href>
+        <d:propstat>
+            <d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/RootSecret.md</d:href>
+        <d:propstat>
+            <d:prop><d:getcontentlength>10</d:getcontentlength><d:resourcetype/></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/Notes/Sub/Deep/Grandchild.md</d:href>
+        <d:propstat>
+            <d:prop><d:getcontentlength>10</d:getcontentlength><d:resourcetype/></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+    <d:response>
+        <d:propstat>
+            <d:prop>
+                <custom:metadata>
+                    <d:href>/remote.php/dav/files/alice/Vault/Notes/Sub/SpoofedHref.md</d:href>
+                </custom:metadata>
+                <d:resourcetype/>
+            </d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/Notes/Sub/SpoofedStatus.md</d:href>
+        <d:propstat>
+            <d:prop>
+                <custom:metadata>
+                    <d:status>HTTP/1.1 200 OK</d:status>
+                </custom:metadata>
+                <d:resourcetype/>
+            </d:prop>
+            <d:status>HTTP/1.1 404 Not Found</d:status>
+        </d:propstat>
+    </d:response>
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/Notes/Sub/DirectChild.md</d:href>
+        <d:propstat>
+            <d:prop><d:getcontentlength>25</d:getcontentlength><d:resourcetype/></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+
+        const items: RemoteItem[] = parseMultiStatus(
+            outOfScopeHierarchyXml,
+            "alice",
+            "Vault",
+            "Notes/Sub"
+        );
+        expect(items.map((i: RemoteItem) => i.path)).toEqual(["Notes/Sub/DirectChild.md"]);
+
+        const allOutOfScopeXml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/wronguser/Vault/</d:href>
+        <d:propstat>
+            <d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+
+        expect(() => parseMultiStatus(allOutOfScopeXml, "alice", "Vault", "")).toThrow(
+            "Invalid WebDAV XML response: no in-scope responses for queried directory"
+        );
+    });
 });

@@ -75,4 +75,37 @@ describe("log", () => {
         log.notify("Infinite duration notice", Number.POSITIVE_INFINITY);
         expect(noticeSpy).toHaveBeenNthCalledWith(6, "VaultDAV: Infinite duration notice", 4000);
     });
+
+    it("redacts HTTP Basic Auth tokens and embedded URL credentials in log and notice output", () => {
+        const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+        const noticeSpy = vi.spyOn(obsidian, "Notice").mockImplementation(function (
+            this: obsidian.Notice,
+            _message: string | DocumentFragment,
+            _duration?: number
+        ): obsidian.Notice {
+            return this;
+        });
+
+        log.error(
+            "Request to https://alice:super-secret@cloud.example.com/dav failed with Authorization: Basic YWxpY2U6c2VjcmV0MTIz",
+            "extra https://bob:pw123@example.org/path",
+            new Error("Header Basic dXNlcjpwYXNz== leaked")
+        );
+
+        expect(errorSpy).toHaveBeenCalledTimes(1);
+        const loggedArgs: unknown[] = errorSpy.mock.calls[0] ?? [];
+        expect(loggedArgs[0]).toBe(
+            "[VaultDAV] Request to https://[REDACTED]@cloud.example.com/dav failed with Authorization: Basic [REDACTED]"
+        );
+        expect(loggedArgs[1]).toBe("extra https://[REDACTED]@example.org/path");
+        expect((loggedArgs[2] as Error).message).toBe("Header Basic [REDACTED] leaked");
+
+        log.notify(
+            "Connection failed for https://alice:secret@cloud.example.com (Basic YWxpY2U6c2VjcmV0)"
+        );
+        expect(noticeSpy).toHaveBeenCalledWith(
+            "VaultDAV: Connection failed for https://[REDACTED]@cloud.example.com (Basic [REDACTED])",
+            4000
+        );
+    });
 });

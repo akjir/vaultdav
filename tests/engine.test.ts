@@ -645,8 +645,8 @@ describe("SyncEngine delta calculation and execution", () => {
         expect(saveSpy).toHaveBeenCalledTimes(1);
     });
 
-    it("handles adapter.list errors in walkLocal by logging a warning and continuing sibling traversal", async () => {
-        const warnSpy = vi.spyOn(log, "warn").mockImplementation((): void => undefined);
+    it("rethrows adapter.list OS errors in walkLocal so runSync aborts instead of deleting remote files", async () => {
+        const errorSpy = vi.spyOn(log, "error").mockImplementation((): void => undefined);
         const permissionError: Error = new Error("EACCES: permission denied");
 
         const adapter: Partial<DataAdapter> = {
@@ -659,12 +659,6 @@ describe("SyncEngine delta calculation and execution", () => {
                 }
                 if (dir === "RestrictedDir") {
                     throw permissionError;
-                }
-                if (dir === "SiblingDir") {
-                    return {
-                        files: ["SiblingDir/note.md"],
-                        folders: []
-                    };
                 }
                 return { files: [], folders: [] };
             },
@@ -691,26 +685,92 @@ describe("SyncEngine delta calculation and execution", () => {
         );
 
         try {
-            const items: LocalItem[] = await engine.walkLocal();
-            const discoveredPaths: string[] = items.map((i: LocalItem) => i.path);
-
-            expect(warnSpy).toHaveBeenCalledWith(
+            await expect(engine.walkLocal()).rejects.toThrow("EACCES: permission denied");
+            expect(errorSpy).toHaveBeenCalledWith(
                 "Failed to list directory RestrictedDir",
                 permissionError
             );
-            expect(discoveredPaths).toEqual([
-                "RestrictedDir",
-                "SiblingDir",
-                "root.md",
-                "SiblingDir/note.md"
-            ]);
         } finally {
-            warnSpy.mockRestore();
+            errorSpy.mockRestore();
         }
     });
 
-    it("calls adapter.rmdir(path, false) in deleteLocalItem and bubbles up directory not empty errors", async () => {
+    it("deduplicates cyclic folders and enforces MAX_WALK_DEPTH in walkLocal", async () => {
+        let listCalls: number = 0;
+        const cyclicAdapter: Partial<DataAdapter> = {
+            list: async (dir: string): Promise<ListedFiles> => {
+                listCalls += 1;
+                if (dir === "") {
+                    return { files: [], folders: ["Cycle", "Cycle"] };
+                }
+                if (dir === "Cycle") {
+                    return { files: ["Cycle/note.md", "Cycle/note.md"], folders: ["Cycle"] };
+                }
+                return { files: [], folders: [] };
+            },
+            stat: async (p: string): Promise<Stat | null> => ({
+                ctime: 1000,
+                mtime: 1000,
+                size: p.endsWith(".md") ? 10 : 0,
+                type: p.endsWith(".md") ? "file" : "folder"
+            })
+        };
+
+        const cyclicEngine: SyncEngine = new SyncEngine(
+            { adapter: cyclicAdapter as DataAdapter } as Vault,
+            {} as WebDavClient,
+            new SyncStateStore(cyclicAdapter as DataAdapter),
+            {
+                appPassword: "pw",
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        const cyclicItems: LocalItem[] = await cyclicEngine.walkLocal();
+        expect(listCalls).toBe(2);
+        expect(cyclicItems.map((i: LocalItem) => i.path)).toEqual([
+            "Cycle",
+            "Cycle/note.md"
+        ]);
+
+        const deepAdapter: Partial<DataAdapter> = {
+            list: async (dir: string): Promise<ListedFiles> => {
+                const child: string = dir === "" ? "d" : `${dir}/d`;
+                return { files: [], folders: [child] };
+            },
+            stat: async (): Promise<Stat | null> => ({
+                ctime: 1000,
+                mtime: 1000,
+                size: 0,
+                type: "folder"
+            })
+        };
+
+        const deepEngine: SyncEngine = new SyncEngine(
+            { adapter: deepAdapter as DataAdapter } as Vault,
+            {} as WebDavClient,
+            new SyncStateStore(deepAdapter as DataAdapter),
+            {
+                appPassword: "pw",
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        const deepItems: LocalItem[] = await deepEngine.walkLocal();
+        expect(deepItems.length).toBe(64);
+    });
+
+    it("calls adapter.rmdir(path, false) in deleteLocalItem, refuses to trash directories containing excluded children, and rejects excluded paths", async () => {
         const rmdirCalls: Array<{ path: string; recursive: boolean }> = [];
+        const trashCalls: string[] = [];
 
         const adapter: Partial<DataAdapter> = {
             exists: async (): Promise<boolean> => true,
@@ -746,9 +806,90 @@ describe("SyncEngine delta calculation and execution", () => {
             { path: "EmptyDir", recursive: false },
             { path: "NonEmptyDir", recursive: false }
         ]);
+
+        await expect(engine.deleteLocalItem("..", true)).rejects.toThrow(
+            /refused on invalid or excluded path/
+        );
+        await expect(
+            engine.deleteLocalItem(".obsidian/plugins/vaultdav/data.json", false)
+        ).rejects.toThrow(/refused on invalid or excluded path/);
+
+        const trashAdapter: Partial<DataAdapter> = {
+            exists: async (): Promise<boolean> => true,
+            list: async (dir: string): Promise<ListedFiles> => {
+                if (dir === "Subproject") {
+                    return { files: [], folders: ["Subproject/.git"] };
+                }
+                return { files: [], folders: [] };
+            },
+            trashLocal: async (path: string): Promise<void> => {
+                trashCalls.push(path);
+            }
+        };
+
+        const trashEngine: SyncEngine = new SyncEngine(
+            { adapter: trashAdapter as DataAdapter } as Vault,
+            {} as WebDavClient,
+            new SyncStateStore(trashAdapter as DataAdapter),
+            {
+                appPassword: "pw",
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        await expect(trashEngine.deleteLocalItem("Subproject", true)).rejects.toThrow(
+            /ENOTEMPTY/
+        );
+        expect(trashCalls).toEqual([]);
+
+        await trashEngine.deleteLocalItem("TrulyEmptyDir", true);
+        expect(trashCalls).toEqual(["TrulyEmptyDir"]);
     });
 
-    it("registers planned conflictCopyPath in existingPaths so concurrent transfers cannot overwrite it", async () => {
+    it("guards against file/directory type confusion in buildSyncPlan", () => {
+        const warnSpy = vi.spyOn(log, "warn").mockImplementation((): void => undefined);
+        const t0: number = 1728928000000;
+
+        try {
+            const plan: SyncPlan = buildSyncPlan(
+                [
+                    makeLocal("ReplacedDirWithFile", t0, 0, false),
+                    makeLocal("TypeConflict", t0, 20, false)
+                ],
+                [makeRemote("TypeConflict", t0, 0, "dir-etag", true)],
+                {
+                    ReplacedDirWithFile: makeState(
+                        "ReplacedDirWithFile",
+                        t0,
+                        t0,
+                        0,
+                        "old-dir-etag",
+                        true
+                    )
+                },
+                t0
+            );
+
+            const byPath: Map<string, SyncAction> = new Map<string, SyncAction>(
+                plan.actions.map((a: SyncAction) => [a.path, a])
+            );
+
+            expect(byPath.get("ReplacedDirWithFile")?.type).toBe("upload");
+            expect(byPath.get("ReplacedDirWithFile")?.isDirectory).toBe(false);
+            expect(byPath.get("TypeConflict")?.type).toBe("noop");
+            expect(warnSpy).toHaveBeenCalledWith(
+                "Skipping path with file/directory type conflict: TypeConflict"
+            );
+        } finally {
+            warnSpy.mockRestore();
+        }
+    });
+
+    it("registers planned conflictCopyPath in existingPaths so concurrent transfers cannot overwrite it while allowing the planned conflict to use it", async () => {
         const t1: number = Date.UTC(2026, 9, 14, 19, 0, 0);
         const textFiles: Map<string, string> = new Map<string, string>();
         const uploadedConflictPaths: string[] = [];
@@ -846,7 +987,7 @@ describe("SyncEngine delta calculation and execution", () => {
         await engine.executePlan(plan, localItems, remoteItems);
 
         expect(initialHasReservedPath).toBe(true);
-        expect(uploadedConflictPaths).not.toContain(reservedConflictPath);
+        expect(uploadedConflictPaths).toContain(reservedConflictPath);
         expect(uploadedConflictPaths).toContain("Note.conflict-20261014-190000-2.md");
     });
 });

@@ -1,25 +1,35 @@
 import { normalizePath } from "obsidian";
 
+export const MAX_WALK_DEPTH: number = 64;
 export const PLUGIN_DATA_FILE_PATH: string = ".obsidian/plugins/vaultdav/data.json";
 export const SYNC_STATE_FILE_PATH: string = ".obsidian/plugins/vaultdav/sync-state.json";
 
 const BACKSLASH_REGEX: RegExp = /\\/g;
 const BASE64_CHARS: string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-const IGNORED_SEGMENTS: ReadonlySet<string> = new Set<string>([
-    ".DS_Store",
+const CONTROL_CHAR_REGEX: RegExp = /[\x00-\x1f\x7f]/;
+const DRIVE_PREFIX_REGEX: RegExp = /^[a-zA-Z]:/;
+const FORBIDDEN_OBJECT_KEYS: ReadonlySet<string> = new Set<string>([
+    "__proto__",
+    "constructor",
+    "prototype"
+]);
+const HTTP_PROTOCOL_REGEX: RegExp = /^https?:\/\//i;
+const IGNORED_SEGMENTS_LOWER: ReadonlySet<string> = new Set<string>([
+    ".ds_store",
     ".git",
     ".svn",
     ".trash",
-    "Desktop.ini",
-    "Thumbs.db",
     "desktop.ini",
     "node_modules",
     "thumbs.db"
 ]);
 const LEADING_SLASHES_REGEX: RegExp = /^\/+/;
+const OBSIDIAN_PLUGINS_PREFIX: string = ".obsidian/plugins/";
+const OBSIDIAN_VAULTDAV_DIR: string = ".obsidian/plugins/vaultdav";
+const OBSIDIAN_VAULTDAV_PREFIX: string = ".obsidian/plugins/vaultdav/";
 const QUERY_OR_HASH_REGEX: RegExp = /[?#]/;
 const TRAILING_SLASHES_REGEX: RegExp = /\/+$/;
-const WORKSPACE_FILE_REGEX: RegExp = /^\.obsidian\/workspace[^/]*\.json$/;
+const WORKSPACE_FILE_REGEX: RegExp = /^\.obsidian\/workspace[^/]*\.json$/i;
 
 export function areArrayBuffersEqual(a: ArrayBuffer, b: ArrayBuffer): boolean {
     if (a === b) {
@@ -43,39 +53,45 @@ export function buildNextcloudWebDavBaseUrl(
     username: string,
     remoteBaseDir: string
 ): string {
-    const trimmedUrl: string = url.trim().replace(TRAILING_SLASHES_REGEX, "");
+    const rawUrl: string = url.trim();
+    let parsedUrl: URL | null = null;
+    try {
+        parsedUrl = new URL(rawUrl);
+    } catch {
+        throw new Error("Invalid Nextcloud server URL");
+    }
+    if (parsedUrl.protocol !== "https:") {
+        throw new Error("Nextcloud server URL must use HTTPS");
+    }
+    if (parsedUrl.username !== "" || parsedUrl.password !== "") {
+        throw new Error("Nextcloud server URL must not contain embedded credentials");
+    }
+    if (parsedUrl.search !== "" || parsedUrl.hash !== "") {
+        throw new Error("Nextcloud server URL must not contain query or hash parameters");
+    }
+    const trimmedUser: string = username.trim();
+    if (trimmedUser === "") {
+        throw new Error("Nextcloud username must not be empty");
+    }
+    const encodedUser: string = encodeURIComponent(trimmedUser);
+    const trimmedPathname: string = parsedUrl.pathname.replace(TRAILING_SLASHES_REGEX, "");
+    const baseOriginAndPath: string = `${parsedUrl.origin}${trimmedPathname}`;
     const encodedBaseDir: string = encodeWebDavPath(remoteBaseDir);
     const davMarker: string = "/remote.php/dav/files";
     const markerWithSlash: string = `${davMarker}/`;
-    const markerIndex: number = trimmedUrl.indexOf(markerWithSlash);
+    const markerIndex: number = baseOriginAndPath.indexOf(markerWithSlash);
 
     let userRootUrl: string = "";
     if (markerIndex !== -1) {
-        const afterMarker: string = trimmedUrl.slice(
-            markerIndex + markerWithSlash.length
-        );
-        const rawUserSegment: string = (afterMarker.split("/")[0] ?? "").trim();
-        const prefix: string = trimmedUrl.slice(
+        const prefix: string = baseOriginAndPath.slice(
             0,
             markerIndex + markerWithSlash.length
         );
-        let encodedUser: string = "";
-        if (rawUserSegment !== "") {
-            try {
-                encodedUser = encodeURIComponent(decodeURIComponent(rawUserSegment));
-            } catch {
-                encodedUser = encodeURIComponent(rawUserSegment);
-            }
-        } else {
-            encodedUser = encodeURIComponent(username.trim());
-        }
         userRootUrl = `${prefix}${encodedUser}`;
-    } else if (trimmedUrl.endsWith(davMarker)) {
-        const encodedUser: string = encodeURIComponent(username.trim());
-        userRootUrl = `${trimmedUrl}/${encodedUser}`;
+    } else if (baseOriginAndPath.endsWith(davMarker)) {
+        userRootUrl = `${baseOriginAndPath}/${encodedUser}`;
     } else {
-        const encodedUser: string = encodeURIComponent(username.trim());
-        userRootUrl = `${trimmedUrl}${markerWithSlash}${encodedUser}`;
+        userRootUrl = `${baseOriginAndPath}${markerWithSlash}${encodedUser}`;
     }
 
     if (encodedBaseDir === "") {
@@ -89,12 +105,29 @@ export function decodeWebDavHref(
     username: string,
     remoteBaseDir: string
 ): string | null {
+    if (CONTROL_CHAR_REGEX.test(href)) {
+        return null;
+    }
+    const trimmedUser: string = username.trim();
+    if (trimmedUser === "") {
+        return null;
+    }
+
     let rawPathname: string = href.trim();
-    if (rawPathname.startsWith("http://") || rawPathname.startsWith("https://")) {
+    if (HTTP_PROTOCOL_REGEX.test(rawPathname)) {
         try {
             const parsedUrl: URL = new URL(rawPathname);
+            if (parsedUrl.username !== "" || parsedUrl.password !== "") {
+                return null;
+            }
+            const schemeIdx: number = rawPathname.indexOf("://");
+            const afterScheme: string =
+                schemeIdx !== -1 ? rawPathname.slice(schemeIdx + 3) : "";
+            const slashIdx: number = afterScheme.indexOf("/");
             const rawUrlPath: string =
-                rawPathname.slice(parsedUrl.origin.length).split(QUERY_OR_HASH_REGEX)[0] ?? "";
+                slashIdx !== -1
+                    ? (afterScheme.slice(slashIdx).split(QUERY_OR_HASH_REGEX)[0] ?? "")
+                    : "";
             rawPathname = rawUrlPath !== "" ? rawUrlPath : parsedUrl.pathname;
         } catch {
             return null;
@@ -109,15 +142,24 @@ export function decodeWebDavHref(
         if (part === "." || part === "..") {
             return null;
         }
-        let decodedPart: string = part;
+        let decodedPart: string = "";
         try {
             decodedPart = decodeURIComponent(part);
         } catch {
-            decodedPart = part;
+            return null;
+        }
+        if (CONTROL_CHAR_REGEX.test(decodedPart)) {
+            return null;
         }
         const subSegments: string[] = decodedPart.replace(BACKSLASH_REGEX, "/").split("/");
         for (const sub of subSegments) {
-            if (sub === "" || sub === "." || sub === "..") {
+            if (
+                sub === "" ||
+                sub === "." ||
+                sub === ".." ||
+                DRIVE_PREFIX_REGEX.test(sub) ||
+                FORBIDDEN_OBJECT_KEYS.has(sub)
+            ) {
                 return null;
             }
             decodedSegments.push(sub);
@@ -125,18 +167,32 @@ export function decodeWebDavHref(
     }
 
     const decodedFull: string = `/${decodedSegments.join("/")}`;
-    const davPrefix: string = `/remote.php/dav/files/${username.trim()}`;
-    const prefixIndex: number = decodedFull.indexOf(davPrefix);
+    const davPrefix: string = `/remote.php/dav/files/${trimmedUser}`;
+    let prefixIndex: number = decodedFull.indexOf(davPrefix);
+    let prefixEndLength: number = davPrefix.length;
+    if (prefixIndex === -1) {
+        const lowerFull: string = decodedFull.toLowerCase();
+        const lowerPrefix: string = davPrefix.toLowerCase();
+        prefixIndex = lowerFull.indexOf(lowerPrefix);
+        prefixEndLength = lowerPrefix.length;
+    }
     if (prefixIndex === -1) {
         return null;
     }
 
     const scopedPath: string = decodedFull.slice(prefixIndex);
-    if (scopedPath !== davPrefix && !scopedPath.startsWith(`${davPrefix}/`)) {
+    if (
+        scopedPath.length !== prefixEndLength &&
+        scopedPath[prefixEndLength] !== "/"
+    ) {
         return null;
     }
 
-    const afterUser: string = normalizeVaultPath(scopedPath.slice(davPrefix.length));
+    const rawAfterUser: string = scopedPath.slice(prefixEndLength);
+    const afterUser: string = normalizeVaultPath(rawAfterUser);
+    if (rawAfterUser !== "" && rawAfterUser !== "/" && afterUser === "") {
+        return null;
+    }
     const normalizedBase: string = normalizeVaultPath(remoteBaseDir);
 
     if (normalizedBase === "") {
@@ -146,7 +202,9 @@ export function decodeWebDavHref(
         return "";
     }
     if (afterUser.startsWith(`${normalizedBase}/`)) {
-        return normalizeVaultPath(afterUser.slice(normalizedBase.length + 1));
+        const relativeSlice: string = afterUser.slice(normalizedBase.length + 1);
+        const normalizedRel: string = normalizeVaultPath(relativeSlice);
+        return normalizedRel === "" ? null : normalizedRel;
     }
     return null;
 }
@@ -267,23 +325,36 @@ export function getPathDepth(path: string): number {
 }
 
 export function isExcludedPath(path: string): boolean {
+    if (CONTROL_CHAR_REGEX.test(path)) {
+        return true;
+    }
     const normalized: string = normalizeVaultPath(path);
     if (normalized === "") {
         return true;
     }
+    const lower: string = normalized.toLowerCase();
     if (
-        normalized === SYNC_STATE_FILE_PATH ||
-        normalized === PLUGIN_DATA_FILE_PATH
+        lower === SYNC_STATE_FILE_PATH ||
+        lower === PLUGIN_DATA_FILE_PATH
     ) {
         return true;
     }
-    if (WORKSPACE_FILE_REGEX.test(normalized)) {
+    if (
+        lower.startsWith(OBSIDIAN_PLUGINS_PREFIX) &&
+        (lower === OBSIDIAN_VAULTDAV_DIR ||
+            lower.startsWith(OBSIDIAN_VAULTDAV_PREFIX) ||
+            lower.endsWith("/data.json") ||
+            lower.endsWith("/sync-state.json"))
+    ) {
+        return true;
+    }
+    if (WORKSPACE_FILE_REGEX.test(lower)) {
         return true;
     }
 
-    const segments: string[] = normalized.split("/");
+    const segments: string[] = lower.split("/");
     for (const segment of segments) {
-        if (segment === "." || segment === ".." || IGNORED_SEGMENTS.has(segment)) {
+        if (segment === "." || segment === ".." || IGNORED_SEGMENTS_LOWER.has(segment)) {
             return true;
         }
     }
@@ -305,15 +376,43 @@ export function normalizeEtag(rawEtag: string | null | undefined): string {
 }
 
 export function normalizeVaultPath(path: string): string {
-    const trimmed: string = path.trim();
+    if (CONTROL_CHAR_REGEX.test(path)) {
+        return "";
+    }
+    const trimmed: string = path.trim().replace(BACKSLASH_REGEX, "/");
     if (trimmed === "" || trimmed === "/" || trimmed === ".") {
         return "";
     }
+    for (const rawSegment of trimmed.split("/")) {
+        if (rawSegment === "") {
+            continue;
+        }
+        if (
+            rawSegment === "." ||
+            rawSegment === ".." ||
+            DRIVE_PREFIX_REGEX.test(rawSegment) ||
+            FORBIDDEN_OBJECT_KEYS.has(rawSegment)
+        ) {
+            return "";
+        }
+    }
     const normalized: string = normalizePath(trimmed)
+        .replace(BACKSLASH_REGEX, "/")
         .replace(LEADING_SLASHES_REGEX, "")
         .replace(TRAILING_SLASHES_REGEX, "");
-    if (normalized === "" || normalized === "/") {
+    if (normalized === "" || normalized === "/" || normalized === ".") {
         return "";
+    }
+    for (const segment of normalized.split("/")) {
+        if (
+            segment === "" ||
+            segment === "." ||
+            segment === ".." ||
+            DRIVE_PREFIX_REGEX.test(segment) ||
+            FORBIDDEN_OBJECT_KEYS.has(segment)
+        ) {
+            return "";
+        }
     }
     return normalized;
 }
@@ -357,6 +456,7 @@ export function toSecondPrecision(ms: number): number {
 }
 
 export const util = {
+    MAX_WALK_DEPTH,
     PLUGIN_DATA_FILE_PATH,
     SYNC_STATE_FILE_PATH,
     areArrayBuffersEqual,
