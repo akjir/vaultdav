@@ -4,9 +4,18 @@ import type { RemoteItem, VaultDavSettings, WebDavRequestOptions } from "../type
 import { util } from "../utilities";
 import { buildPropfindBody, parseMultiStatus, parseSingleStat } from "./xml_parser";
 
+export const MAX_FILE_SIZE_BYTES: number = util.MAX_FILE_SIZE_BYTES;
+
 const DEFAULT_MAX_RETRIES: number = 3;
 const DEFAULT_RETRY_BASE_MS: number = 500;
 const OCTET_STREAM_CONTENT_TYPE: string = "application/octet-stream";
+const RETRYABLE_STATUS_CODES: ReadonlySet<number> = new Set<number>([
+    423,
+    425,
+    429,
+    503,
+    504
+]);
 const WALK_CONCURRENCY: number = 4;
 const XML_CONTENT_TYPE: string = "application/xml; charset=utf-8";
 
@@ -120,6 +129,15 @@ export class WebDavClient {
             false
         );
         if (response.status === 200) {
+            const byteLength: number = response.arrayBuffer.byteLength;
+            if (byteLength > MAX_FILE_SIZE_BYTES) {
+                log.warn(
+                    `Skipping download for oversized file (${byteLength} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+                );
+                throw new Error(
+                    `WebDAV GET refused on oversized file (${byteLength} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+                );
+            }
             return response.arrayBuffer;
         }
         throw this.formatStatusError("GET", normalizedPath, response.status);
@@ -216,6 +234,24 @@ export class WebDavClient {
         if (status === 423) {
             return new Error(`WebDAV ${method} ${displayPath} failed (423 Locked)`);
         }
+        if (status === 425) {
+            return new Error(`WebDAV ${method} ${displayPath} failed (425 Too Early)`);
+        }
+        if (status === 429) {
+            return new Error(
+                `WebDAV ${method} ${displayPath} failed (429 Too Many Requests)`
+            );
+        }
+        if (status === 503) {
+            return new Error(
+                `WebDAV ${method} ${displayPath} failed (503 Service Unavailable)`
+            );
+        }
+        if (status === 504) {
+            return new Error(
+                `WebDAV ${method} ${displayPath} failed (504 Gateway Timeout)`
+            );
+        }
         if (status === 507) {
             return new Error(
                 `WebDAV ${method} ${displayPath} failed (507 Insufficient Storage)`
@@ -277,7 +313,7 @@ export class WebDavClient {
         while (true) {
             const response: RequestUrlResponse = await requestUrl(param);
             if (
-                (response.status === 423 || response.status === 429) &&
+                RETRYABLE_STATUS_CODES.has(response.status) &&
                 attempt < DEFAULT_MAX_RETRIES
             ) {
                 const waitMs: number = this.retryBaseMs * Math.pow(2, attempt);
@@ -334,6 +370,14 @@ export class WebDavClient {
         if (util.isExcludedPath(normalizedPath)) {
             throw new Error(`WebDAV PUT refused on excluded path: ${normalizedPath}`);
         }
+        if (content.byteLength > MAX_FILE_SIZE_BYTES) {
+            log.warn(
+                `Skipping upload for oversized file (${content.byteLength} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+            );
+            throw new Error(
+                `WebDAV PUT refused on oversized file (${content.byteLength} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+            );
+        }
         const safeMtime: number =
             Number.isFinite(localMtime) && localMtime > 0
                 ? util.toSecondPrecision(localMtime)
@@ -376,7 +420,11 @@ export class WebDavClient {
         if (fallbackStat !== null) {
             return {
                 ...fallbackStat,
-                mtime: fallbackStat.mtime > 0 ? fallbackStat.mtime : safeMtime
+                etag: util.normalizeEtag(fallbackStat.etag),
+                mtime:
+                    fallbackStat.mtime > 0
+                        ? util.toSecondPrecision(fallbackStat.mtime)
+                        : safeMtime
             };
         }
 
@@ -392,8 +440,8 @@ export class WebDavClient {
 
     public async walkRemote(): Promise<RemoteItem[]> {
         const discovered: RemoteItem[] = [];
-        const seenPaths: Set<string> = new Set<string>();
-        const visitedDirs: Set<string> = new Set<string>([""]);
+        const seenLowerPaths: Map<string, string> = new Map<string, string>();
+        const visitedLowerDirs: Set<string> = new Set<string>([""]);
         let currentQueue: string[] = [""];
 
         while (currentQueue.length > 0) {
@@ -417,19 +465,28 @@ export class WebDavClient {
                     if (
                         item.path === "" ||
                         util.isExcludedPath(item.path) ||
-                        seenPaths.has(item.path) ||
                         depth > util.MAX_WALK_DEPTH
                     ) {
                         continue;
                     }
-                    seenPaths.add(item.path);
+                    const lowerPath: string = item.path.toLowerCase();
+                    const existingPath: string | undefined = seenLowerPaths.get(lowerPath);
+                    if (existingPath !== undefined) {
+                        if (existingPath !== item.path) {
+                            log.warn(
+                                `Skipping case-colliding remote path: ${item.path} (collides with ${existingPath})`
+                            );
+                        }
+                        continue;
+                    }
+                    seenLowerPaths.set(lowerPath, item.path);
                     discovered.push(item);
                     if (
                         item.isDirectory &&
-                        !visitedDirs.has(item.path) &&
+                        !visitedLowerDirs.has(lowerPath) &&
                         depth < util.MAX_WALK_DEPTH
                     ) {
-                        visitedDirs.add(item.path);
+                        visitedLowerDirs.add(lowerPath);
                         currentQueue.push(item.path);
                     }
                 }

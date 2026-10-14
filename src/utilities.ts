@@ -1,5 +1,6 @@
 import { normalizePath } from "obsidian";
 
+export const MAX_FILE_SIZE_BYTES: number = 50 * 1024 * 1024;
 export const MAX_WALK_DEPTH: number = 64;
 export const PLUGIN_DATA_FILE_PATH: string = ".obsidian/plugins/vaultdav/data.json";
 export const SYNC_STATE_FILE_PATH: string = ".obsidian/plugins/vaultdav/sync-state.json";
@@ -151,14 +152,17 @@ export function decodeWebDavHref(
         if (CONTROL_CHAR_REGEX.test(decodedPart)) {
             return null;
         }
-        const subSegments: string[] = decodedPart.replace(BACKSLASH_REGEX, "/").split("/");
+        const subSegments: string[] = decodedPart
+            .normalize("NFC")
+            .replace(BACKSLASH_REGEX, "/")
+            .split("/");
         for (const sub of subSegments) {
             if (
                 sub === "" ||
                 sub === "." ||
                 sub === ".." ||
                 DRIVE_PREFIX_REGEX.test(sub) ||
-                FORBIDDEN_OBJECT_KEYS.has(sub)
+                FORBIDDEN_OBJECT_KEYS.has(sub.toLowerCase())
             ) {
                 return null;
             }
@@ -198,10 +202,15 @@ export function decodeWebDavHref(
     if (normalizedBase === "") {
         return afterUser;
     }
-    if (afterUser === normalizedBase) {
+    const lowerAfterUser: string = afterUser.toLowerCase();
+    const lowerBase: string = normalizedBase.toLowerCase();
+    if (afterUser === normalizedBase || lowerAfterUser === lowerBase) {
         return "";
     }
-    if (afterUser.startsWith(`${normalizedBase}/`)) {
+    if (
+        afterUser.startsWith(`${normalizedBase}/`) ||
+        lowerAfterUser.startsWith(`${lowerBase}/`)
+    ) {
         const relativeSlice: string = afterUser.slice(normalizedBase.length + 1);
         const normalizedRel: string = normalizeVaultPath(relativeSlice);
         return normalizedRel === "" ? null : normalizedRel;
@@ -282,7 +291,21 @@ export function getConflictPath(
         const suffix: string = counter === 1 ? `conflict-${stamp}` : `conflict-${stamp}-${counter}`;
         const candidateName: string = `${stem}.${suffix}${ext}`;
         const candidatePath: string = parent === "" ? candidateName : `${parent}/${candidateName}`;
-        if (existingPaths === undefined || !existingPaths.has(candidatePath)) {
+        let hasCollision: boolean = false;
+        if (existingPaths !== undefined) {
+            if (existingPaths.has(candidatePath)) {
+                hasCollision = true;
+            } else {
+                const lowerCandidate: string = candidatePath.toLowerCase();
+                for (const existing of existingPaths) {
+                    if (existing.toLowerCase() === lowerCandidate) {
+                        hasCollision = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!hasCollision) {
             return candidatePath;
         }
         counter += 1;
@@ -379,7 +402,10 @@ export function normalizeVaultPath(path: string): string {
     if (CONTROL_CHAR_REGEX.test(path)) {
         return "";
     }
-    const trimmed: string = path.trim().replace(BACKSLASH_REGEX, "/");
+    const trimmed: string = path
+        .normalize("NFC")
+        .trim()
+        .replace(BACKSLASH_REGEX, "/");
     if (trimmed === "" || trimmed === "/" || trimmed === ".") {
         return "";
     }
@@ -391,7 +417,7 @@ export function normalizeVaultPath(path: string): string {
             rawSegment === "." ||
             rawSegment === ".." ||
             DRIVE_PREFIX_REGEX.test(rawSegment) ||
-            FORBIDDEN_OBJECT_KEYS.has(rawSegment)
+            FORBIDDEN_OBJECT_KEYS.has(rawSegment.toLowerCase())
         ) {
             return "";
         }
@@ -409,7 +435,7 @@ export function normalizeVaultPath(path: string): string {
             segment === "." ||
             segment === ".." ||
             DRIVE_PREFIX_REGEX.test(segment) ||
-            FORBIDDEN_OBJECT_KEYS.has(segment)
+            FORBIDDEN_OBJECT_KEYS.has(segment.toLowerCase())
         ) {
             return "";
         }
@@ -456,6 +482,7 @@ export function toSecondPrecision(ms: number): number {
 }
 
 export const util = {
+    MAX_FILE_SIZE_BYTES,
     MAX_WALK_DEPTH,
     PLUGIN_DATA_FILE_PATH,
     SYNC_STATE_FILE_PATH,

@@ -648,8 +648,10 @@ describe("SyncEngine delta calculation and execution", () => {
     it("rethrows adapter.list OS errors in walkLocal so runSync aborts instead of deleting remote files", async () => {
         const errorSpy = vi.spyOn(log, "error").mockImplementation((): void => undefined);
         const permissionError: Error = new Error("EACCES: permission denied");
+        const remoteDeletedPaths: string[] = [];
 
         const adapter: Partial<DataAdapter> = {
+            exists: async (): Promise<boolean> => false,
             list: async (dir: string): Promise<ListedFiles> => {
                 if (dir === "") {
                     return {
@@ -670,10 +672,25 @@ describe("SyncEngine delta calculation and execution", () => {
             })
         };
 
+        const mockClient: Partial<WebDavClient> = {
+            deleteItem: async (p: string): Promise<void> => {
+                remoteDeletedPaths.push(p);
+            },
+            ensureRemoteBaseDir: async (): Promise<void> => undefined,
+            walkRemote: async (): Promise<RemoteItem[]> => [
+                makeRemote("RestrictedDir/secret.md", 1000, 42, "etag-secret", false)
+            ]
+        };
+
+        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+        stateStore.upsertRecord(
+            makeState("RestrictedDir/secret.md", 1000, 1000, 42, "etag-secret", false)
+        );
+
         const engine: SyncEngine = new SyncEngine(
             { adapter: adapter as DataAdapter } as Vault,
-            {} as WebDavClient,
-            new SyncStateStore(adapter as DataAdapter),
+            mockClient as WebDavClient,
+            stateStore,
             {
                 appPassword: "pw",
                 conflictStrategy: "keep_both",
@@ -686,6 +703,8 @@ describe("SyncEngine delta calculation and execution", () => {
 
         try {
             await expect(engine.walkLocal()).rejects.toThrow("EACCES: permission denied");
+            await expect(engine.runSync()).rejects.toThrow("EACCES: permission denied");
+            expect(remoteDeletedPaths).toEqual([]);
             expect(errorSpy).toHaveBeenCalledWith(
                 "Failed to list directory RestrictedDir",
                 permissionError
@@ -695,16 +714,20 @@ describe("SyncEngine delta calculation and execution", () => {
         }
     });
 
-    it("deduplicates cyclic folders and enforces MAX_WALK_DEPTH in walkLocal", async () => {
+    it("deduplicates cyclic folders via visitedLowerDirs and enforces MAX_WALK_DEPTH in walkLocal", async () => {
+        const warnSpy = vi.spyOn(log, "warn").mockImplementation((): void => undefined);
         let listCalls: number = 0;
         const cyclicAdapter: Partial<DataAdapter> = {
             list: async (dir: string): Promise<ListedFiles> => {
                 listCalls += 1;
                 if (dir === "") {
-                    return { files: [], folders: ["Cycle", "Cycle"] };
+                    return { files: [], folders: ["Cycle", "Cycle", "cycle"] };
                 }
                 if (dir === "Cycle") {
-                    return { files: ["Cycle/note.md", "Cycle/note.md"], folders: ["Cycle"] };
+                    return {
+                        files: ["Cycle/note.md", "Cycle/note.md", "Cycle/NOTE.md"],
+                        folders: ["Cycle", "cycle"]
+                    };
                 }
                 return { files: [], folders: [] };
             },
@@ -730,12 +753,22 @@ describe("SyncEngine delta calculation and execution", () => {
             }
         );
 
-        const cyclicItems: LocalItem[] = await cyclicEngine.walkLocal();
-        expect(listCalls).toBe(2);
-        expect(cyclicItems.map((i: LocalItem) => i.path)).toEqual([
-            "Cycle",
-            "Cycle/note.md"
-        ]);
+        try {
+            const cyclicItems: LocalItem[] = await cyclicEngine.walkLocal();
+            expect(listCalls).toBe(2);
+            expect(cyclicItems.map((i: LocalItem) => i.path)).toEqual([
+                "Cycle",
+                "Cycle/note.md"
+            ]);
+            expect(warnSpy).toHaveBeenCalledWith(
+                "Skipping case-colliding local folder: cycle (collides with Cycle)"
+            );
+            expect(warnSpy).toHaveBeenCalledWith(
+                "Skipping case-colliding local file: Cycle/NOTE.md (collides with Cycle/note.md)"
+            );
+        } finally {
+            warnSpy.mockRestore();
+        }
 
         const deepAdapter: Partial<DataAdapter> = {
             list: async (dir: string): Promise<ListedFiles> => {
@@ -820,6 +853,9 @@ describe("SyncEngine delta calculation and execution", () => {
                 if (dir === "Subproject") {
                     return { files: [], folders: ["Subproject/.git"] };
                 }
+                if (dir === "HiddenFilesDir") {
+                    return { files: ["HiddenFilesDir/.DS_Store"], folders: [] };
+                }
                 return { files: [], folders: [] };
             },
             trashLocal: async (path: string): Promise<void> => {
@@ -842,6 +878,9 @@ describe("SyncEngine delta calculation and execution", () => {
         );
 
         await expect(trashEngine.deleteLocalItem("Subproject", true)).rejects.toThrow(
+            /ENOTEMPTY/
+        );
+        await expect(trashEngine.deleteLocalItem("HiddenFilesDir", true)).rejects.toThrow(
             /ENOTEMPTY/
         );
         expect(trashCalls).toEqual([]);
@@ -989,5 +1028,394 @@ describe("SyncEngine delta calculation and execution", () => {
         expect(initialHasReservedPath).toBe(true);
         expect(uploadedConflictPaths).toContain(reservedConflictPath);
         expect(uploadedConflictPaths).toContain("Note.conflict-20261014-190000-2.md");
+    });
+
+    it("skips oversized 60MB local and remote files (> MAX_FILE_SIZE_BYTES), logs a warn, and records errors in SyncResult without buffering in memory", async () => {
+        const warnSpy = vi.spyOn(log, "warn").mockImplementation((): void => undefined);
+        const errorSpy = vi.spyOn(log, "error").mockImplementation((): void => undefined);
+        const t0: number = Date.UTC(2026, 9, 14, 18, 0, 0);
+        const sixtyMb: number = 60 * 1024 * 1024;
+        const fakeOversizedBuffer: ArrayBuffer = Object.defineProperty(
+            new ArrayBuffer(0),
+            "byteLength",
+            { value: sixtyMb }
+        );
+
+        let readBinaryCalls: number = 0;
+        let downloadFileCalls: number = 0;
+        const textFiles: Map<string, string> = new Map<string, string>();
+
+        const adapter: Partial<DataAdapter> = {
+            exists: async (p: string): Promise<boolean> => textFiles.has(p),
+            mkdir: async (): Promise<void> => undefined,
+            read: async (p: string): Promise<string> => textFiles.get(p) ?? "",
+            readBinary: async (p: string): Promise<ArrayBuffer> => {
+                readBinaryCalls += 1;
+                if (p === "SmallNote.md") {
+                    return new Uint8Array([1, 2, 3]).buffer;
+                }
+                if (p === "GrewOnDiskLocal.bin") {
+                    return fakeOversizedBuffer;
+                }
+                throw new Error(`Should not readBinary oversized file: ${p}`);
+            },
+            stat: async (): Promise<Stat | null> => ({
+                ctime: t0,
+                mtime: t0,
+                size: 3,
+                type: "file"
+            }),
+            write: async (p: string, d: string): Promise<void> => {
+                textFiles.set(p, d);
+            },
+            writeBinary: async (): Promise<void> => undefined
+        };
+
+        const mockClient: Partial<WebDavClient> = {
+            downloadFile: async (p: string): Promise<ArrayBuffer> => {
+                downloadFileCalls += 1;
+                if (p === "UnderReportedRemote.bin") {
+                    return fakeOversizedBuffer;
+                }
+                throw new Error(`Should not downloadFile oversized file: ${p}`);
+            },
+            uploadFile: async (
+                p: string,
+                content: ArrayBuffer,
+                mtime: number
+            ): Promise<RemoteItem> => makeRemote(p, mtime, content.byteLength, `etag-${p}`)
+        };
+
+        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+        await stateStore.load();
+
+        const localItems: LocalItem[] = [
+            makeLocal("HugeLocal.zip", t0, sixtyMb, false),
+            makeLocal("HugeConflict.bin", t0, sixtyMb, false),
+            makeLocal("HugeRemoteConflict.bin", t0, 100, false),
+            makeLocal("GrewOnDiskLocal.bin", t0, 100, false),
+            makeLocal("SmallNote.md", t0, 3, false)
+        ];
+        const remoteItems: RemoteItem[] = [
+            makeRemote("HugeRemote.mov", t0, sixtyMb, "etag-huge-remote", false),
+            makeRemote("HugeConflict.bin", t0 + 1000, sixtyMb, "etag-huge-conf", false),
+            makeRemote(
+                "HugeRemoteConflict.bin",
+                t0 + 1000,
+                sixtyMb,
+                "etag-huge-rconf",
+                false
+            ),
+            makeRemote(
+                "UnderReportedRemote.bin",
+                t0,
+                100,
+                "etag-under-reported",
+                false
+            )
+        ];
+
+        const plan: SyncPlan = buildSyncPlan(localItems, remoteItems, {}, t0);
+        const engine: SyncEngine = new SyncEngine(
+            { adapter: adapter as DataAdapter } as Vault,
+            mockClient as WebDavClient,
+            stateStore,
+            {
+                appPassword: "pw",
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        try {
+            const result = await engine.executePlan(plan, localItems, remoteItems);
+            expect(readBinaryCalls).toBe(2);
+            expect(downloadFileCalls).toBe(1);
+            expect(result.uploaded).toBe(1);
+            expect(result.downloaded).toBe(0);
+            expect(result.conflictsResolved).toBe(0);
+            expect(result.errors).toHaveLength(6);
+            expect(result.errors.some((e: string) => e.includes("HugeLocal.zip"))).toBe(
+                true
+            );
+            expect(result.errors.some((e: string) => e.includes("HugeRemote.mov"))).toBe(
+                true
+            );
+            expect(
+                result.errors.some((e: string) => e.includes("HugeConflict.bin"))
+            ).toBe(true);
+            expect(
+                result.errors.some((e: string) => e.includes("HugeRemoteConflict.bin"))
+            ).toBe(true);
+            expect(
+                result.errors.some((e: string) => e.includes("GrewOnDiskLocal.bin"))
+            ).toBe(true);
+            expect(
+                result.errors.some((e: string) => e.includes("UnderReportedRemote.bin"))
+            ).toBe(true);
+            expect(warnSpy).toHaveBeenCalled();
+        } finally {
+            warnSpy.mockRestore();
+            errorSpy.mockRestore();
+        }
+    });
+
+    it("prevents infinite PUT upload loops by persisting normalized ETag and second-precision mtime after upload", async () => {
+        const subSecondLocalMtime: number = 1728928291789;
+        const serverSecondMtime: number = 1728928291000;
+        const textFiles: Map<string, string> = new Map<string, string>();
+        let putCount: number = 0;
+
+        const adapter: Partial<DataAdapter> = {
+            exists: async (p: string): Promise<boolean> => textFiles.has(p),
+            mkdir: async (): Promise<void> => undefined,
+            read: async (p: string): Promise<string> => textFiles.get(p) ?? "",
+            readBinary: async (): Promise<ArrayBuffer> => new Uint8Array([1, 2, 3, 4]).buffer,
+            write: async (p: string, d: string): Promise<void> => {
+                textFiles.set(p, d);
+            }
+        };
+
+        const mockClient: Partial<WebDavClient> = {
+            createDirectory: async (): Promise<void> => undefined,
+            uploadFile: async (
+                p: string,
+                content: ArrayBuffer,
+                _mtime: number
+            ): Promise<RemoteItem> => {
+                putCount += 1;
+                return makeRemote(
+                    p,
+                    serverSecondMtime,
+                    content.byteLength,
+                    'W/"server-etag-1"'
+                );
+            }
+        };
+
+        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+        await stateStore.load();
+
+        const engine: SyncEngine = new SyncEngine(
+            { adapter: adapter as DataAdapter } as Vault,
+            mockClient as WebDavClient,
+            stateStore,
+            {
+                appPassword: "pw",
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        const localItems: LocalItem[] = [
+            makeLocal("Notes", subSecondLocalMtime, 0, true),
+            makeLocal("Notes/LoopCheck.md", subSecondLocalMtime, 4, false)
+        ];
+        const firstPlan: SyncPlan = buildSyncPlan(
+            localItems,
+            [],
+            stateStore.getAll(),
+            subSecondLocalMtime
+        );
+        const firstResult = await engine.executePlan(firstPlan, localItems, []);
+        expect(firstResult.uploaded).toBe(1);
+        expect(putCount).toBe(1);
+
+        const savedRecord: SyncStateRecord | undefined =
+            stateStore.getRecord("Notes/LoopCheck.md");
+        expect(savedRecord?.etag).toBe("server-etag-1");
+        expect(savedRecord?.localMtime).toBe(serverSecondMtime);
+        expect(savedRecord?.remoteMtime).toBe(serverSecondMtime);
+
+        // Next sync cycle: local still has sub-second mtime (1728928291789), remote has second-precision mtime and normalized ETag
+        const remoteItemsAfterUpload: RemoteItem[] = [
+            makeRemote("Notes", serverSecondMtime, 0, "dir-etag", true),
+            makeRemote("Notes/LoopCheck.md", serverSecondMtime, 4, "server-etag-1", false)
+        ];
+        const secondPlan: SyncPlan = buildSyncPlan(
+            localItems,
+            remoteItemsAfterUpload,
+            stateStore.getAll(),
+            subSecondLocalMtime + 5000
+        );
+        expect(secondPlan.actions).toEqual([
+            {
+                depth: 2,
+                isDirectory: false,
+                path: "Notes/LoopCheck.md",
+                type: "noop"
+            },
+            {
+                depth: 1,
+                isDirectory: true,
+                path: "Notes",
+                type: "noop"
+            }
+        ]);
+
+        const secondResult = await engine.executePlan(
+            secondPlan,
+            localItems,
+            remoteItemsAfterUpload
+        );
+        expect(secondResult.uploaded).toBe(0);
+        expect(putCount).toBe(1);
+    });
+
+    it("handles cross-platform case-sensitivity mismatches and case-colliding duplicates without ENOENT or false deletions", async () => {
+        const warnSpy = vi.spyOn(log, "warn").mockImplementation((): void => undefined);
+        const t0: number = Date.UTC(2026, 9, 14, 18, 0, 0);
+        const t1: number = Date.UTC(2026, 9, 14, 19, 0, 0);
+
+        try {
+            // 1. Cross-source capitalization difference (local: "notes/daily.md", remote: "Notes/Daily.md", state: "NOTES/DAILY.MD")
+            const localItems: LocalItem[] = [
+                makeLocal("notes/daily.md", t0 + 500, 10, false),
+                makeLocal("notes/modified-local.md", t1, 15, false),
+                makeLocal("notes/LocalDup.md", t0, 12, false),
+                makeLocal("notes/localdup.md", t0, 14, false)
+            ];
+            const remoteItems: RemoteItem[] = [
+                makeRemote("Notes/Daily.md", t0, 10, "etag-daily", false),
+                makeRemote("Notes/Modified-Local.md", t0, 10, "etag-mod", false),
+                // Case-colliding sibling on remote (Linux server has both CaseCollide.md and casecollide.md)
+                makeRemote("Notes/CaseCollide.md", t0, 20, "etag-cc-1", false),
+                makeRemote("Notes/casecollide.md", t0, 25, "etag-cc-2", false)
+            ];
+            const stateRecords: Record<string, SyncStateRecord> = {
+                "NOTES/DAILY.MD": makeState("NOTES/DAILY.MD", t0, t0, 10, "etag-daily", false),
+                "NOTES/MODIFIED-LOCAL.MD": makeState(
+                    "NOTES/MODIFIED-LOCAL.MD",
+                    t0,
+                    t0,
+                    10,
+                    "etag-mod",
+                    false
+                )
+            };
+
+            const plan: SyncPlan = buildSyncPlan(
+                localItems,
+                remoteItems,
+                stateRecords,
+                t1
+            );
+
+            // Should NOT produce delete_local or delete_remote for daily.md or modified-local.md
+            const deleteActions: SyncAction[] = plan.actions.filter(
+                (a: SyncAction) =>
+                    a.type === "delete_local" || a.type === "delete_remote"
+            );
+            expect(deleteActions).toEqual([]);
+
+            // Only one of CaseCollide.md / casecollide.md should be planned for download
+            const collideActions: SyncAction[] = plan.actions.filter(
+                (a: SyncAction) => a.path.toLowerCase() === "notes/casecollide.md"
+            );
+            expect(collideActions).toHaveLength(1);
+            expect(collideActions[0]?.type).toBe("download");
+
+            // Only one of LocalDup.md / localdup.md should be planned for upload
+            const localCollideActions: SyncAction[] = plan.actions.filter(
+                (a: SyncAction) => a.path.toLowerCase() === "notes/localdup.md"
+            );
+            expect(localCollideActions).toHaveLength(1);
+            expect(localCollideActions[0]?.type).toBe("upload");
+            expect(warnSpy).toHaveBeenCalledWith(
+                "Skipping case-colliding local path: notes/localdup.md (collides with notes/LocalDup.md)"
+            );
+            expect(warnSpy).toHaveBeenCalledWith(
+                "Skipping case-colliding remote path: Notes/casecollide.md (collides with Notes/CaseCollide.md)"
+            );
+
+            // 2. Execute plan with case-mismatched local/remote maps without ENOENT
+            const textFiles: Map<string, string> = new Map<string, string>();
+            const downloadedRemotePaths: string[] = [];
+            const uploadedRemotePaths: string[] = [];
+
+            const adapter: Partial<DataAdapter> = {
+                exists: async (p: string): Promise<boolean> => textFiles.has(p),
+                mkdir: async (): Promise<void> => undefined,
+                read: async (p: string): Promise<string> => textFiles.get(p) ?? "",
+                readBinary: async (p: string): Promise<ArrayBuffer> => {
+                    if (
+                        p === "notes/modified-local.md" ||
+                        p === "notes/LocalDup.md"
+                    ) {
+                        return new Uint8Array([1, 2, 3, 4]).buffer;
+                    }
+                    throw new Error(`ENOENT: ${p}`);
+                },
+                stat: async (): Promise<Stat | null> => ({
+                    ctime: t1,
+                    mtime: t1,
+                    size: 20,
+                    type: "file"
+                }),
+                write: async (p: string, d: string): Promise<void> => {
+                    textFiles.set(p, d);
+                },
+                writeBinary: async (): Promise<void> => undefined
+            };
+
+            const mockClient: Partial<WebDavClient> = {
+                createDirectory: async (): Promise<void> => undefined,
+                downloadFile: async (p: string): Promise<ArrayBuffer> => {
+                    downloadedRemotePaths.push(p);
+                    if (p === "Notes/CaseCollide.md") {
+                        return new Uint8Array([9, 9]).buffer;
+                    }
+                    throw new Error(`404 Not Found: ${p}`);
+                },
+                uploadFile: async (
+                    p: string,
+                    content: ArrayBuffer,
+                    mtime: number
+                ): Promise<RemoteItem> => {
+                    uploadedRemotePaths.push(p);
+                    return makeRemote(p, mtime, content.byteLength, `etag-${p}`);
+                }
+            };
+
+            const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+            await stateStore.load();
+            for (const rec of Object.values(stateRecords)) {
+                stateStore.upsertRecord(rec);
+            }
+
+            const engine: SyncEngine = new SyncEngine(
+                { adapter: adapter as DataAdapter } as Vault,
+                mockClient as WebDavClient,
+                stateStore,
+                {
+                    appPassword: "pw",
+                    conflictStrategy: "keep_both",
+                    remoteBaseDir: "Vault",
+                    syncInterval: 0,
+                    url: "https://cloud.example.com",
+                    username: "alice"
+                }
+            );
+
+            const result = await engine.executePlan(plan, localItems, remoteItems);
+            expect(result.errors).toEqual([]);
+            expect(result.uploaded).toBe(2);
+            expect(result.downloaded).toBe(1);
+            expect(downloadedRemotePaths).toEqual(["Notes/CaseCollide.md"]);
+
+            // State store must not contain duplicate case variants for modified-local.md
+            const allStateKeys: string[] = Object.keys(stateStore.getAll()).filter(
+                (k: string) => k.toLowerCase() === "notes/modified-local.md"
+            );
+            expect(allStateKeys).toHaveLength(1);
+        } finally {
+            warnSpy.mockRestore();
+        }
     });
 });

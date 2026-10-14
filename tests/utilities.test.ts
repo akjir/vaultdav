@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { log } from "../src/log";
 import {
+    MAX_FILE_SIZE_BYTES,
     MAX_WALK_DEPTH,
     PLUGIN_DATA_FILE_PATH,
     SYNC_STATE_FILE_PATH,
@@ -8,10 +9,12 @@ import {
 } from "../src/utilities";
 
 describe("utilities and logging", () => {
-    it("exports top-level file path constants sorted alphabetically", () => {
+    it("exports top-level file path and size constants sorted alphabetically", () => {
+        expect(MAX_FILE_SIZE_BYTES).toBe(50 * 1024 * 1024);
         expect(MAX_WALK_DEPTH).toBe(64);
         expect(PLUGIN_DATA_FILE_PATH).toBe(".obsidian/plugins/vaultdav/data.json");
         expect(SYNC_STATE_FILE_PATH).toBe(".obsidian/plugins/vaultdav/sync-state.json");
+        expect(util.MAX_FILE_SIZE_BYTES).toBe(MAX_FILE_SIZE_BYTES);
         expect(util.MAX_WALK_DEPTH).toBe(MAX_WALK_DEPTH);
         expect(util.PLUGIN_DATA_FILE_PATH).toBe(PLUGIN_DATA_FILE_PATH);
         expect(util.SYNC_STATE_FILE_PATH).toBe(SYNC_STATE_FILE_PATH);
@@ -331,5 +334,42 @@ describe("utilities and logging", () => {
         expect(debugSpy).toHaveBeenCalledOnce();
         log.debugEnabled = false;
         debugSpy.mockRestore();
+    });
+
+    it("handles cross-platform case variations in decodeWebDavHref, prototype keys, getConflictPath, and NFC normalization", () => {
+        // NFD decomposed 'u\u0308' normalized to NFC '\u00fc'
+        const nfdPath: string = "Notes/Mu\u0308ller.md";
+        const nfcPath: string = "Notes/M\u00fcller.md";
+        expect(util.normalizeVaultPath(nfdPath)).toBe(nfcPath);
+
+        // Case-variant prototype keys rejected
+        expect(util.normalizeVaultPath("__PROTO__/file.md")).toBe("");
+        expect(util.normalizeVaultPath("Notes/CONSTRUCTOR/file.md")).toBe("");
+        expect(util.normalizeVaultPath("Notes/Prototype/file.md")).toBe("");
+
+        // Case-insensitive remoteBaseDir matching in decodeWebDavHref
+        expect(
+            util.decodeWebDavHref(
+                "/remote.php/dav/files/alice/Obsidian%20Vault/Notes/Daily.md",
+                "alice",
+                "obsidian vault"
+            )
+        ).toBe("Notes/Daily.md");
+        expect(
+            util.decodeWebDavHref(
+                "/remote.php/dav/files/alice/Obsidian%20Vault/",
+                "alice",
+                "obsidian vault"
+            )
+        ).toBe("");
+
+        // Case-insensitive collision avoidance in getConflictPath
+        const ts: number = Date.UTC(2026, 9, 14, 19, 51, 31);
+        const existingUpper: Set<string> = new Set<string>([
+            "FOLDER/NOTE.CONFLICT-20261014-195131.MD"
+        ]);
+        expect(util.getConflictPath("folder/note.md", ts, existingUpper)).toBe(
+            "folder/note.conflict-20261014-195131-2.md"
+        );
     });
 });

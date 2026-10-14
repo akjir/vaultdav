@@ -116,6 +116,7 @@ export function parseMultiStatus(
 ): RemoteItem[] {
     const doc: Document = parseXmlDocument(xmlText);
     const normalizedQueriedDir: string = util.normalizeVaultPath(queriedDirPath);
+    const lowerQueriedDir: string = normalizedQueriedDir.toLowerCase();
     const responses: Element[] = findChildrenByLocalName(doc, "response");
     const seenPaths: Set<string> = new Set<string>();
     const items: RemoteItem[] = [];
@@ -130,13 +131,19 @@ export function parseMultiStatus(
         if (parsed === null) {
             continue;
         }
-        if (parsed.path === normalizedQueriedDir) {
+        const lowerParsedPath: string = parsed.path.toLowerCase();
+        if (
+            parsed.path === normalizedQueriedDir ||
+            lowerParsedPath === lowerQueriedDir
+        ) {
             inScopeCount += 1;
             continue;
         }
+        const parentPath: string = util.getParentPath(parsed.path);
         if (
             parsed.path === "" ||
-            util.getParentPath(parsed.path) !== normalizedQueriedDir ||
+            (parentPath !== normalizedQueriedDir &&
+                parentPath.toLowerCase() !== lowerQueriedDir) ||
             seenPaths.has(parsed.path)
         ) {
             continue;
@@ -212,7 +219,9 @@ export function parseResponseElement(
             ? Date.parse(lastModifiedEl.textContent.trim())
             : 0;
     const mtime: number =
-        Number.isFinite(parsedTime) && parsedTime > 0 ? parsedTime : 0;
+        Number.isFinite(parsedTime) && parsedTime > 0
+            ? util.toSecondPrecision(parsedTime)
+            : 0;
 
     const contentLengthEl: Element | null = findChildInElements(
         okPropEls,
@@ -243,6 +252,7 @@ export function parseSingleStat(
 ): RemoteItem | null {
     const doc: Document = parseXmlDocument(xmlText);
     const normalizedTarget: string = util.normalizeVaultPath(targetPath);
+    const lowerTarget: string = normalizedTarget.toLowerCase();
     const responses: Element[] = findChildrenByLocalName(doc, "response");
 
     for (const responseEl of responses) {
@@ -251,7 +261,11 @@ export function parseSingleStat(
             username,
             remoteBaseDir
         );
-        if (parsed !== null && parsed.path === normalizedTarget) {
+        if (
+            parsed !== null &&
+            (parsed.path === normalizedTarget ||
+                parsed.path.toLowerCase() === lowerTarget)
+        ) {
             return parsed;
         }
     }

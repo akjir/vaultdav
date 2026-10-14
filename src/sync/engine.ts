@@ -13,6 +13,8 @@ import { util } from "../utilities";
 import type { WebDavClient } from "../webdav/client";
 import type { SyncStateStore } from "./state";
 
+export const MAX_FILE_SIZE_BYTES: number = util.MAX_FILE_SIZE_BYTES;
+
 const TRANSFER_CONCURRENCY: number = 4;
 
 export function buildSyncPlan(
@@ -23,6 +25,9 @@ export function buildSyncPlan(
 ): SyncPlan {
     const safeTimestamp: number =
         Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0;
+    const canonicalPathByLower: Map<string, string> = new Map<string, string>();
+    const localLowerMap: Map<string, string> = new Map<string, string>();
+    const remoteLowerMap: Map<string, string> = new Map<string, string>();
     const localMap: Map<string, LocalItem> = new Map<string, LocalItem>();
     const remoteMap: Map<string, RemoteItem> = new Map<string, RemoteItem>();
     const stateMap: Map<string, SyncStateRecord> = new Map<string, SyncStateRecord>();
@@ -34,14 +39,31 @@ export function buildSyncPlan(
         if (util.isExcludedPath(norm)) {
             continue;
         }
-        localMap.set(norm, { ...item, path: norm });
-        allPathsSet.add(norm);
-        if (item.isDirectory) {
-            directoryPaths.add(norm);
+        const lowerNorm: string = norm.toLowerCase();
+        const existingLocalPath: string | undefined = localLowerMap.get(lowerNorm);
+        if (existingLocalPath !== undefined) {
+            if (existingLocalPath !== norm) {
+                log.warn(
+                    `Skipping case-colliding local path: ${norm} (collides with ${existingLocalPath})`
+                );
+            }
+            continue;
         }
-        for (const ancestor of util.getFolderLevels(norm, false)) {
-            allPathsSet.add(ancestor);
-            directoryPaths.add(ancestor);
+        localLowerMap.set(lowerNorm, norm);
+        const canonical: string = canonicalPathByLower.get(lowerNorm) ?? norm;
+        canonicalPathByLower.set(lowerNorm, canonical);
+        localMap.set(canonical, { ...item, path: norm });
+        allPathsSet.add(canonical);
+        if (item.isDirectory) {
+            directoryPaths.add(canonical);
+        }
+        for (const ancestor of util.getFolderLevels(canonical, false)) {
+            const lowerAncestor: string = ancestor.toLowerCase();
+            const canonicalAncestor: string =
+                canonicalPathByLower.get(lowerAncestor) ?? ancestor;
+            canonicalPathByLower.set(lowerAncestor, canonicalAncestor);
+            allPathsSet.add(canonicalAncestor);
+            directoryPaths.add(canonicalAncestor);
         }
     }
 
@@ -50,14 +72,38 @@ export function buildSyncPlan(
         if (util.isExcludedPath(norm)) {
             continue;
         }
-        remoteMap.set(norm, { ...item, path: norm });
-        allPathsSet.add(norm);
-        if (item.isDirectory) {
-            directoryPaths.add(norm);
+        const lowerNorm: string = norm.toLowerCase();
+        const existingRemotePath: string | undefined = remoteLowerMap.get(lowerNorm);
+        if (existingRemotePath !== undefined) {
+            if (existingRemotePath !== norm) {
+                log.warn(
+                    `Skipping case-colliding remote path: ${norm} (collides with ${existingRemotePath})`
+                );
+            }
+            continue;
         }
-        for (const ancestor of util.getFolderLevels(norm, false)) {
-            allPathsSet.add(ancestor);
-            directoryPaths.add(ancestor);
+        remoteLowerMap.set(lowerNorm, norm);
+        const existingCanonical: string | undefined =
+            canonicalPathByLower.get(lowerNorm);
+        if (existingCanonical !== undefined && existingCanonical !== norm) {
+            log.warn(
+                `Case mismatch detected between local "${existingCanonical}" and remote "${norm}"`
+            );
+        }
+        const canonical: string = existingCanonical ?? norm;
+        canonicalPathByLower.set(lowerNorm, canonical);
+        remoteMap.set(canonical, { ...item, path: norm });
+        allPathsSet.add(canonical);
+        if (item.isDirectory) {
+            directoryPaths.add(canonical);
+        }
+        for (const ancestor of util.getFolderLevels(canonical, false)) {
+            const lowerAncestor: string = ancestor.toLowerCase();
+            const canonicalAncestor: string =
+                canonicalPathByLower.get(lowerAncestor) ?? ancestor;
+            canonicalPathByLower.set(lowerAncestor, canonicalAncestor);
+            allPathsSet.add(canonicalAncestor);
+            directoryPaths.add(canonicalAncestor);
         }
     }
 
@@ -66,8 +112,11 @@ export function buildSyncPlan(
         if (util.isExcludedPath(norm)) {
             continue;
         }
-        stateMap.set(norm, { ...record, path: norm });
-        allPathsSet.add(norm);
+        const lowerNorm: string = norm.toLowerCase();
+        const canonical: string = canonicalPathByLower.get(lowerNorm) ?? norm;
+        canonicalPathByLower.set(lowerNorm, canonical);
+        stateMap.set(canonical, { ...record, path: canonical });
+        allPathsSet.add(canonical);
     }
 
     const sortedPaths: string[] = Array.from(allPathsSet).sort(
@@ -91,7 +140,9 @@ export function buildSyncPlan(
     const markParentKept = (path: string): void => {
         const parent: string = util.getParentPath(path);
         if (parent !== "") {
-            keptFolders.add(parent);
+            const canonicalParent: string =
+                canonicalPathByLower.get(parent.toLowerCase()) ?? parent;
+            keptFolders.add(canonicalParent);
         }
     };
 
@@ -321,8 +372,10 @@ export function isRemoteModified(remote: RemoteItem, state: SyncStateRecord): bo
     if (remote.isDirectory !== state.isDirectory) {
         return true;
     }
-    if (remote.etag !== "" && state.etag !== "") {
-        return remote.etag !== state.etag || remote.size !== state.size;
+    const remoteEtag: string = util.normalizeEtag(remote.etag);
+    const stateEtag: string = util.normalizeEtag(state.etag);
+    if (remoteEtag !== "" && stateEtag !== "") {
+        return remoteEtag !== stateEtag || remote.size !== state.size;
     }
     if (remote.size !== state.size) {
         return true;
@@ -425,10 +478,32 @@ export class SyncEngine {
             return;
         }
 
+        if (local.size > MAX_FILE_SIZE_BYTES) {
+            log.warn(
+                `Skipping conflict resolution for oversized local file (${local.size} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+            );
+            throw new Error(
+                `Oversized local file (${local.size} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+            );
+        }
+        if (remote.size > MAX_FILE_SIZE_BYTES) {
+            log.warn(
+                `Skipping conflict resolution for oversized remote file (${remote.size} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+            );
+            throw new Error(
+                `Oversized remote file (${remote.size} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+            );
+        }
+
+        const localReadPath: string =
+            util.normalizeVaultPath(local.path) || normalizedPath;
+        const remoteDownloadPath: string =
+            util.normalizeVaultPath(remote.path) || normalizedPath;
+
         const [localBuffer, remoteBuffer]: [ArrayBuffer, ArrayBuffer] =
             await Promise.all([
-                this.vault.adapter.readBinary(normalizedPath),
-                this.client.downloadFile(normalizedPath)
+                this.vault.adapter.readBinary(localReadPath),
+                this.client.downloadFile(remoteDownloadPath)
             ]);
 
         if (
@@ -436,12 +511,12 @@ export class SyncEngine {
             util.areArrayBuffersEqual(localBuffer, remoteBuffer)
         ) {
             this.stateStore.upsertRecord({
-                etag: remote.etag,
+                etag: util.normalizeEtag(remote.etag),
                 isDirectory: false,
                 lastSyncTime: now,
-                localMtime: local.mtime,
+                localMtime: util.toSecondPrecision(local.mtime),
                 path: normalizedPath,
-                remoteMtime: remote.mtime,
+                remoteMtime: util.toSecondPrecision(remote.mtime),
                 size: remoteBuffer.byteLength
             });
             return;
@@ -464,39 +539,51 @@ export class SyncEngine {
             await this.createLocalDirectory(parentDir);
         }
 
+        const safeLocalMtime: number = util.toSecondPrecision(local.mtime);
         await this.vault.adapter.writeBinary(conflictPath, localBuffer, {
             ctime: local.ctime,
-            mtime: local.mtime
+            mtime: safeLocalMtime
         });
         const uploadedConflict: RemoteItem = await this.client.uploadFile(
             conflictPath,
             localBuffer,
-            local.mtime
+            safeLocalMtime
         );
         const conflictStat: Stat | null = await this.vault.adapter.stat(conflictPath);
+        const resolvedConflictMtime: number =
+            conflictStat !== null &&
+            Number.isFinite(conflictStat.mtime) &&
+            conflictStat.mtime > 0
+                ? util.toSecondPrecision(conflictStat.mtime)
+                : safeLocalMtime;
 
         this.stateStore.upsertRecord({
-            etag: uploadedConflict.etag,
+            etag: util.normalizeEtag(uploadedConflict.etag),
             isDirectory: false,
             lastSyncTime: now,
-            localMtime: conflictStat?.mtime ?? local.mtime,
+            localMtime: resolvedConflictMtime,
             path: conflictPath,
-            remoteMtime: uploadedConflict.mtime,
+            remoteMtime: util.toSecondPrecision(uploadedConflict.mtime),
             size: localBuffer.byteLength
         });
 
+        const safeRemoteMtime: number = util.toSecondPrecision(remote.mtime);
         await this.vault.adapter.writeBinary(normalizedPath, remoteBuffer, {
-            mtime: remote.mtime
+            mtime: safeRemoteMtime
         });
         const mainStat: Stat | null = await this.vault.adapter.stat(normalizedPath);
+        const resolvedMainMtime: number =
+            mainStat !== null && Number.isFinite(mainStat.mtime) && mainStat.mtime > 0
+                ? util.toSecondPrecision(mainStat.mtime)
+                : safeRemoteMtime;
 
         this.stateStore.upsertRecord({
-            etag: remote.etag,
+            etag: util.normalizeEtag(remote.etag),
             isDirectory: false,
             lastSyncTime: now,
-            localMtime: mainStat?.mtime ?? remote.mtime,
+            localMtime: resolvedMainMtime,
             path: normalizedPath,
-            remoteMtime: remote.mtime,
+            remoteMtime: safeRemoteMtime,
             size: remoteBuffer.byteLength
         });
     }
@@ -511,23 +598,49 @@ export class SyncEngine {
             throw new Error(`Download refused on invalid or excluded path: ${path}`);
         }
         const remote: RemoteItem | undefined = remoteMap.get(normalizedPath);
-        const content: ArrayBuffer = await this.client.downloadFile(normalizedPath);
+        if (remote !== undefined && remote.size > MAX_FILE_SIZE_BYTES) {
+            log.warn(
+                `Skipping download for oversized remote file (${remote.size} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+            );
+            throw new Error(
+                `Oversized remote file (${remote.size} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+            );
+        }
+        const remoteDownloadPath: string =
+            remote !== undefined
+                ? util.normalizeVaultPath(remote.path) || normalizedPath
+                : normalizedPath;
+        const content: ArrayBuffer = await this.client.downloadFile(remoteDownloadPath);
+        if (content.byteLength > MAX_FILE_SIZE_BYTES) {
+            log.warn(
+                `Skipping download for oversized remote payload (${content.byteLength} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+            );
+            throw new Error(
+                `Oversized remote payload (${content.byteLength} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+            );
+        }
         const parentDir: string = util.getParentPath(normalizedPath);
         if (parentDir !== "") {
             await this.createLocalDirectory(parentDir);
         }
 
-        const targetMtime: number = remote?.mtime ?? now;
+        const targetMtime: number = util.toSecondPrecision(remote?.mtime ?? now);
         await this.vault.adapter.writeBinary(normalizedPath, content, {
             mtime: targetMtime
         });
         const localStat: Stat | null = await this.vault.adapter.stat(normalizedPath);
+        const resolvedLocalMtime: number =
+            localStat !== null &&
+            Number.isFinite(localStat.mtime) &&
+            localStat.mtime > 0
+                ? util.toSecondPrecision(localStat.mtime)
+                : targetMtime;
 
         this.stateStore.upsertRecord({
-            etag: remote?.etag ?? "",
+            etag: util.normalizeEtag(remote?.etag),
             isDirectory: false,
             lastSyncTime: now,
-            localMtime: localStat?.mtime ?? targetMtime,
+            localMtime: resolvedLocalMtime,
             path: normalizedPath,
             remoteMtime: targetMtime,
             size: content.byteLength
@@ -540,12 +653,49 @@ export class SyncEngine {
         remoteItems: ReadonlyArray<RemoteItem>
     ): Promise<SyncResult> {
         const now: number = plan.timestamp;
-        const localMap: Map<string, LocalItem> = new Map<string, LocalItem>(
-            localItems.map((i: LocalItem) => [util.normalizeVaultPath(i.path), i])
-        );
-        const remoteMap: Map<string, RemoteItem> = new Map<string, RemoteItem>(
-            remoteItems.map((i: RemoteItem) => [util.normalizeVaultPath(i.path), i])
-        );
+        const localMap: Map<string, LocalItem> = new Map<string, LocalItem>();
+        const localLowerMap: Map<string, LocalItem> = new Map<string, LocalItem>();
+        for (const item of localItems) {
+            const norm: string = util.normalizeVaultPath(item.path);
+            if (norm !== "") {
+                localMap.set(norm, item);
+                const lower: string = norm.toLowerCase();
+                if (!localLowerMap.has(lower)) {
+                    localLowerMap.set(lower, item);
+                }
+            }
+        }
+        const remoteMap: Map<string, RemoteItem> = new Map<string, RemoteItem>();
+        const remoteLowerMap: Map<string, RemoteItem> = new Map<string, RemoteItem>();
+        for (const item of remoteItems) {
+            const norm: string = util.normalizeVaultPath(item.path);
+            if (norm !== "") {
+                remoteMap.set(norm, item);
+                const lower: string = norm.toLowerCase();
+                if (!remoteLowerMap.has(lower)) {
+                    remoteLowerMap.set(lower, item);
+                }
+            }
+        }
+        for (const action of plan.actions) {
+            const normActionPath: string = util.normalizeVaultPath(action.path);
+            const lowerActionPath: string = normActionPath.toLowerCase();
+            if (!localMap.has(normActionPath)) {
+                const matchedLocal: LocalItem | undefined =
+                    localLowerMap.get(lowerActionPath);
+                if (matchedLocal !== undefined) {
+                    localMap.set(normActionPath, matchedLocal);
+                }
+            }
+            if (!remoteMap.has(normActionPath)) {
+                const matchedRemote: RemoteItem | undefined =
+                    remoteLowerMap.get(lowerActionPath);
+                if (matchedRemote !== undefined) {
+                    remoteMap.set(normActionPath, matchedRemote);
+                }
+            }
+        }
+
         this.planReservedConflictPaths.clear();
         const existingPaths: Set<string> = new Set<string>([
             ...localMap.keys(),
@@ -589,12 +739,12 @@ export class SyncEngine {
                     local.isDirectory === remote.isDirectory
                 ) {
                     this.stateStore.upsertRecord({
-                        etag: remote.etag,
+                        etag: util.normalizeEtag(remote.etag),
                         isDirectory: action.isDirectory,
                         lastSyncTime: now,
-                        localMtime: local.mtime,
+                        localMtime: util.toSecondPrecision(local.mtime),
                         path: action.path,
-                        remoteMtime: remote.mtime,
+                        remoteMtime: util.toSecondPrecision(remote.mtime),
                         size: action.isDirectory ? 0 : remote.size
                     });
                     stateDirty = true;
@@ -629,9 +779,9 @@ export class SyncEngine {
                             etag: "",
                             isDirectory: true,
                             lastSyncTime: now,
-                            localMtime: now,
+                            localMtime: util.toSecondPrecision(now),
                             path: action.path,
-                            remoteMtime: now,
+                            remoteMtime: util.toSecondPrecision(now),
                             size: 0
                         });
                     } catch (err: unknown) {
@@ -760,8 +910,28 @@ export class SyncEngine {
             throw new Error(`Upload refused on invalid or excluded path: ${path}`);
         }
         const local: LocalItem | undefined = localMap.get(normalizedPath);
-        const content: ArrayBuffer = await this.vault.adapter.readBinary(normalizedPath);
-        const localMtime: number = local?.mtime ?? now;
+        if (local !== undefined && local.size > MAX_FILE_SIZE_BYTES) {
+            log.warn(
+                `Skipping upload for oversized local file (${local.size} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+            );
+            throw new Error(
+                `Oversized local file (${local.size} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+            );
+        }
+        const localReadPath: string =
+            local !== undefined
+                ? util.normalizeVaultPath(local.path) || normalizedPath
+                : normalizedPath;
+        const content: ArrayBuffer = await this.vault.adapter.readBinary(localReadPath);
+        if (content.byteLength > MAX_FILE_SIZE_BYTES) {
+            log.warn(
+                `Skipping upload for oversized local payload (${content.byteLength} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+            );
+            throw new Error(
+                `Oversized local payload (${content.byteLength} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+            );
+        }
+        const localMtime: number = util.toSecondPrecision(local?.mtime ?? now);
         const remoteItem: RemoteItem = await this.client.uploadFile(
             normalizedPath,
             content,
@@ -769,12 +939,12 @@ export class SyncEngine {
         );
 
         this.stateStore.upsertRecord({
-            etag: remoteItem.etag,
+            etag: util.normalizeEtag(remoteItem.etag),
             isDirectory: false,
             lastSyncTime: now,
             localMtime,
             path: normalizedPath,
-            remoteMtime: remoteItem.mtime,
+            remoteMtime: util.toSecondPrecision(remoteItem.mtime),
             size: content.byteLength
         });
     }
@@ -802,8 +972,8 @@ export class SyncEngine {
 
     public async walkLocal(): Promise<LocalItem[]> {
         const discovered: LocalItem[] = [];
-        const seenPaths: Set<string> = new Set<string>();
-        const visitedDirs: Set<string> = new Set<string>([""]);
+        const seenLowerPaths: Map<string, string> = new Map<string, string>();
+        const visitedLowerDirs: Set<string> = new Set<string>([""]);
         let queue: string[] = [""];
 
         while (queue.length > 0) {
@@ -831,12 +1001,22 @@ export class SyncEngine {
                     if (
                         folderPath === "" ||
                         util.isExcludedPath(folderPath) ||
-                        seenPaths.has(folderPath) ||
                         depth > util.MAX_WALK_DEPTH
                     ) {
                         continue;
                     }
-                    seenPaths.add(folderPath);
+                    const lowerFolder: string = folderPath.toLowerCase();
+                    const existingFolder: string | undefined =
+                        seenLowerPaths.get(lowerFolder);
+                    if (existingFolder !== undefined) {
+                        if (existingFolder !== folderPath) {
+                            log.warn(
+                                `Skipping case-colliding local folder: ${folderPath} (collides with ${existingFolder})`
+                            );
+                        }
+                        continue;
+                    }
+                    seenLowerPaths.set(lowerFolder, folderPath);
                     const stat: Stat | null = await this.vault.adapter.stat(folderPath);
                     const mtime: number =
                         stat !== null && Number.isFinite(stat.mtime) && stat.mtime > 0
@@ -853,8 +1033,8 @@ export class SyncEngine {
                         path: folderPath,
                         size: 0
                     });
-                    if (!visitedDirs.has(folderPath) && depth < util.MAX_WALK_DEPTH) {
-                        visitedDirs.add(folderPath);
+                    if (!visitedLowerDirs.has(lowerFolder) && depth < util.MAX_WALK_DEPTH) {
+                        visitedLowerDirs.add(lowerFolder);
                         queue.push(folderPath);
                     }
                 }
@@ -865,16 +1045,26 @@ export class SyncEngine {
                     if (
                         filePath === "" ||
                         util.isExcludedPath(filePath) ||
-                        seenPaths.has(filePath) ||
                         depth > util.MAX_WALK_DEPTH
                     ) {
+                        continue;
+                    }
+                    const lowerFile: string = filePath.toLowerCase();
+                    const existingFile: string | undefined =
+                        seenLowerPaths.get(lowerFile);
+                    if (existingFile !== undefined) {
+                        if (existingFile !== filePath) {
+                            log.warn(
+                                `Skipping case-colliding local file: ${filePath} (collides with ${existingFile})`
+                            );
+                        }
                         continue;
                     }
                     const stat: Stat | null = await this.vault.adapter.stat(filePath);
                     if (stat === null) {
                         continue;
                     }
-                    seenPaths.add(filePath);
+                    seenLowerPaths.set(lowerFile, filePath);
                     const safeMtime: number =
                         Number.isFinite(stat.mtime) && stat.mtime > 0 ? stat.mtime : 0;
                     const safeCtime: number =

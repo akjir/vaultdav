@@ -51,13 +51,19 @@ export class SyncStateStore {
 
     public getRecord(path: string): SyncStateRecord | undefined {
         const normalized: string = util.normalizeVaultPath(path);
-        if (
-            normalized === "" ||
-            !Object.prototype.hasOwnProperty.call(this.records, normalized)
-        ) {
+        if (normalized === "") {
             return undefined;
         }
-        return this.records[normalized];
+        if (Object.prototype.hasOwnProperty.call(this.records, normalized)) {
+            return this.records[normalized];
+        }
+        const lower: string = normalized.toLowerCase();
+        for (const existingKey of Object.keys(this.records)) {
+            if (existingKey.toLowerCase() === lower) {
+                return this.records[existingKey];
+            }
+        }
+        return undefined;
     }
 
     public async load(): Promise<SyncStateData> {
@@ -92,6 +98,7 @@ export class SyncStateStore {
                     parsed as { records: Record<string, unknown> }
                 ).records;
                 const validated: Record<string, SyncStateRecord> = createRecordMap();
+                const lowerKeyMap: Map<string, string> = new Map<string, string>();
 
                 for (const [key, val] of Object.entries(rawRecords)) {
                     if (typeof val === "object" && val !== null) {
@@ -99,6 +106,12 @@ export class SyncStateStore {
                         const candidate: Partial<SyncStateRecord> =
                             val as Partial<SyncStateRecord>;
                         if (normalizedKey !== "" && !util.isExcludedPath(normalizedKey)) {
+                            const lowerKey: string = normalizedKey.toLowerCase();
+                            const existingKey: string | undefined = lowerKeyMap.get(lowerKey);
+                            if (existingKey !== undefined && existingKey !== normalizedKey) {
+                                delete validated[existingKey];
+                            }
+                            lowerKeyMap.set(lowerKey, normalizedKey);
                             validated[normalizedKey] = {
                                 etag: util.normalizeEtag(
                                     typeof candidate.etag === "string" ? candidate.etag : ""
@@ -152,11 +165,17 @@ export class SyncStateStore {
 
     public removeRecord(path: string): void {
         const normalized: string = util.normalizeVaultPath(path);
-        if (
-            normalized !== "" &&
-            Object.prototype.hasOwnProperty.call(this.records, normalized)
-        ) {
+        if (normalized === "") {
+            return;
+        }
+        if (Object.prototype.hasOwnProperty.call(this.records, normalized)) {
             delete this.records[normalized];
+        }
+        const lower: string = normalized.toLowerCase();
+        for (const existingKey of Object.keys(this.records)) {
+            if (existingKey.toLowerCase() === lower) {
+                delete this.records[existingKey];
+            }
         }
     }
 
@@ -180,8 +199,14 @@ export class SyncStateStore {
         if (normalized === "" || util.isExcludedPath(normalized)) {
             return;
         }
+        const lower: string = normalized.toLowerCase();
+        for (const existingKey of Object.keys(this.records)) {
+            if (existingKey !== normalized && existingKey.toLowerCase() === lower) {
+                delete this.records[existingKey];
+            }
+        }
         this.records[normalized] = {
-            etag: record.etag,
+            etag: util.normalizeEtag(record.etag),
             isDirectory: Boolean(record.isDirectory),
             lastSyncTime:
                 Number.isFinite(record.lastSyncTime) && record.lastSyncTime > 0

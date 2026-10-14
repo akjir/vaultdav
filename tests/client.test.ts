@@ -632,4 +632,131 @@ describe("WebDavClient", () => {
         const deepItems: RemoteItem[] = await client.walkRemote();
         expect(deepItems.length).toBe(64);
     });
+
+    it("rejects oversized files (> MAX_FILE_SIZE_BYTES) in uploadFile and downloadFile with a warning", async () => {
+        const client: WebDavClient = new WebDavClient(DEFAULT_TEST_SETTINGS, 1);
+        const oversizedLength: number = 60 * 1024 * 1024;
+        const fakeOversizedBuffer: ArrayBuffer = {
+            byteLength: oversizedLength,
+            slice: () => new ArrayBuffer(0)
+        } as unknown as ArrayBuffer;
+
+        const requestSpy = vi.spyOn(obsidian, "requestUrl");
+        await expect(
+            client.uploadFile("Notes/HugeVideo.mp4", fakeOversizedBuffer, 1728928291000)
+        ).rejects.toThrow(/oversized file/i);
+        expect(requestSpy).not.toHaveBeenCalled();
+
+        requestSpy.mockImplementation((): RequestUrlResponsePromise => {
+            return createMockResponse(
+                200,
+                "",
+                { "Content-Length": String(oversizedLength) },
+                fakeOversizedBuffer
+            );
+        });
+
+        await expect(client.downloadFile("Notes/HugeVideo.mp4")).rejects.toThrow(
+            /oversized file/i
+        );
+    });
+
+    it("retries HTTP 425, 429, 503, and 504 with exponential backoff and never misinterprets persistent 5xx/rate-limit errors as 404 Not Found", async () => {
+        const client: WebDavClient = new WebDavClient(DEFAULT_TEST_SETTINGS, 1);
+        const payload: ArrayBuffer = new Uint8Array([1, 2, 3]).buffer;
+
+        for (const retryStatus of [425, 429, 503, 504]) {
+            let attempts: number = 0;
+            vi.spyOn(obsidian, "requestUrl").mockImplementation(
+                (): RequestUrlResponsePromise => {
+                    attempts += 1;
+                    if (attempts < 3) {
+                        return createMockResponse(retryStatus, "Transient Overload");
+                    }
+                    return createMockResponse(200, "", {}, payload);
+                }
+            );
+
+            const downloaded: ArrayBuffer = await client.downloadFile(
+                `Notes/Retry-${retryStatus}.md`
+            );
+            expect(attempts).toBe(3);
+            expect(downloaded.byteLength).toBe(3);
+        }
+
+        // Persistent 503 / 504 / 429 / 425 in statRemote and walkRemote must throw after max retries (4 total attempts), never return null like 404
+        for (const persistentStatus of [425, 429, 503, 504]) {
+            let statAttempts: number = 0;
+            vi.spyOn(obsidian, "requestUrl").mockImplementation(
+                (): RequestUrlResponsePromise => {
+                    statAttempts += 1;
+                    return createMockResponse(persistentStatus, "Server Overload");
+                }
+            );
+
+            await expect(
+                client.statRemote("Notes/Important.md", false)
+            ).rejects.toThrow(new RegExp(String(persistentStatus)));
+            expect(statAttempts).toBe(4);
+
+            let walkAttempts: number = 0;
+            vi.spyOn(obsidian, "requestUrl").mockImplementation(
+                (): RequestUrlResponsePromise => {
+                    walkAttempts += 1;
+                    return createMockResponse(persistentStatus, "Server Overload");
+                }
+            );
+
+            await expect(client.walkRemote()).rejects.toThrow(
+                new RegExp(String(persistentStatus))
+            );
+            expect(walkAttempts).toBe(4);
+        }
+    });
+
+    it("deduplicates case-colliding remote paths in walkRemote and normalizes weak ETag in uploadFile fallback stat", async () => {
+        const rootXml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/SubVault/</d:href>
+        <d:propstat>
+            <d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/SubVault/Note.md</d:href>
+        <d:propstat>
+            <d:prop>
+                <d:getlastmodified>Wed, 14 Oct 2026 18:00:00 GMT</d:getlastmodified>
+                <d:getcontentlength>10</d:getcontentlength>
+                <d:getetag>W/"etag-upper"</d:getetag>
+                <d:resourcetype/>
+            </d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/SubVault/note.md</d:href>
+        <d:propstat>
+            <d:prop>
+                <d:getlastmodified>Wed, 14 Oct 2026 18:00:00 GMT</d:getlastmodified>
+                <d:getcontentlength>12</d:getcontentlength>
+                <d:getetag>"etag-lower"</d:getetag>
+                <d:resourcetype/>
+            </d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (): RequestUrlResponsePromise => createMockResponse(207, rootXml)
+        );
+
+        const client: WebDavClient = new WebDavClient(DEFAULT_TEST_SETTINGS, 1);
+        const items: RemoteItem[] = await client.walkRemote();
+        expect(items.map((i: RemoteItem) => i.path)).toEqual(["Note.md"]);
+        expect(items[0]?.etag).toBe("etag-upper");
+    });
 });
