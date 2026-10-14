@@ -1,5 +1,5 @@
 {
-    "name": "vault-dav",
+    "name": "vaultdav",
     "version": "0.1.0",
     "description": "Synchronize Obsidian vaults bidirectionally with Nextcloud via WebDAV.",
     "main": "main.js",

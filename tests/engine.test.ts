@@ -1,0 +1,484 @@
+import type { DataAdapter, ListedFiles, Stat, Vault } from "obsidian";
+import { describe, expect, it } from "vitest";
+import {
+    SyncEngine,
+    buildSyncPlan,
+    isLocalModified,
+    isMetadataEqual,
+    isRemoteModified
+} from "../src/sync/engine";
+import { SyncStateStore } from "../src/sync/state";
+import type {
+    LocalItem,
+    RemoteItem,
+    SyncAction,
+    SyncPlan,
+    SyncStateRecord,
+    VaultDavSettings
+} from "../src/types";
+import type { WebDavClient } from "../src/webdav/client";
+
+function makeLocal(
+    path: string,
+    mtime: number,
+    size: number,
+    isDirectory: boolean = false
+): LocalItem {
+    return {
+        ctime: mtime,
+        isDirectory,
+        mtime,
+        path,
+        size: isDirectory ? 0 : size
+    };
+}
+
+function makeRemote(
+    path: string,
+    mtime: number,
+    size: number,
+    etag: string,
+    isDirectory: boolean = false
+): RemoteItem {
+    return {
+        etag,
+        href: `/remote.php/dav/files/alice/Vault/${path}`,
+        isDirectory,
+        mtime,
+        path,
+        size: isDirectory ? 0 : size
+    };
+}
+
+function makeState(
+    path: string,
+    localMtime: number,
+    remoteMtime: number,
+    size: number,
+    etag: string,
+    isDirectory: boolean = false
+): SyncStateRecord {
+    return {
+        etag,
+        isDirectory,
+        lastSyncTime: 1728920000000,
+        localMtime,
+        path,
+        remoteMtime,
+        size: isDirectory ? 0 : size
+    };
+}
+
+describe("SyncEngine delta calculation and execution", () => {
+    it("normalizes millisecond local mtime vs second remote mtime and ETag", () => {
+        const local: LocalItem = makeLocal("a.md", 1728928291789, 100);
+        const remote: RemoteItem = makeRemote("a.md", 1728928291000, 100, "etag-1");
+        const state: SyncStateRecord = makeState(
+            "a.md",
+            1728928291123,
+            1728928291000,
+            100,
+            "etag-1"
+        );
+
+        expect(isMetadataEqual(local, remote)).toBe(true);
+        expect(isLocalModified(local, state)).toBe(false);
+        expect(isRemoteModified(remote, state)).toBe(false);
+
+        const modifiedRemoteEtag: RemoteItem = makeRemote(
+            "a.md",
+            1728928291000,
+            100,
+            "etag-2"
+        );
+        expect(isRemoteModified(modifiedRemoteEtag, state)).toBe(true);
+    });
+
+    it("evaluates all 14 file decision matrix branches (F1-F14)", () => {
+        const t0: number = 1728928000000;
+        const t1: number = 1728929000000;
+
+        const localItems: LocalItem[] = [
+            makeLocal("f2-unchanged.md", t0 + 400, 10),
+            makeLocal("f3-local-mod.md", t1, 12),
+            makeLocal("f4-remote-mod.md", t0, 10),
+            makeLocal("f5-both-mod-equal.md", t1 + 250, 20),
+            makeLocal("f6-both-mod-conflict.md", t1, 25),
+            makeLocal("f7-new-both-equal.md", t0 + 999, 30),
+            makeLocal("f8-new-both-conflict.md", t0, 31),
+            makeLocal("f9-local-new.md", t0, 40),
+            makeLocal("f10-remote-deleted.md", t0, 50),
+            makeLocal("f11-remote-del-local-mod.md", t1, 55)
+        ];
+
+        const remoteItems: RemoteItem[] = [
+            makeRemote("f2-unchanged.md", t0, 10, "e2"),
+            makeRemote("f3-local-mod.md", t0, 10, "e3"),
+            makeRemote("f4-remote-mod.md", t1, 15, "e4-new"),
+            makeRemote("f5-both-mod-equal.md", t1, 20, "e5-new"),
+            makeRemote("f6-both-mod-conflict.md", t1, 28, "e6-new"),
+            makeRemote("f7-new-both-equal.md", t0, 30, "e7"),
+            makeRemote("f8-new-both-conflict.md", t1, 35, "e8"),
+            makeRemote("f12-remote-new.md", t0, 60, "e12"),
+            makeRemote("f13-local-deleted.md", t0, 70, "e13"),
+            makeRemote("f14-local-del-remote-mod.md", t1, 75, "e14-new")
+        ];
+
+        const stateRecords: Record<string, SyncStateRecord> = {
+            "f1-both-deleted.md": makeState("f1-both-deleted.md", t0, t0, 10, "e1"),
+            "f2-unchanged.md": makeState("f2-unchanged.md", t0, t0, 10, "e2"),
+            "f3-local-mod.md": makeState("f3-local-mod.md", t0, t0, 10, "e3"),
+            "f4-remote-mod.md": makeState("f4-remote-mod.md", t0, t0, 10, "e4"),
+            "f5-both-mod-equal.md": makeState("f5-both-mod-equal.md", t0, t0, 10, "e5"),
+            "f6-both-mod-conflict.md": makeState(
+                "f6-both-mod-conflict.md",
+                t0,
+                t0,
+                10,
+                "e6"
+            ),
+            "f10-remote-deleted.md": makeState("f10-remote-deleted.md", t0, t0, 50, "e10"),
+            "f11-remote-del-local-mod.md": makeState(
+                "f11-remote-del-local-mod.md",
+                t0,
+                t0,
+                50,
+                "e11"
+            ),
+            "f13-local-deleted.md": makeState("f13-local-deleted.md", t0, t0, 70, "e13"),
+            "f14-local-del-remote-mod.md": makeState(
+                "f14-local-del-remote-mod.md",
+                t0,
+                t0,
+                70,
+                "e14"
+            )
+        };
+
+        const plan: SyncPlan = buildSyncPlan(localItems, remoteItems, stateRecords, t1);
+        const byPath: Map<string, SyncAction> = new Map<string, SyncAction>(
+            plan.actions.map((a: SyncAction) => [a.path, a])
+        );
+
+        expect(byPath.get("f1-both-deleted.md")?.type).toBe("prune_state");
+        expect(byPath.get("f2-unchanged.md")?.type).toBe("noop");
+        expect(byPath.get("f3-local-mod.md")?.type).toBe("upload");
+        expect(byPath.get("f4-remote-mod.md")?.type).toBe("download");
+        expect(byPath.get("f5-both-mod-equal.md")?.type).toBe("noop");
+        expect(byPath.get("f6-both-mod-conflict.md")?.type).toBe("conflict");
+        expect(byPath.get("f7-new-both-equal.md")?.type).toBe("noop");
+        expect(byPath.get("f8-new-both-conflict.md")?.type).toBe("conflict");
+        expect(byPath.get("f9-local-new.md")?.type).toBe("upload");
+        expect(byPath.get("f10-remote-deleted.md")?.type).toBe("delete_local");
+        expect(byPath.get("f11-remote-del-local-mod.md")?.type).toBe("upload");
+        expect(byPath.get("f12-remote-new.md")?.type).toBe("download");
+        expect(byPath.get("f13-local-deleted.md")?.type).toBe("delete_remote");
+        expect(byPath.get("f14-local-del-remote-mod.md")?.type).toBe("download");
+    });
+
+    it("propagates keptFolders so parent folders with new children are recreated instead of deleted", () => {
+        const t0: number = 1728928000000;
+        const localItems: LocalItem[] = [
+            makeLocal("Archive", t0, 0, true),
+            makeLocal("Archive/Sub", t0, 0, true),
+            makeLocal("Archive/Sub/NewLocalNote.md", t0, 25, false),
+            makeLocal("EmptyDeletedOnRemote", t0, 0, true)
+        ];
+        const remoteItems: RemoteItem[] = [];
+        const stateRecords: Record<string, SyncStateRecord> = {
+            Archive: makeState("Archive", t0, t0, 0, "dir-1", true),
+            "Archive/Sub": makeState("Archive/Sub", t0, t0, 0, "dir-2", true),
+            EmptyDeletedOnRemote: makeState(
+                "EmptyDeletedOnRemote",
+                t0,
+                t0,
+                0,
+                "dir-3",
+                true
+            )
+        };
+
+        const plan: SyncPlan = buildSyncPlan(localItems, remoteItems, stateRecords, t0);
+        const byPath: Map<string, SyncAction> = new Map<string, SyncAction>(
+            plan.actions.map((a: SyncAction) => [a.path, a])
+        );
+
+        expect(byPath.get("Archive/Sub/NewLocalNote.md")?.type).toBe("upload");
+        expect(byPath.get("Archive/Sub")?.type).toBe("create_remote_dir");
+        expect(byPath.get("Archive")?.type).toBe("create_remote_dir");
+        expect(byPath.get("EmptyDeletedOnRemote")?.type).toBe("delete_local");
+    });
+
+    it("executes 4 phases in order (top-down mkdir, bottom-up delete, conflict keep_both & newest_wins)", async () => {
+        const t0: number = Date.UTC(2026, 9, 14, 18, 0, 0);
+        const t1: number = Date.UTC(2026, 9, 14, 19, 0, 0);
+
+        const operationLog: string[] = [];
+        const localFiles: Map<string, ArrayBuffer> = new Map<string, ArrayBuffer>([
+            ["ConflictDiff.md", new TextEncoder().encode("local-version").buffer],
+            ["ConflictSameBytes.md", new TextEncoder().encode("identical").buffer],
+            ["DirA/DirB/UploadMe.md", new TextEncoder().encode("upload-payload").buffer],
+            ["OldDir/OldSub/DeleteLocalFile.md", new TextEncoder().encode("old").buffer]
+        ]);
+        const localDirs: Set<string> = new Set<string>([
+            "DirA",
+            "DirA/DirB",
+            "OldDir",
+            "OldDir/OldSub"
+        ]);
+        const textFiles: Map<string, string> = new Map<string, string>();
+
+        const adapter: Partial<DataAdapter> = {
+            exists: async (p: string): Promise<boolean> => {
+                return localFiles.has(p) || localDirs.has(p) || textFiles.has(p);
+            },
+            list: async (_p: string): Promise<ListedFiles> => {
+                return { files: [], folders: [] };
+            },
+            mkdir: async (p: string): Promise<void> => {
+                operationLog.push(`local:mkdir:${p}`);
+                localDirs.add(p);
+            },
+            read: async (p: string): Promise<string> => {
+                return textFiles.get(p) ?? "";
+            },
+            readBinary: async (p: string): Promise<ArrayBuffer> => {
+                const buf: ArrayBuffer | undefined = localFiles.get(p);
+                if (buf === undefined) {
+                    throw new Error(`Missing local binary ${p}`);
+                }
+                return buf;
+            },
+            stat: async (p: string): Promise<Stat | null> => {
+                const buf: ArrayBuffer | undefined = localFiles.get(p);
+                if (buf !== undefined) {
+                    return {
+                        ctime: t1,
+                        mtime: t1,
+                        size: buf.byteLength,
+                        type: "file"
+                    };
+                }
+                if (localDirs.has(p)) {
+                    return {
+                        ctime: t1,
+                        mtime: t1,
+                        size: 0,
+                        type: "folder"
+                    };
+                }
+                return null;
+            },
+            trashLocal: async (p: string): Promise<void> => {
+                operationLog.push(`local:delete:${p}`);
+                localFiles.delete(p);
+                localDirs.delete(p);
+            },
+            write: async (p: string, data: string): Promise<void> => {
+                textFiles.set(p, data);
+            },
+            writeBinary: async (p: string, data: ArrayBuffer): Promise<void> => {
+                operationLog.push(`local:write:${p}`);
+                localFiles.set(p, data);
+            }
+        };
+
+        const mockClient: Partial<WebDavClient> = {
+            createDirectory: async (p: string): Promise<void> => {
+                operationLog.push(`remote:mkdir:${p}`);
+            },
+            deleteItem: async (p: string): Promise<void> => {
+                operationLog.push(`remote:delete:${p}`);
+            },
+            downloadFile: async (p: string): Promise<ArrayBuffer> => {
+                operationLog.push(`remote:download:${p}`);
+                if (p === "ConflictSameBytes.md") {
+                    return new TextEncoder().encode("identical").buffer;
+                }
+                return new TextEncoder().encode(`remote-content:${p}`).buffer;
+            },
+            uploadFile: async (
+                p: string,
+                content: ArrayBuffer,
+                mtime: number
+            ): Promise<RemoteItem> => {
+                operationLog.push(`remote:upload:${p}`);
+                return makeRemote(p, mtime, content.byteLength, `etag-${p}`);
+            }
+        };
+
+        const settings: VaultDavSettings = {
+            appPassword: "pw",
+            conflictStrategy: "keep_both",
+            remoteBaseDir: "Vault",
+            syncInterval: 0,
+            url: "https://cloud.example.com",
+            username: "alice"
+        };
+
+        const vault: Vault = { adapter: adapter as DataAdapter } as Vault;
+        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+        await stateStore.load();
+
+        const localItems: LocalItem[] = [
+            makeLocal("DirA", t1, 0, true),
+            makeLocal("DirA/DirB", t1, 0, true),
+            makeLocal("DirA/DirB/UploadMe.md", t1, 14, false),
+            makeLocal("OldDir", t0, 0, true),
+            makeLocal("OldDir/OldSub", t0, 0, true),
+            makeLocal("OldDir/OldSub/DeleteLocalFile.md", t0, 3, false),
+            makeLocal("ConflictDiff.md", t1, 13, false),
+            makeLocal("ConflictSameBytes.md", t1, 9, false)
+        ];
+
+        const remoteItems: RemoteItem[] = [
+            makeRemote("ConflictDiff.md", t1 + 1000, 29, "etag-diff", false),
+            makeRemote("ConflictSameBytes.md", t1 + 1000, 9, "etag-same", false)
+        ];
+
+        const stateRecords: Record<string, SyncStateRecord> = {
+            OldDir: makeState("OldDir", t0, t0, 0, "d1", true),
+            "OldDir/OldSub": makeState("OldDir/OldSub", t0, t0, 0, "d2", true),
+            "OldDir/OldSub/DeleteLocalFile.md": makeState(
+                "OldDir/OldSub/DeleteLocalFile.md",
+                t0,
+                t0,
+                3,
+                "f1",
+                false
+            )
+        };
+
+        for (const rec of Object.values(stateRecords)) {
+            stateStore.upsertRecord(rec);
+        }
+
+        const plan: SyncPlan = buildSyncPlan(localItems, remoteItems, stateRecords, t1);
+        const engine: SyncEngine = new SyncEngine(
+            vault,
+            mockClient as WebDavClient,
+            stateStore,
+            settings
+        );
+
+        const result = await engine.executePlan(plan, localItems, remoteItems);
+
+        expect(result.errors).toEqual([]);
+        expect(result.uploaded).toBe(1);
+        expect(result.conflictsResolved).toBe(2);
+        expect(result.deletedLocal).toBe(1);
+
+        const mkdirDirAIndex: number = operationLog.indexOf("remote:mkdir:DirA");
+        const mkdirDirBIndex: number = operationLog.indexOf("remote:mkdir:DirA/DirB");
+        const uploadIndex: number = operationLog.indexOf(
+            "remote:upload:DirA/DirB/UploadMe.md"
+        );
+        expect(mkdirDirAIndex).toBeGreaterThanOrEqual(0);
+        expect(mkdirDirBIndex).toBeGreaterThan(mkdirDirAIndex);
+        expect(uploadIndex).toBeGreaterThan(mkdirDirBIndex);
+
+        const delFileIdx: number = operationLog.indexOf(
+            "local:delete:OldDir/OldSub/DeleteLocalFile.md"
+        );
+        const delSubIdx: number = operationLog.indexOf("local:delete:OldDir/OldSub");
+        const delRootIdx: number = operationLog.indexOf("local:delete:OldDir");
+        expect(delFileIdx).toBeGreaterThanOrEqual(0);
+        expect(delSubIdx).toBeGreaterThan(delFileIdx);
+        expect(delRootIdx).toBeGreaterThan(delSubIdx);
+
+        expect(
+            operationLog.some((entry: string) =>
+                entry.startsWith("remote:upload:ConflictDiff.conflict-")
+            )
+        ).toBe(true);
+        expect(
+            operationLog.some((entry: string) =>
+                entry.startsWith("remote:upload:ConflictSameBytes.conflict-")
+            )
+        ).toBe(false);
+    });
+
+    it("resolves conflicts using newest_wins strategy and walks local vault via runSync", async () => {
+        const t0: number = Date.UTC(2026, 9, 14, 18, 0, 0);
+        const tNewer: number = Date.UTC(2026, 9, 14, 19, 0, 0);
+
+        const uploadedPaths: string[] = [];
+        const downloadedPaths: string[] = [];
+        const textFiles: Map<string, string> = new Map<string, string>();
+
+        const adapter: Partial<DataAdapter> = {
+            exists: async (): Promise<boolean> => true,
+            list: async (dir: string): Promise<ListedFiles> => {
+                if (dir === "") {
+                    return {
+                        files: [
+                            "LocalWins.md",
+                            "RemoteWins.md",
+                            ".obsidian/workspace.json"
+                        ],
+                        folders: [".git"]
+                    };
+                }
+                return { files: [], folders: [] };
+            },
+            mkdir: async (): Promise<void> => undefined,
+            read: async (p: string): Promise<string> => textFiles.get(p) ?? "",
+            readBinary: async (): Promise<ArrayBuffer> => new Uint8Array([1, 2]).buffer,
+            stat: async (p: string): Promise<Stat | null> => {
+                if (p === "LocalWins.md") {
+                    return { ctime: tNewer, mtime: tNewer, size: 10, type: "file" };
+                }
+                if (p === "RemoteWins.md") {
+                    return { ctime: t0, mtime: t0, size: 10, type: "file" };
+                }
+                return null;
+            },
+            write: async (p: string, d: string): Promise<void> => {
+                textFiles.set(p, d);
+            },
+            writeBinary: async (p: string): Promise<void> => {
+                downloadedPaths.push(p);
+            }
+        };
+
+        const mockClient: Partial<WebDavClient> = {
+            downloadFile: async (): Promise<ArrayBuffer> => new Uint8Array([3, 4, 5]).buffer,
+            ensureRemoteBaseDir: async (): Promise<void> => undefined,
+            uploadFile: async (
+                p: string,
+                content: ArrayBuffer,
+                mtime: number
+            ): Promise<RemoteItem> => {
+                uploadedPaths.push(p);
+                return makeRemote(p, mtime, content.byteLength, `etag-${p}`);
+            },
+            walkRemote: async (): Promise<RemoteItem[]> => [
+                makeRemote("LocalWins.md", t0, 20, "r1", false),
+                makeRemote("RemoteWins.md", tNewer, 20, "r2", false)
+            ]
+        };
+
+        const settings: VaultDavSettings = {
+            appPassword: "pw",
+            conflictStrategy: "newest_wins",
+            remoteBaseDir: "Vault",
+            syncInterval: 0,
+            url: "https://cloud.example.com",
+            username: "alice"
+        };
+
+        const vault: Vault = { adapter: adapter as DataAdapter } as Vault;
+        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+        const engine: SyncEngine = new SyncEngine(
+            vault,
+            mockClient as WebDavClient,
+            stateStore,
+            settings
+        );
+
+        const result = await engine.runSync();
+        expect(result.conflictsResolved).toBe(2);
+        expect(uploadedPaths).toEqual(["LocalWins.md"]);
+        expect(downloadedPaths).toEqual(["RemoteWins.md"]);
+    });
+});

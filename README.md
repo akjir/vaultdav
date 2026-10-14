@@ -21,11 +21,18 @@ Synchronize Obsidian vaults bidirectionally with Nextcloud via WebDAV.
 | Sync Interval | `syncInterval` | Automatic synchronization interval in minutes (`0` to disable). |
 | Conflict Strategy | `conflictStrategy` | Resolution mode for concurrent edits (`keep_both` or `newest_wins`). |
 
+## Commands
+
+| Command ID | Name | Description |
+| :--- | :--- | :--- |
+| `vaultdav:sync-now` | Synchronize now | Execute a bidirectional synchronization cycle immediately. |
+| `vaultdav:test-connection` | Test Nextcloud WebDAV connection | Verify Nextcloud credentials and remote base directory access. |
+
 ## Sync Behavior
 
 - Transfers files as binary payloads (`ArrayBuffer`) over Obsidian `requestUrl`.
 - Tracks local and remote modification times and ETags to detect creations, modifications, and deletions (tombstones).
-- Excludes the local sync state file and `.obsidian/workspace*.json` to prevent sync loops.
+- Excludes the local sync state file (`.obsidian/plugins/vaultdav/sync-state.json`), plugin credentials (`.obsidian/plugins/vaultdav/data.json`), and `.obsidian/workspace*.json` to prevent sync loops.
 
 ## Development & Build
 
@@ -36,3 +43,7 @@ npm test
 npm run build
 npm run dev
 ```
+
+## Acknowledgments
+
+VaultDAV's synchronization algorithm and WebDAV quirk handling are inspired by [remotely-save](https://github.com/remotely-save/remotely-save).
