@@ -19,7 +19,10 @@ export class WebDavClient {
         retryBaseMs: number = DEFAULT_RETRY_BASE_MS
     ) {
         this.settings = settings;
-        this.retryBaseMs = retryBaseMs;
+        this.retryBaseMs =
+            Number.isFinite(retryBaseMs) && retryBaseMs >= 0
+                ? retryBaseMs
+                : DEFAULT_RETRY_BASE_MS;
         this.userRootUrl = util.buildNextcloudWebDavBaseUrl(
             settings.url,
             settings.username,

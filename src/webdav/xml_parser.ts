@@ -1,18 +1,20 @@
 import type { RemoteItem } from "../types";
 import { util } from "../utilities";
 
+const PROPFIND_XML_BODY: string = [
+    '<?xml version="1.0" encoding="utf-8"?>',
+    '<d:propfind xmlns:d="DAV:">',
+    "    <d:prop>",
+    "        <d:getlastmodified/>",
+    "        <d:getcontentlength/>",
+    "        <d:getetag/>",
+    "        <d:resourcetype/>",
+    "    </d:prop>",
+    "</d:propfind>"
+].join("\n");
+
 export function buildPropfindBody(): string {
-    return [
-        '<?xml version="1.0" encoding="utf-8"?>',
-        '<d:propfind xmlns:d="DAV:">',
-        "    <d:prop>",
-        "        <d:getlastmodified/>",
-        "        <d:getcontentlength/>",
-        "        <d:getetag/>",
-        "        <d:resourcetype/>",
-        "    </d:prop>",
-        "</d:propfind>"
-    ].join("\n");
+    return PROPFIND_XML_BODY;
 }
 
 export function findChildByLocalName(
@@ -129,14 +131,15 @@ export function parseResponseElement(
         lastModifiedEl?.textContent !== undefined && lastModifiedEl.textContent !== null
             ? Date.parse(lastModifiedEl.textContent.trim())
             : 0;
-    const mtime: number = Number.isNaN(parsedTime) ? 0 : parsedTime;
+    const mtime: number = Number.isFinite(parsedTime) && parsedTime > 0 ? parsedTime : 0;
 
     const contentLengthEl: Element | null = findChildByLocalName(okPropEl, "getcontentlength");
     const parsedSize: number =
         contentLengthEl?.textContent !== undefined && contentLengthEl.textContent !== null
             ? Number.parseInt(contentLengthEl.textContent.trim(), 10)
             : 0;
-    const size: number = isDirectory || Number.isNaN(parsedSize) ? 0 : parsedSize;
+    const size: number =
+        isDirectory || !Number.isFinite(parsedSize) || parsedSize < 0 ? 0 : parsedSize;
 
     return {
         etag,

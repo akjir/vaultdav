@@ -155,4 +155,48 @@ describe("webdav xml_parser", () => {
             /Invalid WebDAV XML/
         );
     });
+
+    it("ignores responses with prefix-colliding usernames or path traversal and sanitizes invalid numeric fields", () => {
+        const xml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/maximilian/Vault/OtherUser.md</d:href>
+        <d:propstat>
+            <d:prop>
+                <d:getcontentlength>10</d:getcontentlength>
+                <d:resourcetype/>
+            </d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+    <d:response>
+        <d:href>/remote.php/dav/files/max/Vault/../Traversal.md</d:href>
+        <d:propstat>
+            <d:prop>
+                <d:getcontentlength>10</d:getcontentlength>
+                <d:resourcetype/>
+            </d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+    <d:response>
+        <d:href>/remote.php/dav/files/max/Vault/NegativeMetrics.md</d:href>
+        <d:propstat>
+            <d:prop>
+                <d:getlastmodified>not-a-valid-date</d:getlastmodified>
+                <d:getcontentlength>-500</d:getcontentlength>
+                <d:getetag>"neg-etag"</d:getetag>
+                <d:resourcetype/>
+            </d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+
+        const items: RemoteItem[] = parseMultiStatus(xml, "max", "Vault", "");
+        expect(items).toHaveLength(1);
+        expect(items[0]?.path).toBe("NegativeMetrics.md");
+        expect(items[0]?.mtime).toBe(0);
+        expect(items[0]?.size).toBe(0);
+    });
 });

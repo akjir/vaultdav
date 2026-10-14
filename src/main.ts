@@ -17,7 +17,10 @@ export default class VaultDavPlugin extends Plugin {
             window.clearInterval(this.syncIntervalId);
             this.syncIntervalId = null;
         }
-        if (this.settings.syncInterval > 0) {
+        if (
+            Number.isFinite(this.settings.syncInterval) &&
+            this.settings.syncInterval > 0
+        ) {
             const intervalMs: number = this.settings.syncInterval * 60 * 1000;
             const id: number = window.setInterval(() => {
                 void this.triggerSync();

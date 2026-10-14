@@ -8,7 +8,7 @@
 - **Core Rules:** Support Desktop and Mobile (`isDesktopOnly: false`). Support Nextcloud WebDAV only (no S3, Dropbox, OneDrive, or Google Drive). Edit modular files in `src/`. NEVER edit the bundled `main.js` directly.
 - **Version Control:** NEVER commit changes unless the user explicitly instructs you to do so.
 - **Language & Tone:** Write all responses, code, comments, documentation, tests, skills, and commits in English. Follow ASD-STE100 (80%). Be concise and precise. Do not use emojis.
-- **Style:** Indent with 4 spaces. Remove trailing spaces. Sort functions and methods alphabetically. Avoid globals. Initialize all variables explicitly (do not leave them implicitly `undefined`). Prohibit the `any` type.
+- **Style:** Indent with 4 spaces. Remove trailing spaces. Sort functions and methods alphabetically. Avoid globals. Initialize all variables explicitly (do not leave them implicitly `undefined`). Prohibit the `any` type. Define static `Set`, `Map`, and `RegExp` instances at module top-level (`UPPER_SNAKE_CASE`), never inside functions called per-file or per-request.
 - **Reqs:** TypeScript 5.x (`strict: true`, `noImplicitAny: true`, `strictNullChecks: true`), ESBuild, Obsidian API (`>=1.5.0`).
 - **Testing (TDD):** Write comprehensive tests in `tests/` for every new feature, logic branch, XML parser routine, sync state transition, or bug fix.
 - **Docs & Metadata:** Keep `README.md`, `manifest.json`, and `versions.json` in sync with code changes per **`update-documentation`**.
@@ -32,7 +32,10 @@
 - **File System:** Execute all local file operations via `app.vault.adapter` (`DataAdapter`) and `app.vault`.
 - **Authentication:** Use HTTP Basic Auth (`Authorization: Basic <base64>`) with Nextcloud username and App Password against `https://<domain>/remote.php/dav/files/<user>/<remote-base-dir>/`.
 - **Concurrency & Locks:** Limit parallel WebDAV transfers (max 3-5 concurrent requests) to prevent Nextcloud rate limits and `423 Locked` (`Sabre\DAV\Exception\Locked`) errors.
-- **Exclusions:** Exclude the local sync state file and `.obsidian/workspace*.json` from synchronization to prevent infinite sync loops.
+- **Exclusions:** Exclude the local sync state file, plugin data file, `.obsidian/workspace*.json`, and `.trash/` from synchronization to prevent infinite sync loops.
+- **Zero Hot-Path Allocations:** Define static `Set`, `Map`, and `RegExp` instances at module top-level (`UPPER_SNAKE_CASE`), never inside functions called per-file or per-request.
+- **Strict Path Boundary & Traversal Safety:** Always verify `/` or end-of-string boundaries when stripping URL/path prefixes. Reject any path containing `.` or `..` segments.
+- **Defensive Numeric Guards:** Validate numeric inputs (`timestamp`, `mtime`, `size`, `concurrency`) with `Number.isFinite()` before arithmetic or `Date` construction.
 
 ## Workflows
 - Proposals: Use **`proposal-workflow`** to manage `.agents/proposals/`.

@@ -13,8 +13,13 @@ Execute this closed-loop workflow for all code changes in `src/` and `tests/`.
 
 ## 2. Test-Driven Development (TDD) Loop
 Execute changes autonomously in this strict sequence until all checks pass with zero regressions:
-1. **Write or Update Tests First:** Add unit tests in `tests/` covering happy paths, error status codes (`401`, `403`, `404`, `409`, `423`, `507`), XML edge cases, or sync conflict states.
-2. **Implement Minimal Modular Code:** Edit files in `src/`. Ensure zero external dependencies (import only from `"obsidian"` or relative `./` and `../` modules; never add npm packages), 4-space indentation, alphabetical function/method sorting, explicit variable initialization, and zero `any` types.
+1. **Write or Update Tests First:** Add unit tests in `tests/` covering happy paths, error status codes (`401`, `403`, `404`, `409`, `423`, `507`), XML edge cases, sync conflict states, path boundary/traversal safety (`.`, `..`, prefix collisions), and `NaN`/non-finite numeric inputs.
+2. **Implement Minimal Modular Code:** Edit files in `src/`. Ensure:
+   - Zero external dependencies (import only from `"obsidian"` or relative `./` and `../` modules; never add npm packages).
+   - 4-space indentation, alphabetical function/method sorting, explicit variable initialization, and zero `any` types.
+   - **Zero Hot-Path Allocations:** Define static `Set`, `Map`, and `RegExp` instances at module top-level (`UPPER_SNAKE_CASE`), never inside functions called per-file or per-request.
+   - **Strict Path Boundary & Traversal Safety:** Always verify `/` or end-of-string boundaries when stripping URL/path prefixes. Reject any path containing `.` or `..` segments.
+   - **Defensive Numeric Guards:** Validate numeric inputs (`timestamp`, `mtime`, `size`, `concurrency`) with `Number.isFinite()` before arithmetic or `Date` construction.
 3. **Run Closed-Loop Verification:**
    - Run `npm run typecheck` (must exit with 0 errors).
    - Run `npm test` (all unit and zero-dependency tests must pass).

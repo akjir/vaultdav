@@ -481,4 +481,79 @@ describe("SyncEngine delta calculation and execution", () => {
         expect(uploadedPaths).toEqual(["LocalWins.md"]);
         expect(downloadedPaths).toEqual(["RemoteWins.md"]);
     });
+
+    it("excludes .trash and path traversal while syncing .github and guarding NaN timestamps and stats", async () => {
+        const plan: SyncPlan = buildSyncPlan(
+            [
+                makeLocal(".trash/deleted.md", 1000, 10),
+                makeLocal("../outside.md", 1000, 10),
+                makeLocal(".github/workflows/ci.yml", 1000, 20),
+                makeLocal("ConflictNaN.md", 1000, 15)
+            ],
+            [makeRemote("ConflictNaN.md", 2000, 25, "e-nan")],
+            {},
+            Number.NaN
+        );
+
+        expect(plan.timestamp).toBe(0);
+        const paths: string[] = plan.actions.map((a: SyncAction) => a.path);
+        expect(paths).not.toContain(".trash/deleted.md");
+        expect(paths).not.toContain("../outside.md");
+        expect(paths).toContain(".github/workflows/ci.yml");
+
+        const conflictAction: SyncAction | undefined = plan.actions.find(
+            (a: SyncAction) => a.path === "ConflictNaN.md"
+        );
+        expect(conflictAction?.conflictCopyPath).toBe(
+            "ConflictNaN.conflict-19700101-000000.md"
+        );
+
+        const adapter: Partial<DataAdapter> = {
+            list: async (dir: string): Promise<ListedFiles> => {
+                if (dir === "") {
+                    return {
+                        files: ["NaNStat.md", ".trash/trashed.md"],
+                        folders: [".trash"]
+                    };
+                }
+                return { files: [], folders: [] };
+            },
+            stat: async (p: string): Promise<Stat | null> => {
+                if (p === "NaNStat.md") {
+                    return {
+                        ctime: Number.NaN,
+                        mtime: Number.NaN,
+                        size: Number.NaN,
+                        type: "file"
+                    };
+                }
+                return null;
+            }
+        };
+
+        const engine: SyncEngine = new SyncEngine(
+            { adapter: adapter as DataAdapter } as Vault,
+            {} as WebDavClient,
+            new SyncStateStore(adapter as DataAdapter),
+            {
+                appPassword: "pw",
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        const walked: LocalItem[] = await engine.walkLocal();
+        expect(walked).toEqual([
+            {
+                ctime: 0,
+                isDirectory: false,
+                mtime: 0,
+                path: "NaNStat.md",
+                size: 0
+            }
+        ]);
+    });
 });

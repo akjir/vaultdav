@@ -1,8 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 import { log } from "../src/log";
-import { util } from "../src/utilities";
+import {
+    PLUGIN_DATA_FILE_PATH,
+    SYNC_STATE_FILE_PATH,
+    util
+} from "../src/utilities";
 
 describe("utilities and logging", () => {
+    it("exports top-level file path constants sorted alphabetically", () => {
+        expect(PLUGIN_DATA_FILE_PATH).toBe(".obsidian/plugins/vaultdav/data.json");
+        expect(SYNC_STATE_FILE_PATH).toBe(".obsidian/plugins/vaultdav/sync-state.json");
+        expect(util.PLUGIN_DATA_FILE_PATH).toBe(PLUGIN_DATA_FILE_PATH);
+        expect(util.SYNC_STATE_FILE_PATH).toBe(SYNC_STATE_FILE_PATH);
+    });
+
     it("encodes ASCII and UTF-8 credentials for HTTP Basic Auth", () => {
         expect(util.encodeBasicAuth("alice", "secret123")).toBe("Basic YWxpY2U6c2VjcmV0MTIz");
         expect(util.encodeBasicAuth("müller", "pässwörd-你好")).toBe(
@@ -22,7 +33,7 @@ describe("utilities and logging", () => {
         );
     });
 
-    it("builds Nextcloud WebDAV base URLs from root or full DAV endpoints", () => {
+    it("builds Nextcloud WebDAV base URLs from root, partial DAV, or full DAV endpoints", () => {
         expect(
             util.buildNextcloudWebDavBaseUrl(
                 "https://cloud.example.com/",
@@ -38,9 +49,33 @@ describe("utilities and logging", () => {
                 "Notes"
             )
         ).toBe("https://cloud.example.com/nextcloud/remote.php/dav/files/alice/Notes");
+
+        expect(
+            util.buildNextcloudWebDavBaseUrl(
+                "https://cloud.example.com/remote.php/dav/files",
+                "alice",
+                "Notes"
+            )
+        ).toBe("https://cloud.example.com/remote.php/dav/files/alice/Notes");
+
+        expect(
+            util.buildNextcloudWebDavBaseUrl(
+                "https://cloud.example.com/remote.php/dav/files/",
+                "alice",
+                "Notes"
+            )
+        ).toBe("https://cloud.example.com/remote.php/dav/files/alice/Notes");
+
+        expect(
+            util.buildNextcloudWebDavBaseUrl(
+                "https://cloud.example.com/remote.php/dav/files/m%C3%BCller/IgnoredBase",
+                "müller",
+                "Notes"
+            )
+        ).toBe("https://cloud.example.com/remote.php/dav/files/m%C3%BCller/Notes");
     });
 
-    it("decodes WebDAV href values and filters root or outside paths", () => {
+    it("decodes WebDAV href values and enforces username boundaries and traversal safety", () => {
         expect(
             util.decodeWebDavHref(
                 "/remote.php/dav/files/alice/Obsidian%20Vault/",
@@ -60,6 +95,38 @@ describe("utilities and logging", () => {
         expect(
             util.decodeWebDavHref(
                 "https://cloud.example.com/remote.php/dav/files/alice/OtherFolder/file.md",
+                "alice",
+                "Obsidian Vault"
+            )
+        ).toBeNull();
+
+        expect(
+            util.decodeWebDavHref(
+                "/remote.php/dav/files/maximilian/Obsidian%20Vault/Note.md",
+                "max",
+                "Obsidian Vault"
+            )
+        ).toBeNull();
+
+        expect(
+            util.decodeWebDavHref(
+                "/remote.php/dav/files/alice/Obsidian%20Vault/../secret.md",
+                "alice",
+                "Obsidian Vault"
+            )
+        ).toBeNull();
+
+        expect(
+            util.decodeWebDavHref(
+                "/remote.php/dav/files/alice/Obsidian%20Vault/%2e%2e/secret.md",
+                "alice",
+                "Obsidian Vault"
+            )
+        ).toBeNull();
+
+        expect(
+            util.decodeWebDavHref(
+                "https://cloud.example.com/remote.php/dav/files/alice/Obsidian%20Vault/Notes/../secret.md",
                 "alice",
                 "Obsidian Vault"
             )
@@ -85,9 +152,11 @@ describe("utilities and logging", () => {
         expect(util.normalizeEtag(undefined)).toBe("");
 
         expect(util.toSecondPrecision(1728928291987)).toBe(1728928291000);
+        expect(util.toSecondPrecision(Number.NaN)).toBe(0);
+        expect(util.toSecondPrecision(-500)).toBe(0);
     });
 
-    it("generates deterministic conflict copy paths without collisions", () => {
+    it("generates deterministic conflict copy paths and guards against invalid timestamps", () => {
         const ts: number = Date.UTC(2026, 9, 14, 19, 51, 31);
         const firstConflict: string = util.getConflictPath("folder/note.md", ts);
         expect(firstConflict).toBe("folder/note.conflict-20261014-195131.md");
@@ -98,25 +167,38 @@ describe("utilities and logging", () => {
 
         expect(util.getConflictPath(".hidden", ts)).toBe(".hidden.conflict-20261014-195131");
         expect(util.getConflictPath("README", ts)).toBe("README.conflict-20261014-195131");
+        expect(util.getConflictPath("folder/note.md", Number.NaN)).toBe(
+            "folder/note.conflict-19700101-000000.md"
+        );
+        expect(util.getConflictPath("folder/note.md", -100)).toBe(
+            "folder/note.conflict-19700101-000000.md"
+        );
     });
 
-    it("excludes sync state, plugin credentials, workspace files, and OS artifacts", () => {
+    it("excludes sync state, trash, workspace files, traversal segments, and OS artifacts while allowing .github/.gitlab", () => {
         expect(util.isExcludedPath(".obsidian/plugins/vaultdav/sync-state.json")).toBe(true);
         expect(util.isExcludedPath(".obsidian/plugins/vaultdav/data.json")).toBe(true);
         expect(util.isExcludedPath(".obsidian/workspace.json")).toBe(true);
         expect(util.isExcludedPath(".obsidian/workspace-mobile.json")).toBe(true);
+        expect(util.isExcludedPath(".trash/note.md")).toBe(true);
         expect(util.isExcludedPath("sub/.DS_Store")).toBe(true);
         expect(util.isExcludedPath(".git/config")).toBe(true);
+        expect(util.isExcludedPath("../outside.md")).toBe(true);
+        expect(util.isExcludedPath("Notes/../outside.md")).toBe(true);
+        expect(util.isExcludedPath("./note.md")).toBe(true);
 
+        expect(util.isExcludedPath(".github/workflows/ci.yml")).toBe(false);
+        expect(util.isExcludedPath(".gitlab/issue_templates/bug.md")).toBe(false);
         expect(util.isExcludedPath(".obsidian/app.json")).toBe(false);
         expect(util.isExcludedPath("Notes/Daily.md")).toBe(false);
     });
 
-    it("compares ArrayBuffers and limits concurrency in runConcurrent", async () => {
+    it("compares ArrayBuffers and limits concurrency in runConcurrent including NaN guard", async () => {
         const bufA: ArrayBuffer = new Uint8Array([1, 2, 3]).buffer;
         const bufB: ArrayBuffer = new Uint8Array([1, 2, 3]).buffer;
         const bufC: ArrayBuffer = new Uint8Array([1, 2, 4]).buffer;
 
+        expect(util.areArrayBuffersEqual(bufA, bufA)).toBe(true);
         expect(util.areArrayBuffersEqual(bufA, bufB)).toBe(true);
         expect(util.areArrayBuffersEqual(bufA, bufC)).toBe(false);
 
@@ -137,6 +219,12 @@ describe("utilities and logging", () => {
         const results: number[] = await util.runConcurrent(tasks, 2);
         expect(results).toEqual([2, 4, 6, 8, 10, 12]);
         expect(maxActive).toBeLessThanOrEqual(2);
+
+        const nanResults: number[] = await util.runConcurrent(
+            [async (): Promise<number> => 42],
+            Number.NaN
+        );
+        expect(nanResults).toEqual([42]);
     });
 
     it("supports debug logging toggle and Notice notifications", () => {

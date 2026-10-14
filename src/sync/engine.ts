@@ -21,6 +21,8 @@ export function buildSyncPlan(
     stateRecords: Readonly<Record<string, SyncStateRecord>>,
     timestamp: number = Date.now()
 ): SyncPlan {
+    const safeTimestamp: number =
+        Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0;
     const localMap: Map<string, LocalItem> = new Map<string, LocalItem>();
     const remoteMap: Map<string, RemoteItem> = new Map<string, RemoteItem>();
     const stateMap: Map<string, SyncStateRecord> = new Map<string, SyncStateRecord>();
@@ -217,7 +219,7 @@ export function buildSyncPlan(
                 } else {
                     const conflictCopyPath: string = util.getConflictPath(
                         path,
-                        timestamp,
+                        safeTimestamp,
                         existingPaths
                     );
                     existingPaths.add(conflictCopyPath);
@@ -234,7 +236,7 @@ export function buildSyncPlan(
             } else {
                 const conflictCopyPath: string = util.getConflictPath(
                     path,
-                    timestamp,
+                    safeTimestamp,
                     existingPaths
                 );
                 existingPaths.add(conflictCopyPath);
@@ -277,7 +279,7 @@ export function buildSyncPlan(
 
     return {
         actions,
-        timestamp
+        timestamp: safeTimestamp
     };
 }
 
@@ -755,8 +757,14 @@ export class SyncEngine {
                         continue;
                     }
                     const stat: Stat | null = await this.vault.adapter.stat(folderPath);
-                    const mtime: number = stat?.mtime ?? 0;
-                    const ctime: number = stat?.ctime ?? mtime;
+                    const mtime: number =
+                        stat !== null && Number.isFinite(stat.mtime) && stat.mtime > 0
+                            ? stat.mtime
+                            : 0;
+                    const ctime: number =
+                        stat !== null && Number.isFinite(stat.ctime) && stat.ctime > 0
+                            ? stat.ctime
+                            : mtime;
                     discovered.push({
                         ctime,
                         isDirectory: true,
@@ -776,13 +784,17 @@ export class SyncEngine {
                     if (stat === null) {
                         continue;
                     }
-                    const mtime: number = stat.mtime > 0 ? stat.mtime : stat.ctime;
+                    const safeMtime: number =
+                        Number.isFinite(stat.mtime) && stat.mtime > 0 ? stat.mtime : 0;
+                    const safeCtime: number =
+                        Number.isFinite(stat.ctime) && stat.ctime > 0 ? stat.ctime : 0;
+                    const mtime: number = safeMtime > 0 ? safeMtime : safeCtime;
                     discovered.push({
-                        ctime: stat.ctime > 0 ? stat.ctime : mtime,
+                        ctime: safeCtime > 0 ? safeCtime : mtime,
                         isDirectory: false,
                         mtime,
                         path: filePath,
-                        size: stat.size > 0 ? stat.size : 0
+                        size: Number.isFinite(stat.size) && stat.size > 0 ? stat.size : 0
                     });
                 }
             }

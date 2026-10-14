@@ -86,7 +86,7 @@ export class VaultDavSettingTab extends PluginSettingTab {
                     .onChange(async (value: string): Promise<void> => {
                         const parsed: number = Number.parseInt(value.trim(), 10);
                         this.pluginInstance.settings.syncInterval =
-                            Number.isNaN(parsed) || parsed < 0 ? 0 : parsed;
+                            !Number.isFinite(parsed) || parsed < 0 ? 0 : parsed;
                         await this.pluginInstance.saveSettings();
                     })
             );

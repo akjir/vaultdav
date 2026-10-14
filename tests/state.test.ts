@@ -93,4 +93,86 @@ describe("SyncStateStore", () => {
         expect(data.version).toBe(1);
         expect(data.records).toEqual({});
     });
+
+    it("rejects excluded or traversal paths and sanitizes non-finite or negative numbers", async () => {
+        const rawJson: string = JSON.stringify({
+            records: {
+                "../traversal.md": {
+                    etag: "bad",
+                    isDirectory: false,
+                    lastSyncTime: 100,
+                    localMtime: 100,
+                    path: "../traversal.md",
+                    remoteMtime: 100,
+                    size: 10
+                },
+                ".trash/deleted.md": {
+                    etag: "trash",
+                    isDirectory: false,
+                    lastSyncTime: 100,
+                    localMtime: 100,
+                    path: ".trash/deleted.md",
+                    remoteMtime: 100,
+                    size: 10
+                },
+                "Notes/Valid.md": {
+                    etag: "ok",
+                    isDirectory: false,
+                    lastSyncTime: -50,
+                    localMtime: -10,
+                    path: "Notes/Valid.md",
+                    remoteMtime: -20,
+                    size: -999
+                }
+            },
+            version: 1
+        });
+        const { adapter } = createMockAdapter({
+            [SYNC_STATE_FILE_PATH]: rawJson
+        });
+        const store: SyncStateStore = new SyncStateStore(adapter);
+        await store.load();
+
+        expect(store.getRecord("../traversal.md")).toBeUndefined();
+        expect(store.getRecord(".trash/deleted.md")).toBeUndefined();
+        expect(store.getRecord("Notes/Valid.md")).toEqual({
+            etag: "ok",
+            isDirectory: false,
+            lastSyncTime: 0,
+            localMtime: 0,
+            path: "Notes/Valid.md",
+            remoteMtime: 0,
+            size: 0
+        });
+
+        store.upsertRecord({
+            etag: "nan-record",
+            isDirectory: false,
+            lastSyncTime: Number.NaN,
+            localMtime: Number.POSITIVE_INFINITY,
+            path: "Notes/NaN.md",
+            remoteMtime: -1,
+            size: Number.NaN
+        });
+        expect(store.getRecord("Notes/NaN.md")).toEqual({
+            etag: "nan-record",
+            isDirectory: false,
+            lastSyncTime: 0,
+            localMtime: 0,
+            path: "Notes/NaN.md",
+            remoteMtime: 0,
+            size: 0
+        });
+
+        store.upsertRecord({
+            etag: "ignored",
+            isDirectory: false,
+            lastSyncTime: 1000,
+            localMtime: 1000,
+            path: "../outside.md",
+            remoteMtime: 1000,
+            size: 5
+        });
+        expect(store.getRecord("../outside.md")).toBeUndefined();
+    });
 });

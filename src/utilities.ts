@@ -1,10 +1,30 @@
 import { normalizePath } from "obsidian";
 
+export const PLUGIN_DATA_FILE_PATH: string = ".obsidian/plugins/vaultdav/data.json";
 export const SYNC_STATE_FILE_PATH: string = ".obsidian/plugins/vaultdav/sync-state.json";
 
+const BACKSLASH_REGEX: RegExp = /\\/g;
 const BASE64_CHARS: string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const IGNORED_SEGMENTS: ReadonlySet<string> = new Set<string>([
+    ".DS_Store",
+    ".git",
+    ".svn",
+    ".trash",
+    "Desktop.ini",
+    "Thumbs.db",
+    "desktop.ini",
+    "node_modules",
+    "thumbs.db"
+]);
+const LEADING_SLASHES_REGEX: RegExp = /^\/+/;
+const QUERY_OR_HASH_REGEX: RegExp = /[?#]/;
+const TRAILING_SLASHES_REGEX: RegExp = /\/+$/;
+const WORKSPACE_FILE_REGEX: RegExp = /^\.obsidian\/workspace[^/]*\.json$/;
 
 export function areArrayBuffersEqual(a: ArrayBuffer, b: ArrayBuffer): boolean {
+    if (a === b) {
+        return true;
+    }
     if (a.byteLength !== b.byteLength) {
         return false;
     }
@@ -23,20 +43,39 @@ export function buildNextcloudWebDavBaseUrl(
     username: string,
     remoteBaseDir: string
 ): string {
-    const trimmedUrl: string = url.trim().replace(/\/+$/, "");
+    const trimmedUrl: string = url.trim().replace(TRAILING_SLASHES_REGEX, "");
     const encodedBaseDir: string = encodeWebDavPath(remoteBaseDir);
-    const davMarker: string = "/remote.php/dav/files/";
-    const markerIndex: number = trimmedUrl.indexOf(davMarker);
+    const davMarker: string = "/remote.php/dav/files";
+    const markerWithSlash: string = `${davMarker}/`;
+    const markerIndex: number = trimmedUrl.indexOf(markerWithSlash);
 
     let userRootUrl: string = "";
     if (markerIndex !== -1) {
-        const afterMarker: string = trimmedUrl.slice(markerIndex + davMarker.length);
-        const userSegment: string = afterMarker.split("/")[0] ?? "";
-        const prefix: string = trimmedUrl.slice(0, markerIndex + davMarker.length);
-        userRootUrl = `${prefix}${userSegment}`;
+        const afterMarker: string = trimmedUrl.slice(
+            markerIndex + markerWithSlash.length
+        );
+        const rawUserSegment: string = (afterMarker.split("/")[0] ?? "").trim();
+        const prefix: string = trimmedUrl.slice(
+            0,
+            markerIndex + markerWithSlash.length
+        );
+        let encodedUser: string = "";
+        if (rawUserSegment !== "") {
+            try {
+                encodedUser = encodeURIComponent(decodeURIComponent(rawUserSegment));
+            } catch {
+                encodedUser = encodeURIComponent(rawUserSegment);
+            }
+        } else {
+            encodedUser = encodeURIComponent(username.trim());
+        }
+        userRootUrl = `${prefix}${encodedUser}`;
+    } else if (trimmedUrl.endsWith(davMarker)) {
+        const encodedUser: string = encodeURIComponent(username.trim());
+        userRootUrl = `${trimmedUrl}/${encodedUser}`;
     } else {
         const encodedUser: string = encodeURIComponent(username.trim());
-        userRootUrl = `${trimmedUrl}${davMarker}${encodedUser}`;
+        userRootUrl = `${trimmedUrl}${markerWithSlash}${encodedUser}`;
     }
 
     if (encodedBaseDir === "") {
@@ -54,7 +93,9 @@ export function decodeWebDavHref(
     if (rawPathname.startsWith("http://") || rawPathname.startsWith("https://")) {
         try {
             const parsedUrl: URL = new URL(rawPathname);
-            rawPathname = parsedUrl.pathname;
+            const rawUrlPath: string =
+                rawPathname.slice(parsedUrl.origin.length).split(QUERY_OR_HASH_REGEX)[0] ?? "";
+            rawPathname = rawUrlPath !== "" ? rawUrlPath : parsedUrl.pathname;
         } catch {
             return null;
         }
@@ -65,10 +106,21 @@ export function decodeWebDavHref(
         if (part === "") {
             continue;
         }
+        if (part === "." || part === "..") {
+            return null;
+        }
+        let decodedPart: string = part;
         try {
-            decodedSegments.push(decodeURIComponent(part));
+            decodedPart = decodeURIComponent(part);
         } catch {
-            decodedSegments.push(part);
+            decodedPart = part;
+        }
+        const subSegments: string[] = decodedPart.replace(BACKSLASH_REGEX, "/").split("/");
+        for (const sub of subSegments) {
+            if (sub === "" || sub === "." || sub === "..") {
+                return null;
+            }
+            decodedSegments.push(sub);
         }
     }
 
@@ -79,13 +131,16 @@ export function decodeWebDavHref(
         return null;
     }
 
-    const afterUser: string = decodedFull
-        .slice(prefixIndex + davPrefix.length)
-        .replace(/^\/+/, "");
+    const scopedPath: string = decodedFull.slice(prefixIndex);
+    if (scopedPath !== davPrefix && !scopedPath.startsWith(`${davPrefix}/`)) {
+        return null;
+    }
+
+    const afterUser: string = normalizeVaultPath(scopedPath.slice(davPrefix.length));
     const normalizedBase: string = normalizeVaultPath(remoteBaseDir);
 
     if (normalizedBase === "") {
-        return normalizeVaultPath(afterUser);
+        return afterUser;
     }
     if (afterUser === normalizedBase) {
         return "";
@@ -97,8 +152,9 @@ export function decodeWebDavHref(
 }
 
 export function delay(ms: number): Promise<void> {
+    const safeMs: number = Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0;
     return new Promise<void>((resolve: () => void) => {
-        setTimeout(resolve, ms);
+        setTimeout(resolve, safeMs);
     });
 }
 
@@ -143,7 +199,9 @@ export function getConflictPath(
     const segments: string[] = normalized.split("/");
     const fileName: string = segments[segments.length - 1] ?? normalized;
 
-    const date: Date = new Date(timestamp);
+    const safeTimestamp: number =
+        Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0;
+    const date: Date = new Date(safeTimestamp);
     const yyyy: string = String(date.getUTCFullYear()).padStart(4, "0");
     const mm: string = String(date.getUTCMonth() + 1).padStart(2, "0");
     const dd: string = String(date.getUTCDate()).padStart(2, "0");
@@ -215,30 +273,17 @@ export function isExcludedPath(path: string): boolean {
     }
     if (
         normalized === SYNC_STATE_FILE_PATH ||
-        normalized === ".obsidian/plugins/vaultdav/data.json"
+        normalized === PLUGIN_DATA_FILE_PATH
     ) {
         return true;
     }
-    if (/^\.obsidian\/workspace[^/]*\.json$/.test(normalized)) {
+    if (WORKSPACE_FILE_REGEX.test(normalized)) {
         return true;
     }
 
-    const ignoredNames: ReadonlySet<string> = new Set<string>([
-        ".DS_Store",
-        ".git",
-        ".github",
-        ".gitlab",
-        ".svn",
-        "Desktop.ini",
-        "Thumbs.db",
-        "desktop.ini",
-        "node_modules",
-        "thumbs.db"
-    ]);
-
     const segments: string[] = normalized.split("/");
     for (const segment of segments) {
-        if (ignoredNames.has(segment)) {
+        if (segment === "." || segment === ".." || IGNORED_SEGMENTS.has(segment)) {
             return true;
         }
     }
@@ -265,8 +310,8 @@ export function normalizeVaultPath(path: string): string {
         return "";
     }
     const normalized: string = normalizePath(trimmed)
-        .replace(/^\/+/, "")
-        .replace(/\/+$/, "");
+        .replace(LEADING_SLASHES_REGEX, "")
+        .replace(TRAILING_SLASHES_REGEX, "");
     if (normalized === "" || normalized === "/") {
         return "";
     }
@@ -277,7 +322,10 @@ export async function runConcurrent<T>(
     tasks: ReadonlyArray<() => Promise<T>>,
     concurrency: number = 4
 ): Promise<T[]> {
-    const safeConcurrency: number = Math.max(1, Math.min(5, Math.floor(concurrency)));
+    const rawConcurrency: number = Number.isFinite(concurrency)
+        ? Math.floor(concurrency)
+        : 4;
+    const safeConcurrency: number = Math.max(1, Math.min(5, rawConcurrency));
     const results: T[] = new Array<T>(tasks.length);
     let nextIndex: number = 0;
 
@@ -309,6 +357,7 @@ export function toSecondPrecision(ms: number): number {
 }
 
 export const util = {
+    PLUGIN_DATA_FILE_PATH,
     SYNC_STATE_FILE_PATH,
     areArrayBuffersEqual,
     buildNextcloudWebDavBaseUrl,

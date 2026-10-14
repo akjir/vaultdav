@@ -32,7 +32,7 @@ Synchronize Obsidian vaults bidirectionally with Nextcloud via WebDAV.
 
 - Transfers files as binary payloads (`ArrayBuffer`) over Obsidian `requestUrl`.
 - Tracks local and remote modification times and ETags to detect creations, modifications, and deletions (tombstones).
-- Excludes the local sync state file (`.obsidian/plugins/vaultdav/sync-state.json`), plugin credentials (`.obsidian/plugins/vaultdav/data.json`), and `.obsidian/workspace*.json` to prevent sync loops.
+- Excludes the local sync state file (`.obsidian/plugins/vaultdav/sync-state.json`), plugin credentials (`.obsidian/plugins/vaultdav/data.json`), `.obsidian/workspace*.json`, and `.trash/` to prevent sync loops.
 
 ## Development & Build
 

@@ -283,4 +283,86 @@ describe("WebDavClient", () => {
             expect(callCount).toBe(1);
         }
     });
+
+    it("handles partial /remote.php/dav/files URLs without duplication, skips .trash, keeps .github, and guards non-finite retry/mtime", async () => {
+        const rootXml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/.trash/</d:href>
+        <d:propstat>
+            <d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/.github/</d:href>
+        <d:propstat>
+            <d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+
+        const githubXml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/.github/workflows.md</d:href>
+        <d:propstat>
+            <d:prop>
+                <d:getlastmodified>Wed, 14 Oct 2026 18:00:00 GMT</d:getlastmodified>
+                <d:getcontentlength>12</d:getcontentlength>
+                <d:getetag>"gh-12"</d:getetag>
+                <d:resourcetype/>
+            </d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+
+        const requestedUrls: string[] = [];
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (req: RequestUrlParam | string): RequestUrlResponsePromise => {
+                const param: RequestUrlParam =
+                    typeof req === "string" ? { url: req } : req;
+                requestedUrls.push(param.url);
+                if (param.method === "PUT") {
+                    expect(param.headers?.["X-OC-Mtime"]).toBe("0");
+                    return createMockResponse(201, "", { ETag: '"nan-mtime-etag"' });
+                }
+                if (param.url.endsWith("/Vault/")) {
+                    return createMockResponse(207, rootXml);
+                }
+                if (param.url.endsWith("/Vault/.github/")) {
+                    return createMockResponse(207, githubXml);
+                }
+                return createMockResponse(404);
+            }
+        );
+
+        const client: WebDavClient = new WebDavClient(
+            {
+                ...DEFAULT_TEST_SETTINGS,
+                remoteBaseDir: "Vault",
+                url: "https://cloud.example.com/remote.php/dav/files/"
+            },
+            Number.NaN
+        );
+
+        const items: RemoteItem[] = await client.walkRemote();
+        expect(items.map((i: RemoteItem) => i.path)).toEqual([
+            ".github",
+            ".github/workflows.md"
+        ]);
+        expect(requestedUrls[0]).toBe(
+            "https://cloud.example.com/remote.php/dav/files/alice/Vault/"
+        );
+        expect(requestedUrls.some((u: string) => u.includes(".trash"))).toBe(false);
+
+        const uploaded: RemoteItem = await client.uploadFile(
+            "Notes/NaNMtime.md",
+            new Uint8Array([1, 2]).buffer,
+            Number.NaN
+        );
+        expect(uploaded.mtime).toBe(0);
+    });
 });

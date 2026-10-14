@@ -73,24 +73,35 @@ export class SyncStateStore {
                         const normalizedKey: string = util.normalizeVaultPath(key);
                         const candidate: Partial<SyncStateRecord> =
                             val as Partial<SyncStateRecord>;
-                        if (normalizedKey !== "") {
+                        if (normalizedKey !== "" && !util.isExcludedPath(normalizedKey)) {
                             validated[normalizedKey] = {
                                 etag: typeof candidate.etag === "string" ? candidate.etag : "",
                                 isDirectory: Boolean(candidate.isDirectory),
                                 lastSyncTime:
-                                    typeof candidate.lastSyncTime === "number"
+                                    typeof candidate.lastSyncTime === "number" &&
+                                    Number.isFinite(candidate.lastSyncTime) &&
+                                    candidate.lastSyncTime > 0
                                         ? candidate.lastSyncTime
                                         : 0,
                                 localMtime:
-                                    typeof candidate.localMtime === "number"
+                                    typeof candidate.localMtime === "number" &&
+                                    Number.isFinite(candidate.localMtime) &&
+                                    candidate.localMtime > 0
                                         ? candidate.localMtime
                                         : 0,
                                 path: normalizedKey,
                                 remoteMtime:
-                                    typeof candidate.remoteMtime === "number"
+                                    typeof candidate.remoteMtime === "number" &&
+                                    Number.isFinite(candidate.remoteMtime) &&
+                                    candidate.remoteMtime > 0
                                         ? candidate.remoteMtime
                                         : 0,
-                                size: typeof candidate.size === "number" ? candidate.size : 0
+                                size:
+                                    typeof candidate.size === "number" &&
+                                    Number.isFinite(candidate.size) &&
+                                    candidate.size >= 0
+                                        ? candidate.size
+                                        : 0
                             };
                         }
                     }
@@ -129,12 +140,27 @@ export class SyncStateStore {
 
     public upsertRecord(record: SyncStateRecord): void {
         const normalized: string = util.normalizeVaultPath(record.path);
-        if (normalized === "") {
+        if (normalized === "" || util.isExcludedPath(normalized)) {
             return;
         }
         this.records[normalized] = {
-            ...record,
-            path: normalized
+            etag: record.etag,
+            isDirectory: Boolean(record.isDirectory),
+            lastSyncTime:
+                Number.isFinite(record.lastSyncTime) && record.lastSyncTime > 0
+                    ? record.lastSyncTime
+                    : 0,
+            localMtime:
+                Number.isFinite(record.localMtime) && record.localMtime > 0
+                    ? record.localMtime
+                    : 0,
+            path: normalized,
+            remoteMtime:
+                Number.isFinite(record.remoteMtime) && record.remoteMtime > 0
+                    ? record.remoteMtime
+                    : 0,
+            size:
+                Number.isFinite(record.size) && record.size >= 0 ? record.size : 0
         };
     }
 }
