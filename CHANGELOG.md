@@ -19,4 +19,4 @@ All notable changes to this project will be documented in this file.
 - Prevent `/remote.php/dav/files/` duplication when the configured Nextcloud URL omits the trailing username segment.
 - Enforce strict username segment boundaries and reject `.` and `..` path traversal segments in WebDAV `href` decoding and sync state records.
 - Exclude `.trash/` from synchronization while allowing `.github/` and `.gitlab/` vault directories.
-- Guard timestamps, file sizes, modification times, and concurrency limits with `Number.isFinite()`.
+- Guard timestamps, file sizes, modification times, notice durations, and concurrency limits with `Number.isFinite()`.
