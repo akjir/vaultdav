@@ -23,3 +23,4 @@ All notable changes to this project will be documented in this file.
 - Enforce strict username segment boundaries and reject `.` and `..` path traversal segments in WebDAV `href` decoding and sync state records.
 - Exclude `.trash/` from synchronization while allowing `.github/` and `.gitlab/` vault directories.
 - Guard timestamps, file sizes, modification times, notice durations, and concurrency limits with `Number.isFinite()`.
+- Harden WebDAV XML parsing to validate the `multistatus` root element, support `HTTP/2 200` status lines and multi-`propstat` `200` blocks, deduplicate response paths, and eliminate hot-path child lookup allocations.
