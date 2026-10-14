@@ -6,9 +6,12 @@ import { buildPropfindBody, parseMultiStatus, parseSingleStat } from "./xml_pars
 
 const DEFAULT_MAX_RETRIES: number = 3;
 const DEFAULT_RETRY_BASE_MS: number = 500;
+const OCTET_STREAM_CONTENT_TYPE: string = "application/octet-stream";
 const WALK_CONCURRENCY: number = 4;
+const XML_CONTENT_TYPE: string = "application/xml; charset=utf-8";
 
 export class WebDavClient {
+    private readonly authHeader: string;
     private readonly baseUrl: string;
     private readonly retryBaseMs: number;
     private readonly settings: VaultDavSettings;
@@ -19,6 +22,10 @@ export class WebDavClient {
         retryBaseMs: number = DEFAULT_RETRY_BASE_MS
     ) {
         this.settings = settings;
+        this.authHeader = util.encodeBasicAuth(
+            settings.username,
+            settings.appPassword
+        );
         this.retryBaseMs =
             Number.isFinite(retryBaseMs) && retryBaseMs >= 0
                 ? retryBaseMs
@@ -52,24 +59,32 @@ export class WebDavClient {
     }
 
     public async createDirectory(path: string): Promise<void> {
+        const normalizedPath: string = util.normalizeVaultPath(path);
+        if (normalizedPath === "") {
+            throw new Error("WebDAV MKCOL refused on empty root path");
+        }
         const response: RequestUrlResponse = await this.requestWithRetry(
             {
                 method: "MKCOL",
-                path
+                path: normalizedPath
             },
             true
         );
         if (response.status === 201 || response.status === 405) {
             return;
         }
-        throw this.formatStatusError("MKCOL", path, response.status);
+        throw this.formatStatusError("MKCOL", normalizedPath, response.status);
     }
 
     public async deleteItem(path: string, isDirectory: boolean): Promise<void> {
+        const normalizedPath: string = util.normalizeVaultPath(path);
+        if (normalizedPath === "") {
+            throw new Error("WebDAV DELETE refused on empty root path");
+        }
         const response: RequestUrlResponse = await this.requestWithRetry(
             {
                 method: "DELETE",
-                path
+                path: normalizedPath
             },
             isDirectory
         );
@@ -80,60 +95,71 @@ export class WebDavClient {
         ) {
             return;
         }
-        throw this.formatStatusError("DELETE", path, response.status);
+        throw this.formatStatusError("DELETE", normalizedPath, response.status);
     }
 
     public async downloadFile(path: string): Promise<ArrayBuffer> {
+        const normalizedPath: string = util.normalizeVaultPath(path);
+        if (normalizedPath === "") {
+            throw new Error("WebDAV GET refused on empty root path");
+        }
         const response: RequestUrlResponse = await this.requestWithRetry(
             {
                 method: "GET",
-                path
+                path: normalizedPath
             },
             false
         );
         if (response.status === 200) {
             return response.arrayBuffer;
         }
-        throw this.formatStatusError("GET", path, response.status);
+        throw this.formatStatusError("GET", normalizedPath, response.status);
     }
 
     public async ensureRemoteBaseDir(): Promise<void> {
         const levels: string[] = util.getFolderLevels(this.settings.remoteBaseDir, true);
-        const authHeader: string = util.encodeBasicAuth(
-            this.settings.username,
-            this.settings.appPassword
-        );
 
         for (const levelPath of levels) {
             const encodedLevel: string = util.encodeWebDavPath(levelPath);
             const targetUrl: string = `${this.userRootUrl}/${encodedLevel}/`;
 
-            const propfindResp: RequestUrlResponse = await requestUrl({
-                body: buildPropfindBody(),
-                contentType: "application/xml; charset=utf-8",
-                headers: {
-                    Authorization: authHeader,
-                    "Cache-Control": "no-cache",
-                    Depth: "0"
+            const propfindResp: RequestUrlResponse = await this.requestWithRetry(
+                {
+                    body: buildPropfindBody(),
+                    contentType: XML_CONTENT_TYPE,
+                    depth: "0",
+                    method: "PROPFIND",
+                    path: levelPath
                 },
-                method: "PROPFIND",
-                throw: false,
-                url: targetUrl
-            });
+                true,
+                targetUrl
+            );
 
             if (propfindResp.status === 207 || propfindResp.status === 200) {
+                if (propfindResp.text.trim() !== "") {
+                    const item: RemoteItem | null = parseSingleStat(
+                        propfindResp.text,
+                        this.settings.username,
+                        "",
+                        levelPath
+                    );
+                    if (item !== null && !item.isDirectory) {
+                        throw new Error(
+                            `WebDAV PROPFIND ${levelPath} failed (remote path is not a directory)`
+                        );
+                    }
+                }
                 continue;
             }
             if (propfindResp.status === 404) {
-                const mkcolResp: RequestUrlResponse = await requestUrl({
-                    headers: {
-                        Authorization: authHeader,
-                        "Cache-Control": "no-cache"
+                const mkcolResp: RequestUrlResponse = await this.requestWithRetry(
+                    {
+                        method: "MKCOL",
+                        path: levelPath
                     },
-                    method: "MKCOL",
-                    throw: false,
-                    url: targetUrl
-                });
+                    true,
+                    targetUrl
+                );
                 if (mkcolResp.status !== 201 && mkcolResp.status !== 405) {
                     throw this.formatStatusError("MKCOL", levelPath, mkcolResp.status);
                 }
@@ -143,11 +169,19 @@ export class WebDavClient {
         }
     }
 
-    public extractHeaderEtag(headers: Record<string, string>): string {
+    public extractHeaderEtag(
+        headers: Record<string, string> | null | undefined
+    ): string {
+        if (headers === null || headers === undefined) {
+            return "";
+        }
         for (const [key, value] of Object.entries(headers)) {
             const lower: string = key.toLowerCase();
             if (lower === "etag" || lower === "oc-etag") {
-                return util.normalizeEtag(value);
+                const normalized: string = util.normalizeEtag(value);
+                if (normalized !== "") {
+                    return normalized;
+                }
             }
         }
         return "";
@@ -182,7 +216,7 @@ export class WebDavClient {
         const response: RequestUrlResponse = await this.requestWithRetry(
             {
                 body: buildPropfindBody(),
-                contentType: "application/xml; charset=utf-8",
+                contentType: XML_CONTENT_TYPE,
                 depth: "1",
                 method: "PROPFIND",
                 path: dirPath
@@ -204,14 +238,13 @@ export class WebDavClient {
 
     public async requestWithRetry(
         options: WebDavRequestOptions,
-        isDirectory: boolean
+        isDirectory: boolean,
+        urlOverride?: string
     ): Promise<RequestUrlResponse> {
-        const url: string = this.buildResourceUrl(options.path, isDirectory);
+        const url: string =
+            urlOverride ?? this.buildResourceUrl(options.path, isDirectory);
         const headers: Record<string, string> = {
-            Authorization: util.encodeBasicAuth(
-                this.settings.username,
-                this.settings.appPassword
-            ),
+            Authorization: this.authHeader,
             "Cache-Control": "no-cache",
             ...(options.headers ?? {})
         };
@@ -254,7 +287,7 @@ export class WebDavClient {
         const response: RequestUrlResponse = await this.requestWithRetry(
             {
                 body: buildPropfindBody(),
-                contentType: "application/xml; charset=utf-8",
+                contentType: XML_CONTENT_TYPE,
                 depth: "0",
                 method: "PROPFIND",
                 path
@@ -283,11 +316,18 @@ export class WebDavClient {
         localMtime: number
     ): Promise<RemoteItem> {
         const normalizedPath: string = util.normalizeVaultPath(path);
-        const mtimeSeconds: number = Math.floor(util.toSecondPrecision(localMtime) / 1000);
+        if (normalizedPath === "") {
+            throw new Error("WebDAV PUT refused on empty root path");
+        }
+        const safeMtime: number =
+            Number.isFinite(localMtime) && localMtime > 0
+                ? util.toSecondPrecision(localMtime)
+                : util.toSecondPrecision(Date.now());
+        const mtimeSeconds: number = Math.floor(safeMtime / 1000);
         const response: RequestUrlResponse = await this.requestWithRetry(
             {
                 body: content,
-                contentType: "application/octet-stream",
+                contentType: OCTET_STREAM_CONTENT_TYPE,
                 headers: {
                     "X-OC-Mtime": String(mtimeSeconds)
                 },
@@ -311,7 +351,7 @@ export class WebDavClient {
                 etag: headerEtag,
                 href: this.buildResourceUrl(normalizedPath, false),
                 isDirectory: false,
-                mtime: util.toSecondPrecision(localMtime),
+                mtime: safeMtime,
                 path: normalizedPath,
                 size: content.byteLength
             };
@@ -319,14 +359,17 @@ export class WebDavClient {
 
         const fallbackStat: RemoteItem | null = await this.statRemote(normalizedPath, false);
         if (fallbackStat !== null) {
-            return fallbackStat;
+            return {
+                ...fallbackStat,
+                mtime: fallbackStat.mtime > 0 ? fallbackStat.mtime : safeMtime
+            };
         }
 
         return {
             etag: "",
             href: this.buildResourceUrl(normalizedPath, false),
             isDirectory: false,
-            mtime: util.toSecondPrecision(localMtime),
+            mtime: safeMtime,
             path: normalizedPath,
             size: content.byteLength
         };
@@ -334,6 +377,8 @@ export class WebDavClient {
 
     public async walkRemote(): Promise<RemoteItem[]> {
         const discovered: RemoteItem[] = [];
+        const seenPaths: Set<string> = new Set<string>();
+        const visitedDirs: Set<string> = new Set<string>([""]);
         let currentQueue: string[] = [""];
 
         while (currentQueue.length > 0) {
@@ -353,11 +398,17 @@ export class WebDavClient {
 
             for (const children of batchResults) {
                 for (const item of children) {
-                    if (util.isExcludedPath(item.path)) {
+                    if (
+                        item.path === "" ||
+                        util.isExcludedPath(item.path) ||
+                        seenPaths.has(item.path)
+                    ) {
                         continue;
                     }
+                    seenPaths.add(item.path);
                     discovered.push(item);
-                    if (item.isDirectory) {
+                    if (item.isDirectory && !visitedDirs.has(item.path)) {
+                        visitedDirs.add(item.path);
                         currentQueue.push(item.path);
                     }
                 }

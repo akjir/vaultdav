@@ -326,7 +326,9 @@ describe("WebDavClient", () => {
                     typeof req === "string" ? { url: req } : req;
                 requestedUrls.push(param.url);
                 if (param.method === "PUT") {
-                    expect(param.headers?.["X-OC-Mtime"]).toBe("0");
+                    const mtimeHeader: number = Number(param.headers?.["X-OC-Mtime"]);
+                    expect(Number.isFinite(mtimeHeader)).toBe(true);
+                    expect(mtimeHeader).toBeGreaterThan(0);
                     return createMockResponse(201, "", { ETag: '"nan-mtime-etag"' });
                 }
                 if (param.url.endsWith("/Vault/")) {
@@ -363,6 +365,212 @@ describe("WebDavClient", () => {
             new Uint8Array([1, 2]).buffer,
             Number.NaN
         );
-        expect(uploaded.mtime).toBe(0);
+        expect(uploaded.mtime).toBeGreaterThan(0);
+    });
+
+    it("rejects empty or root paths in deleteItem, createDirectory, downloadFile, and uploadFile without sending requests", async () => {
+        const requestSpy = vi.spyOn(obsidian, "requestUrl");
+        const client: WebDavClient = new WebDavClient(DEFAULT_TEST_SETTINGS, 1);
+
+        for (const rootPath of ["", "/"]) {
+            await expect(client.deleteItem(rootPath, false)).rejects.toThrow(
+                /refused on empty root path/
+            );
+            await expect(client.createDirectory(rootPath)).rejects.toThrow(
+                /refused on empty root path/
+            );
+            await expect(client.downloadFile(rootPath)).rejects.toThrow(
+                /refused on empty root path/
+            );
+            await expect(
+                client.uploadFile(rootPath, new ArrayBuffer(4), 1728928291000)
+            ).rejects.toThrow(/refused on empty root path/);
+        }
+
+        expect(requestSpy).not.toHaveBeenCalled();
+    });
+
+    it("retries 423 Locked in ensureRemoteBaseDir and rejects when remoteBaseDir segment is a file", async () => {
+        let vaultPropfindAttempts: number = 0;
+        const fileStatXml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/SubVault</d:href>
+        <d:propstat>
+            <d:prop>
+                <d:getlastmodified>Wed, 14 Oct 2026 18:00:00 GMT</d:getlastmodified>
+                <d:getcontentlength>10</d:getcontentlength>
+                <d:getetag>"file-etag"</d:getetag>
+                <d:resourcetype/>
+            </d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (req: RequestUrlParam | string): RequestUrlResponsePromise => {
+                const param: RequestUrlParam =
+                    typeof req === "string" ? { url: req } : req;
+                if (param.url.endsWith("/remote.php/dav/files/alice/Vault/")) {
+                    vaultPropfindAttempts += 1;
+                    if (vaultPropfindAttempts === 1) {
+                        return createMockResponse(423, "Locked");
+                    }
+                    return createMockResponse(
+                        207,
+                        `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"/>`
+                    );
+                }
+                if (param.url.endsWith("/remote.php/dav/files/alice/Vault/SubVault/")) {
+                    return createMockResponse(207, fileStatXml);
+                }
+                return createMockResponse(500);
+            }
+        );
+
+        const client: WebDavClient = new WebDavClient(DEFAULT_TEST_SETTINGS, 1);
+        await expect(client.ensureRemoteBaseDir()).rejects.toThrow(
+            "WebDAV PROPFIND Vault/SubVault failed (remote path is not a directory)"
+        );
+        expect(vaultPropfindAttempts).toBe(2);
+    });
+
+    it("handles undefined headers and skips empty etag header in favor of oc-etag in extractHeaderEtag", () => {
+        const client: WebDavClient = new WebDavClient(DEFAULT_TEST_SETTINGS, 1);
+
+        expect(client.extractHeaderEtag(undefined)).toBe("");
+        expect(client.extractHeaderEtag(null)).toBe("");
+        expect(
+            client.extractHeaderEtag({
+                ETag: '""',
+                "OC-ETag": '"valid-oc-etag"'
+            })
+        ).toBe("valid-oc-etag");
+    });
+
+    it("falls back to current timestamp when uploadFile localMtime is 0 and formats 507 Insufficient Storage", async () => {
+        const statZeroMtimeXml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/SubVault/Notes/ZeroMtime.md</d:href>
+        <d:propstat>
+            <d:prop>
+                <d:getcontentlength>2</d:getcontentlength>
+                <d:getetag>"zero-mtime-etag"</d:getetag>
+                <d:resourcetype/>
+            </d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (req: RequestUrlParam | string): RequestUrlResponsePromise => {
+                const param: RequestUrlParam =
+                    typeof req === "string" ? { url: req } : req;
+                if (param.method === "PUT") {
+                    const mtimeSec: number = Number(param.headers?.["X-OC-Mtime"]);
+                    expect(mtimeSec).toBeGreaterThan(0);
+                    return createMockResponse(204, "", {});
+                }
+                return createMockResponse(207, statZeroMtimeXml);
+            }
+        );
+
+        const client: WebDavClient = new WebDavClient(DEFAULT_TEST_SETTINGS, 1);
+        const uploaded: RemoteItem = await client.uploadFile(
+            "Notes/ZeroMtime.md",
+            new Uint8Array([1, 2]).buffer,
+            0
+        );
+        expect(uploaded.etag).toBe("zero-mtime-etag");
+        expect(uploaded.mtime).toBeGreaterThan(0);
+        expect(
+            client.formatStatusError("PUT", "Notes/ZeroMtime.md", 507).message
+        ).toBe("WebDAV PUT Notes/ZeroMtime.md failed (507 Insufficient Storage)");
+    });
+
+    it("prevents infinite loops and duplicate entries when walkRemote encounters already-visited directories", async () => {
+        const rootXml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/SubVault/Cycle/</d:href>
+        <d:propstat>
+            <d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+
+        const cycleXml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/SubVault/Cycle/</d:href>
+        <d:propstat>
+            <d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/SubVault/Cycle/Sub/</d:href>
+        <d:propstat>
+            <d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+
+        const subXml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/SubVault/Cycle/</d:href>
+        <d:propstat>
+            <d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/SubVault/Cycle/Sub/Note.md</d:href>
+        <d:propstat>
+            <d:prop>
+                <d:getlastmodified>Wed, 14 Oct 2026 18:00:00 GMT</d:getlastmodified>
+                <d:getcontentlength>5</d:getcontentlength>
+                <d:getetag>"note-5"</d:getetag>
+                <d:resourcetype/>
+            </d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+
+        let requestCount: number = 0;
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (req: RequestUrlParam | string): RequestUrlResponsePromise => {
+                requestCount += 1;
+                const param: RequestUrlParam =
+                    typeof req === "string" ? { url: req } : req;
+                if (param.url.endsWith("/SubVault/")) {
+                    return createMockResponse(207, rootXml);
+                }
+                if (param.url.endsWith("/SubVault/Cycle/")) {
+                    return createMockResponse(207, cycleXml);
+                }
+                if (param.url.endsWith("/SubVault/Cycle/Sub/")) {
+                    return createMockResponse(207, subXml);
+                }
+                return createMockResponse(404);
+            }
+        );
+
+        const client: WebDavClient = new WebDavClient(DEFAULT_TEST_SETTINGS, 1);
+        const items: RemoteItem[] = await client.walkRemote();
+
+        expect(requestCount).toBe(3);
+        expect(items.map((i: RemoteItem) => i.path)).toEqual([
+            "Cycle",
+            "Cycle/Sub",
+            "Cycle/Sub/Note.md"
+        ]);
     });
 });
