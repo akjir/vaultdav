@@ -7,7 +7,9 @@ const CURRENT_STATE_VERSION: number = 1;
 
 export class SyncStateStore {
     private readonly adapter: DataAdapter;
+    private isParentDirEnsured: boolean = false;
     private records: Record<string, SyncStateRecord>;
+    private savePromise: Promise<void> = Promise.resolve();
     private readonly stateFilePath: string;
 
     public constructor(
@@ -25,6 +27,9 @@ export class SyncStateStore {
     }
 
     public async ensureParentDirectory(): Promise<void> {
+        if (this.isParentDirEnsured === true) {
+            return;
+        }
         const levels: string[] = util.getFolderLevels(this.stateFilePath, false);
         for (const folder of levels) {
             const exists: boolean = await this.adapter.exists(folder);
@@ -32,6 +37,7 @@ export class SyncStateStore {
                 await this.adapter.mkdir(folder);
             }
         }
+        this.isParentDirEnsured = true;
     }
 
     public getAll(): Record<string, SyncStateRecord> {
@@ -75,7 +81,9 @@ export class SyncStateStore {
                             val as Partial<SyncStateRecord>;
                         if (normalizedKey !== "" && !util.isExcludedPath(normalizedKey)) {
                             validated[normalizedKey] = {
-                                etag: typeof candidate.etag === "string" ? candidate.etag : "",
+                                etag: util.normalizeEtag(
+                                    typeof candidate.etag === "string" ? candidate.etag : ""
+                                ),
                                 isDirectory: Boolean(candidate.isDirectory),
                                 lastSyncTime:
                                     typeof candidate.lastSyncTime === "number" &&
@@ -128,14 +136,19 @@ export class SyncStateStore {
         delete this.records[normalized];
     }
 
-    public async save(): Promise<void> {
-        await this.ensureParentDirectory();
-        const payload: SyncStateData = {
-            records: this.records,
-            version: CURRENT_STATE_VERSION
+    public save(): Promise<void> {
+        const writeTask = async (): Promise<void> => {
+            await this.ensureParentDirectory();
+            const payload: SyncStateData = {
+                records: this.records,
+                version: CURRENT_STATE_VERSION
+            };
+            // Use unformatted JSON to save space and I/O time on mobile
+            const serialized: string = JSON.stringify(payload);
+            await this.adapter.write(this.stateFilePath, serialized);
         };
-        const serialized: string = JSON.stringify(payload, null, 4);
-        await this.adapter.write(this.stateFilePath, serialized);
+        this.savePromise = this.savePromise.then(writeTask, writeTask);
+        return this.savePromise;
     }
 
     public upsertRecord(record: SyncStateRecord): void {

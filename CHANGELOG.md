@@ -17,6 +17,7 @@ All notable changes to this project will be documented in this file.
 - Move static `Set` and `RegExp` instances to module scope to eliminate hot-path allocations.
 - Refactor `VaultDavSettingTab` to clear the DOM via `containerEl.empty()`, enforce strict Obsidian Sentence case labels, disable mobile auto-capitalization and spellcheck on technical inputs, normalize `remoteBaseDir`, and guard `Test connection` against concurrent clicks.
 - Refine `VaultDavPlugin` to sanitize loaded settings defensively, normalize `remoteBaseDir` fallback paths, prevent redundant auto-sync timer resets, and enforce strict Sentence case tooltips and notices.
+- Refactor `SyncStateStore` to serialize concurrent writes, cache parent directory checks, normalize ETags on load, and write compact JSON.
 
 ### Fixed
 - Prevent `/remote.php/dav/files/` duplication when the configured Nextcloud URL omits the trailing username segment.
