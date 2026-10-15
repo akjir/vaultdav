@@ -1,7 +1,8 @@
 import type { ListedFiles, Stat, Vault } from "obsidian";
-import { log } from "../log";
+import { formatTransferProgress, log } from "../log";
 import type {
     LocalItem,
+    ProgressReporter,
     RemoteItem,
     SyncAction,
     SyncPlan,
@@ -15,6 +16,9 @@ import type { SyncStateStore } from "./state";
 
 export const MAX_FILE_SIZE_BYTES: number = util.MAX_FILE_SIZE_BYTES;
 
+const BYTES_PER_MB: number = 1024 * 1024;
+const DEFAULT_CHUNKING_THRESHOLD_MB: number = 90;
+const PARALLEL_DOWNLOAD_THRESHOLD_BYTES: number = 5 * 1024 * 1024;
 const TRANSFER_CONCURRENCY: number = 4;
 
 export function buildSyncPlan(
@@ -389,6 +393,7 @@ export function isRemoteModified(remote: RemoteItem, state: SyncStateRecord): bo
 export class SyncEngine {
     private readonly client: WebDavClient;
     private readonly planReservedConflictPaths: Set<string> = new Set<string>();
+    private readonly progressReporter: ProgressReporter | null;
     private readonly settings: VaultDavSettings;
     private readonly stateStore: SyncStateStore;
     private readonly vault: Vault;
@@ -397,12 +402,14 @@ export class SyncEngine {
         vault: Vault,
         client: WebDavClient,
         stateStore: SyncStateStore,
-        settings: VaultDavSettings
+        settings: VaultDavSettings,
+        progressReporter: ProgressReporter | null = null
     ) {
         this.vault = vault;
         this.client = client;
         this.stateStore = stateStore;
         this.settings = settings;
+        this.progressReporter = progressReporter;
     }
 
     public async createLocalDirectory(path: string): Promise<void> {
@@ -447,12 +454,57 @@ export class SyncEngine {
         }
     }
 
+    private async downloadContent(
+        remoteDownloadPath: string,
+        progressLabelPath: string,
+        remoteSize: number,
+        fileIndex: number,
+        totalFiles: number
+    ): Promise<ArrayBuffer> {
+        if (
+            Number.isFinite(remoteSize) &&
+            remoteSize > PARALLEL_DOWNLOAD_THRESHOLD_BYTES
+        ) {
+            return await this.client.downloadFileChunked(
+                remoteDownloadPath,
+                remoteSize,
+                (chunkIndex: number, totalChunks: number): void => {
+                    if (this.progressReporter !== null) {
+                        this.progressReporter.reportProgress(
+                            formatTransferProgress(
+                                "Downloading",
+                                progressLabelPath,
+                                fileIndex,
+                                totalFiles,
+                                chunkIndex,
+                                totalChunks
+                            )
+                        );
+                    }
+                }
+            );
+        }
+        if (this.progressReporter !== null) {
+            this.progressReporter.reportProgress(
+                formatTransferProgress(
+                    "Downloading",
+                    progressLabelPath,
+                    fileIndex,
+                    totalFiles
+                )
+            );
+        }
+        return await this.client.downloadFile(remoteDownloadPath);
+    }
+
     public async executeConflict(
         action: SyncAction,
         localMap: ReadonlyMap<string, LocalItem>,
         remoteMap: ReadonlyMap<string, RemoteItem>,
         existingPaths: Set<string>,
-        now: number
+        now: number,
+        fileIndex: number = 1,
+        totalFiles: number = 1
     ): Promise<void> {
         const normalizedPath: string = util.normalizeVaultPath(action.path);
         if (normalizedPath === "" || util.isExcludedPath(normalizedPath)) {
@@ -471,28 +523,23 @@ export class SyncEngine {
                 util.toSecondPrecision(local.mtime) >=
                 util.toSecondPrecision(remote.mtime)
             ) {
-                await this.executeUpload(normalizedPath, localMap, now);
+                await this.executeUpload(
+                    normalizedPath,
+                    localMap,
+                    now,
+                    fileIndex,
+                    totalFiles
+                );
             } else {
-                await this.executeDownload(normalizedPath, remoteMap, now);
+                await this.executeDownload(
+                    normalizedPath,
+                    remoteMap,
+                    now,
+                    fileIndex,
+                    totalFiles
+                );
             }
             return;
-        }
-
-        if (local.size > MAX_FILE_SIZE_BYTES) {
-            log.warn(
-                `Skipping conflict resolution for oversized local file (${local.size} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
-            );
-            throw new Error(
-                `Oversized local file (${local.size} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
-            );
-        }
-        if (remote.size > MAX_FILE_SIZE_BYTES) {
-            log.warn(
-                `Skipping conflict resolution for oversized remote file (${remote.size} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
-            );
-            throw new Error(
-                `Oversized remote file (${remote.size} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
-            );
         }
 
         const localReadPath: string =
@@ -503,7 +550,13 @@ export class SyncEngine {
         const [localBuffer, remoteBuffer]: [ArrayBuffer, ArrayBuffer] =
             await Promise.all([
                 this.vault.adapter.readBinary(localReadPath),
-                this.client.downloadFile(remoteDownloadPath)
+                this.downloadContent(
+                    remoteDownloadPath,
+                    normalizedPath,
+                    remote.size,
+                    fileIndex,
+                    totalFiles
+                )
             ]);
 
         if (
@@ -544,10 +597,12 @@ export class SyncEngine {
             ctime: local.ctime,
             mtime: safeLocalMtime
         });
-        const uploadedConflict: RemoteItem = await this.client.uploadFile(
+        const uploadedConflict: RemoteItem = await this.uploadContent(
             conflictPath,
             localBuffer,
-            safeLocalMtime
+            safeLocalMtime,
+            fileIndex,
+            totalFiles
         );
         const conflictStat: Stat | null = await this.vault.adapter.stat(conflictPath);
         const resolvedConflictMtime: number =
@@ -591,34 +646,28 @@ export class SyncEngine {
     public async executeDownload(
         path: string,
         remoteMap: ReadonlyMap<string, RemoteItem>,
-        now: number
+        now: number,
+        fileIndex: number = 1,
+        totalFiles: number = 1
     ): Promise<void> {
         const normalizedPath: string = util.normalizeVaultPath(path);
         if (normalizedPath === "" || util.isExcludedPath(normalizedPath)) {
             throw new Error(`Download refused on invalid or excluded path: ${path}`);
         }
         const remote: RemoteItem | undefined = remoteMap.get(normalizedPath);
-        if (remote !== undefined && remote.size > MAX_FILE_SIZE_BYTES) {
-            log.warn(
-                `Skipping download for oversized remote file (${remote.size} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
-            );
-            throw new Error(
-                `Oversized remote file (${remote.size} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
-            );
-        }
         const remoteDownloadPath: string =
             remote !== undefined
                 ? util.normalizeVaultPath(remote.path) || normalizedPath
                 : normalizedPath;
-        const content: ArrayBuffer = await this.client.downloadFile(remoteDownloadPath);
-        if (content.byteLength > MAX_FILE_SIZE_BYTES) {
-            log.warn(
-                `Skipping download for oversized remote payload (${content.byteLength} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
-            );
-            throw new Error(
-                `Oversized remote payload (${content.byteLength} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
-            );
-        }
+        const remoteSize: number =
+            remote !== undefined && Number.isFinite(remote.size) ? remote.size : 0;
+        const content: ArrayBuffer = await this.downloadContent(
+            remoteDownloadPath,
+            normalizedPath,
+            remoteSize,
+            fileIndex,
+            totalFiles
+        );
         const parentDir: string = util.getParentPath(normalizedPath);
         if (parentDir !== "") {
             await this.createLocalDirectory(parentDir);
@@ -865,14 +914,28 @@ export class SyncEngine {
                 a.type === "download" ||
                 a.type === "conflict"
         );
+        const totalFiles: number = transfers.length;
         const transferTasks: Array<() => Promise<void>> = transfers.map(
-            (action: SyncAction) => async (): Promise<void> => {
+            (action: SyncAction, index: number) => async (): Promise<void> => {
+                const fileIndex: number = index + 1;
                 try {
                     if (action.type === "upload") {
-                        await this.executeUpload(action.path, localMap, now);
+                        await this.executeUpload(
+                            action.path,
+                            localMap,
+                            now,
+                            fileIndex,
+                            totalFiles
+                        );
                         result.uploaded += 1;
                     } else if (action.type === "download") {
-                        await this.executeDownload(action.path, remoteMap, now);
+                        await this.executeDownload(
+                            action.path,
+                            remoteMap,
+                            now,
+                            fileIndex,
+                            totalFiles
+                        );
                         result.downloaded += 1;
                     } else if (action.type === "conflict") {
                         await this.executeConflict(
@@ -880,7 +943,9 @@ export class SyncEngine {
                             localMap,
                             remoteMap,
                             existingPaths,
-                            now
+                            now,
+                            fileIndex,
+                            totalFiles
                         );
                         result.conflictsResolved += 1;
                     }
@@ -903,39 +968,27 @@ export class SyncEngine {
     public async executeUpload(
         path: string,
         localMap: ReadonlyMap<string, LocalItem>,
-        now: number
+        now: number,
+        fileIndex: number = 1,
+        totalFiles: number = 1
     ): Promise<void> {
         const normalizedPath: string = util.normalizeVaultPath(path);
         if (normalizedPath === "" || util.isExcludedPath(normalizedPath)) {
             throw new Error(`Upload refused on invalid or excluded path: ${path}`);
         }
         const local: LocalItem | undefined = localMap.get(normalizedPath);
-        if (local !== undefined && local.size > MAX_FILE_SIZE_BYTES) {
-            log.warn(
-                `Skipping upload for oversized local file (${local.size} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
-            );
-            throw new Error(
-                `Oversized local file (${local.size} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
-            );
-        }
         const localReadPath: string =
             local !== undefined
                 ? util.normalizeVaultPath(local.path) || normalizedPath
                 : normalizedPath;
         const content: ArrayBuffer = await this.vault.adapter.readBinary(localReadPath);
-        if (content.byteLength > MAX_FILE_SIZE_BYTES) {
-            log.warn(
-                `Skipping upload for oversized local payload (${content.byteLength} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
-            );
-            throw new Error(
-                `Oversized local payload (${content.byteLength} bytes exceeds ${MAX_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
-            );
-        }
         const localMtime: number = util.toSecondPrecision(local?.mtime ?? now);
-        const remoteItem: RemoteItem = await this.client.uploadFile(
+        const remoteItem: RemoteItem = await this.uploadContent(
             normalizedPath,
             content,
-            localMtime
+            localMtime,
+            fileIndex,
+            totalFiles
         );
 
         this.stateStore.upsertRecord({
@@ -947,6 +1000,15 @@ export class SyncEngine {
             remoteMtime: util.toSecondPrecision(remoteItem.mtime),
             size: content.byteLength
         });
+    }
+
+    private getChunkingThresholdBytes(): number {
+        const thresholdMB: number =
+            Number.isFinite(this.settings.chunkingThresholdMB) &&
+            this.settings.chunkingThresholdMB >= 1
+                ? Math.floor(this.settings.chunkingThresholdMB)
+                : DEFAULT_CHUNKING_THRESHOLD_MB;
+        return thresholdMB * BYTES_PER_MB;
     }
 
     public async runSync(): Promise<SyncResult> {
@@ -968,6 +1030,48 @@ export class SyncEngine {
             Date.now()
         );
         return await this.executePlan(plan, localItems, remoteItems);
+    }
+
+    private async uploadContent(
+        normalizedPath: string,
+        content: ArrayBuffer,
+        localMtime: number,
+        fileIndex: number,
+        totalFiles: number
+    ): Promise<RemoteItem> {
+        const thresholdBytes: number = this.getChunkingThresholdBytes();
+        if (content.byteLength > thresholdBytes) {
+            return await this.client.uploadFileChunked(
+                normalizedPath,
+                content,
+                localMtime,
+                (chunkIndex: number, totalChunks: number): void => {
+                    if (this.progressReporter !== null) {
+                        this.progressReporter.reportProgress(
+                            formatTransferProgress(
+                                "Uploading",
+                                normalizedPath,
+                                fileIndex,
+                                totalFiles,
+                                chunkIndex,
+                                totalChunks
+                            )
+                        );
+                    }
+                }
+            );
+        }
+        if (this.progressReporter !== null) {
+            this.progressReporter.reportProgress(
+                formatTransferProgress(
+                    "Uploading",
+                    normalizedPath,
+                    fileIndex,
+                    totalFiles
+                )
+            );
+        }
+        return await this.client.uploadFile(normalizedPath, content, localMtime);
     }
 
     public async walkLocal(): Promise<LocalItem[]> {

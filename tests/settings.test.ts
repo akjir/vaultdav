@@ -49,6 +49,8 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
     it("defines expected DEFAULT_SETTINGS keys and default values", () => {
         expect(Object.keys(DEFAULT_SETTINGS).sort()).toEqual([
             "appPassword",
+            "chunkSizeMB",
+            "chunkingThresholdMB",
             "conflictStrategy",
             "remoteBaseDir",
             "syncInterval",
@@ -57,6 +59,8 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         ]);
         expect(DEFAULT_SETTINGS).toEqual({
             appPassword: "",
+            chunkSizeMB: 10,
+            chunkingThresholdMB: 90,
             conflictStrategy: "keep_both",
             remoteBaseDir: "",
             syncInterval: 0,
@@ -85,13 +89,13 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         tab.display();
         expect(emptySpy).toHaveBeenCalledTimes(1);
         expect(innerHtmlTouched).toBe(false);
-        expect(tab.containerEl.children.length).toBe(7);
+        expect(tab.containerEl.children.length).toBe(10);
 
         const replaceChildrenSpy = vi.spyOn(tab.containerEl, "replaceChildren");
         (tab.containerEl as Partial<HTMLElement>).empty = undefined;
         tab.display();
         expect(replaceChildrenSpy).toHaveBeenCalledTimes(1);
-        expect(tab.containerEl.children.length).toBe(7);
+        expect(tab.containerEl.children.length).toBe(10);
     });
 
     it("renders all settings with strict Obsidian Sentence case names and descriptions", () => {
@@ -110,7 +114,10 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             "Remote base directory",
             "Sync interval",
             "Conflict strategy",
-            "Test connection"
+            "Test connection",
+            "Advanced sync",
+            "Chunking threshold",
+            "Chunk size"
         ]);
 
         expect(getSettingByName("Server URL").desc).toBe(
@@ -135,6 +142,13 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         expect(
             getSettingByName("Test connection").buttonComponent?.buttonEl.textContent
         ).toBe("Test connection");
+        expect(getSettingByName("Advanced sync").isHeading).toBe(true);
+        expect(getSettingByName("Chunking threshold").desc).toBe(
+            "Minimum file size in MB before switching to Nextcloud chunked uploads."
+        );
+        expect(getSettingByName("Chunk size").desc).toBe(
+            "Target chunk size in MB for chunked uploads and parallel range downloads."
+        );
     });
 
     it("configures mobile input hygiene and input types on text controls", () => {
@@ -164,6 +178,16 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             getSettingByName("Sync interval").textComponent?.inputEl;
         expect(intervalInput?.type).toBe("number");
         expect(intervalInput?.min).toBe("0");
+
+        const thresholdInput: HTMLInputElement | undefined =
+            getSettingByName("Chunking threshold").textComponent?.inputEl;
+        expect(thresholdInput?.type).toBe("number");
+        expect(thresholdInput?.min).toBe("1");
+
+        const chunkSizeInput: HTMLInputElement | undefined =
+            getSettingByName("Chunk size").textComponent?.inputEl;
+        expect(chunkSizeInput?.type).toBe("number");
+        expect(chunkSizeInput?.min).toBe("1");
     });
 
     it("normalizes and persists setting changes across all controls", async () => {
@@ -210,7 +234,27 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         await conflictSetting.dropdownOnChange?.("invalid_value");
         expect(plugin.settings.conflictStrategy).toBe("keep_both");
 
-        expect(saveSpy).toHaveBeenCalledTimes(11);
+        const thresholdSetting: MockSetting = getSettingByName("Chunking threshold");
+        await thresholdSetting.textOnChange?.("120.7");
+        expect(plugin.settings.chunkingThresholdMB).toBe(120);
+
+        await thresholdSetting.textOnChange?.("0");
+        expect(plugin.settings.chunkingThresholdMB).toBe(90);
+
+        await thresholdSetting.textOnChange?.("   ");
+        expect(plugin.settings.chunkingThresholdMB).toBe(90);
+
+        const chunkSizeSetting: MockSetting = getSettingByName("Chunk size");
+        await chunkSizeSetting.textOnChange?.("25.4");
+        expect(plugin.settings.chunkSizeMB).toBe(25);
+
+        await chunkSizeSetting.textOnChange?.("-2");
+        expect(plugin.settings.chunkSizeMB).toBe(10);
+
+        await chunkSizeSetting.textOnChange?.("   ");
+        expect(plugin.settings.chunkSizeMB).toBe(10);
+
+        expect(saveSpy).toHaveBeenCalledTimes(17);
     });
 
     it("disables Test connection button during execution and restores state in finally", async () => {

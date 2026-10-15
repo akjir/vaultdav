@@ -90,6 +90,8 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
 
         vi.spyOn(plugin, "loadData").mockResolvedValueOnce({
             appPassword: "  secret  ",
+            chunkSizeMB: 0,
+            chunkingThresholdMB: -10,
             conflictStrategy: "newest_wins",
             remoteBaseDir: 123,
             syncInterval: "invalid",
@@ -99,6 +101,8 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         await plugin.loadSettings();
         expect(plugin.settings).toEqual({
             appPassword: "secret",
+            chunkSizeMB: 10,
+            chunkingThresholdMB: 90,
             conflictStrategy: "newest_wins",
             remoteBaseDir: "",
             syncInterval: 0,
@@ -107,12 +111,16 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         });
 
         vi.spyOn(plugin, "loadData").mockResolvedValueOnce({
+            chunkSizeMB: 16.8,
+            chunkingThresholdMB: 105.4,
             conflictStrategy: "keep_both",
             syncInterval: 12.9
         });
         await plugin.loadSettings();
         expect(plugin.settings.conflictStrategy).toBe("keep_both");
         expect(plugin.settings.syncInterval).toBe(12);
+        expect(plugin.settings.chunkingThresholdMB).toBe(105);
+        expect(plugin.settings.chunkSizeMB).toBe(16);
     });
 
     it("checks credentials in isConfigured()", () => {
@@ -132,7 +140,7 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         expect(plugin.isConfigured()).toBe(true);
     });
 
-    it("registers ribbon icon, commands, setting tab, and auto-sync in onload(), and cleans up in onunload()", async () => {
+    it("registers ribbon icon, status bar item, commands, setting tab, and auto-sync in onload(), and cleans up in onunload()", async () => {
         vi.useFakeTimers();
         const { plugin } = createTestPlugin();
         vi.spyOn(plugin, "loadData").mockResolvedValueOnce(
@@ -148,6 +156,14 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
                     _callback: (evt: MouseEvent) => unknown
                 ): HTMLElement => document.createElement("div")
             );
+        const statusBarEl: HTMLElement = document.createElement("div");
+        const setTextSpy = vi.fn((text: string): void => {
+            statusBarEl.textContent = text;
+        });
+        statusBarEl.setText = setTextSpy;
+        const statusBarSpy = vi
+            .spyOn(plugin, "addStatusBarItem")
+            .mockReturnValue(statusBarEl);
         const registeredCommands: Command[] = [];
         const commandSpy = vi
             .spyOn(plugin, "addCommand")
@@ -172,6 +188,9 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
             "Synchronize with Nextcloud",
             expect.any(Function)
         );
+        expect(statusBarSpy).toHaveBeenCalledTimes(1);
+        plugin.reportProgress("Uploading notes.md (3/12 · file 5/18)");
+        expect(setTextSpy).toHaveBeenCalledWith("Uploading notes.md (3/12 · file 5/18)");
         expect(commandSpy).toHaveBeenCalledTimes(2);
         expect(registeredCommands.map((cmd: Command) => cmd.id)).toEqual([
             "sync-now",
@@ -201,6 +220,7 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
 
         plugin.onunload();
         expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
+        expect(setTextSpy).toHaveBeenLastCalledWith("");
 
         vi.advanceTimersByTime(10 * 60 * 1000);
         expect(triggerSyncSpy).toHaveBeenCalledTimes(3);
@@ -329,10 +349,12 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         );
     });
 
-    it("guards concurrent runs, checks configuration, reports SyncResult summaries, and resets isSyncing in triggerSync()", async () => {
+    it("guards concurrent runs, checks configuration, updates and clears status bar, reports SyncResult summaries, and resets isSyncing in triggerSync()", async () => {
         const { plugin } = createTestPlugin("MyVault");
+        await plugin.onload();
         const notifySpy = vi.spyOn(log, "notify").mockImplementation((): void => undefined);
         const errorSpy = vi.spyOn(log, "error").mockImplementation((): void => undefined);
+        const progressSpy = vi.spyOn(plugin, "reportProgress");
 
         plugin.isSyncing = true;
         const concurrentResult: SyncResult | null = await plugin.triggerSync();
@@ -342,6 +364,7 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         );
         plugin.isSyncing = false;
 
+        plugin.settings = { ...DEFAULT_SETTINGS };
         const unconfiguredResult: SyncResult | null = await plugin.triggerSync();
         expect(unconfiguredResult).toBeNull();
         expect(notifySpy).toHaveBeenLastCalledWith(
@@ -362,12 +385,17 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
             .spyOn(SyncEngine.prototype, "runSync")
             .mockImplementationOnce(async (): Promise<SyncResult> => {
                 expect(plugin.isSyncing).toBe(true);
+                plugin.reportProgress("Uploading notes.md (3/12 · file 5/18)");
                 return cleanSyncResult;
             });
 
         const firstResult: SyncResult | null = await plugin.triggerSync();
         expect(firstResult).toEqual(cleanSyncResult);
         expect(plugin.isSyncing).toBe(false);
+        expect(progressSpy).toHaveBeenCalledWith(
+            "Uploading notes.md (3/12 · file 5/18)"
+        );
+        expect(progressSpy).toHaveBeenLastCalledWith("");
         expect(notifySpy).toHaveBeenCalledWith("Starting synchronization...");
         expect(notifySpy).toHaveBeenLastCalledWith(
             "Sync complete (up: 5, down: 4, conflicts: 1, del: 5)."
@@ -391,10 +419,14 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
             "Sync completed with 1 error(s). Uploaded 2, downloaded 1."
         );
 
-        runSyncSpy.mockRejectedValueOnce(new Error("Network timeout"));
+        runSyncSpy.mockImplementationOnce(async (): Promise<SyncResult> => {
+            plugin.reportProgress("Uploading huge.bin (1/4 · file 1/1)");
+            throw new Error("Network timeout");
+        });
         const thrownResult: SyncResult | null = await plugin.triggerSync();
         expect(thrownResult).toBeNull();
         expect(plugin.isSyncing).toBe(false);
+        expect(progressSpy).toHaveBeenLastCalledWith("");
         expect(errorSpy).toHaveBeenCalledWith(
             "Synchronization failed:",
             expect.any(Error)

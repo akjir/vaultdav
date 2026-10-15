@@ -1,17 +1,23 @@
 import { Plugin } from "obsidian";
-import { log } from "./log";
+import { log, redactSensitiveText } from "./log";
 import { DEFAULT_SETTINGS, VaultDavSettingTab } from "./settings";
 import { SyncEngine } from "./sync/engine";
 import { SyncStateStore } from "./sync/state";
-import type { ConflictStrategy, SyncResult, VaultDavSettings } from "./types";
+import type {
+    ConflictStrategy,
+    ProgressReporter,
+    SyncResult,
+    VaultDavSettings
+} from "./types";
 import { util } from "./utilities";
 import { WebDavClient } from "./webdav/client";
 
-export default class VaultDavPlugin extends Plugin {
+export default class VaultDavPlugin extends Plugin implements ProgressReporter {
     private activeSyncInterval: number = 0;
     public isSyncing: boolean = false;
     public settings: VaultDavSettings = { ...DEFAULT_SETTINGS };
     private stateStore: SyncStateStore | null = null;
+    private statusBarItem: HTMLElement | null = null;
     private syncIntervalId: number | null = null;
 
     public configureAutoSync(): void {
@@ -78,6 +84,18 @@ export default class VaultDavPlugin extends Plugin {
             typeof record.appPassword === "string"
                 ? record.appPassword.trim()
                 : DEFAULT_SETTINGS.appPassword;
+        const chunkSizeMB: number =
+            typeof record.chunkSizeMB === "number" &&
+            Number.isFinite(record.chunkSizeMB) &&
+            record.chunkSizeMB >= 1
+                ? Math.floor(record.chunkSizeMB)
+                : DEFAULT_SETTINGS.chunkSizeMB;
+        const chunkingThresholdMB: number =
+            typeof record.chunkingThresholdMB === "number" &&
+            Number.isFinite(record.chunkingThresholdMB) &&
+            record.chunkingThresholdMB >= 1
+                ? Math.floor(record.chunkingThresholdMB)
+                : DEFAULT_SETTINGS.chunkingThresholdMB;
         const conflictStrategy: ConflictStrategy =
             record.conflictStrategy === "newest_wins" ||
             record.conflictStrategy === "keep_both"
@@ -104,6 +122,8 @@ export default class VaultDavPlugin extends Plugin {
 
         this.settings = {
             appPassword,
+            chunkSizeMB,
+            chunkingThresholdMB,
             conflictStrategy,
             remoteBaseDir,
             syncInterval,
@@ -115,6 +135,7 @@ export default class VaultDavPlugin extends Plugin {
     public async onload(): Promise<void> {
         await this.loadSettings();
         this.stateStore = new SyncStateStore(this.app.vault.adapter);
+        this.statusBarItem = this.addStatusBarItem();
 
         this.addRibbonIcon("refresh-cw", "Synchronize with Nextcloud", () => {
             void this.triggerSync();
@@ -146,6 +167,21 @@ export default class VaultDavPlugin extends Plugin {
             this.syncIntervalId = null;
         }
         this.activeSyncInterval = 0;
+        this.reportProgress("");
+        this.statusBarItem = null;
+    }
+
+    public reportProgress(message: string): void {
+        if (this.statusBarItem === null) {
+            return;
+        }
+        const safeText: string =
+            message === "" ? "" : redactSensitiveText(message);
+        if (typeof this.statusBarItem.setText === "function") {
+            this.statusBarItem.setText(safeText);
+        } else {
+            this.statusBarItem.textContent = safeText;
+        }
     }
 
     public async saveSettings(): Promise<void> {
@@ -196,7 +232,8 @@ export default class VaultDavPlugin extends Plugin {
                 this.app.vault,
                 client,
                 store,
-                resolvedSettings
+                resolvedSettings,
+                this
             );
 
             log.notify("Starting synchronization...");
@@ -217,6 +254,7 @@ export default class VaultDavPlugin extends Plugin {
             log.notify(`Sync failed: ${msg}`);
             return null;
         } finally {
+            this.reportProgress("");
             this.isSyncing = false;
         }
     }

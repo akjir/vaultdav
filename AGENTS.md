@@ -16,15 +16,15 @@
 - **Efficiency:** Optimize for token efficiency. Avoid redundant information across code, docs, rules, and skills.
 
 ## Architecture & Naming
-- `src/main.ts`: Plugin lifecycle (`onload`, `onunload`), commands, ribbon icon, auto-sync interval registration.
-- `src/settings.ts`: `VaultDavSettingTab` and settings persistence (`URL`, `username`, `appPassword`, `remoteBaseDir`, `syncInterval`, `conflictStrategy`).
-- `src/types.ts`: Strict TypeScript interfaces and type definitions (`VaultDavSettings`, `RemoteItem`, `SyncStateRecord`, `SyncAction`, `SyncPlan`).
-- `src/log.ts`: `log.*` logging utilities (includes `log.debugEnabled`) and user notifications via Obsidian `Notice`.
+- `src/main.ts`: Plugin lifecycle (`onload`, `onunload`), commands, ribbon icon, status bar progress (`ProgressReporter`), auto-sync interval registration.
+- `src/settings.ts`: `VaultDavSettingTab` and settings persistence (`URL`, `username`, `appPassword`, `remoteBaseDir`, `syncInterval`, `conflictStrategy`, `chunkingThresholdMB`, `chunkSizeMB`).
+- `src/types.ts`: Strict TypeScript interfaces and type definitions (`VaultDavSettings`, `ProgressReporter`, `RemoteItem`, `SyncStateRecord`, `SyncAction`, `SyncPlan`).
+- `src/log.ts`: `log.*` logging utilities (includes `log.debugEnabled`), `formatTransferProgress`, and user notifications via Obsidian `Notice`.
 - `src/utilities.ts`: `util.*` helper functions (path normalization via Obsidian `normalizePath`, Base64 encoding, concurrency queue).
-- `src/webdav/client.ts`: WebDAV protocol client (`PROPFIND`, `GET`, `PUT`, `MKCOL`, `DELETE`).
+- `src/webdav/client.ts`: WebDAV protocol client (`PROPFIND`, `GET`, `PUT`, `MKCOL`, `MOVE`, `DELETE`, Nextcloud OC-Chunked uploads, parallel `Range` downloads).
 - `src/webdav/xml_parser.ts`: Native `DOMParser` routines for WebDAV `207 Multi-Status` XML responses (`d:href`, `d:getlastmodified`, `d:getcontentlength`, `d:getetag`, `d:resourcetype`).
 - `src/sync/state.ts`: Local metadata index persistence (`localMtime`, `remoteMtime`, `etag`, `size`, `lastSyncTime`) to track deletions (tombstones) and modifications.
-- `src/sync/engine.ts`: Bidirectional delta calculation, conflict resolution (`keep_both` or `newest_wins`), and rate-limited execution queue.
+- `src/sync/engine.ts`: Bidirectional delta calculation, conflict resolution (`keep_both` or `newest_wins`), threshold-based chunked transfer routing, and rate-limited execution queue.
 
 ## Technical Constraints
 - **Network & CORS:** Execute all HTTP/WebDAV requests exclusively via Obsidian `requestUrl`. Do not use `fetch`, `XMLHttpRequest`, or external HTTP libraries.

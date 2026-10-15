@@ -35,6 +35,14 @@ export class Plugin {
         // Mock implementation.
     }
 
+    public addStatusBarItem(): HTMLElement {
+        const el: HTMLElement = document.createElement("div");
+        el.setText = (val: string): void => {
+            el.textContent = val;
+        };
+        return el;
+    }
+
     public async loadData(): Promise<unknown> {
         return {};
     }

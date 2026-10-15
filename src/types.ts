@@ -8,6 +8,10 @@ export interface LocalItem {
     size: number;
 }
 
+export interface ProgressReporter {
+    reportProgress: (message: string) => void;
+}
+
 export interface RemoteItem {
     etag: string;
     href: string;
@@ -68,6 +72,8 @@ export interface SyncStateRecord {
 
 export interface VaultDavSettings {
     appPassword: string;
+    chunkSizeMB: number;
+    chunkingThresholdMB: number;
     conflictStrategy: ConflictStrategy;
     remoteBaseDir: string;
     syncInterval: number;
@@ -91,4 +97,5 @@ export interface WebDavRequestOptions {
     headers?: Record<string, string>;
     method: WebDavMethod;
     path: string;
+    timeoutMs?: number;
 }

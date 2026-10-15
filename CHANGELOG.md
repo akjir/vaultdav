@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 - Implement local sync state store (`sync-state.json`) and 4-phase bidirectional synchronization engine with `keep_both` and `newest_wins` conflict resolution.
 - Add plugin settings tab, ribbon trigger, commands (`sync-now`, `test-connection`), and automatic synchronization interval.
 - Add `VaultDavPlugin` lifecycle, `VaultDavSettingTab`, and static `eslint-plugin-obsidianmd` compliance unit tests (`tests/main.test.ts`, `tests/settings.test.ts`, `tests/obsidian_linter.test.ts`).
+- Add Nextcloud OC-Chunked upload protocol (`MKCOL` / `PUT` / `MOVE`) for large files, parallel HTTP `Range` downloads (`Uint8Array.set()`), configurable chunk threshold/size settings (`chunkingThresholdMB`, `chunkSizeMB`), and real-time Obsidian status bar transfer progress (`ProgressReporter`).
 
 ### Changed
 - Standardize plugin ID and package name to `vaultdav`.

@@ -5,6 +5,8 @@ import { util } from "./utilities";
 
 export const DEFAULT_SETTINGS: VaultDavSettings = {
     appPassword: "",
+    chunkSizeMB: 10,
+    chunkingThresholdMB: 90,
     conflictStrategy: "keep_both",
     remoteBaseDir: "",
     syncInterval: 0,
@@ -145,5 +147,55 @@ export class VaultDavSettingTab extends PluginSettingTab {
                         }
                     })
             );
+
+        new Setting(containerEl).setName("Advanced sync").setHeading();
+
+        new Setting(containerEl)
+            .setName("Chunking threshold")
+            .setDesc(
+                "Minimum file size in MB before switching to Nextcloud chunked uploads."
+            )
+            .addText((text) => {
+                text.inputEl.type = "number";
+                text.inputEl.min = "1";
+                return text
+                    .setPlaceholder("90")
+                    .setValue(
+                        String(this.pluginInstance.settings.chunkingThresholdMB)
+                    )
+                    .onChange(async (value: string): Promise<void> => {
+                        const trimmed: string = value.trim();
+                        const parsed: number =
+                            trimmed === "" ? Number.NaN : Number(trimmed);
+                        this.pluginInstance.settings.chunkingThresholdMB =
+                            !Number.isFinite(parsed) || parsed < 1
+                                ? DEFAULT_SETTINGS.chunkingThresholdMB
+                                : Math.floor(parsed);
+                        await this.pluginInstance.saveSettings();
+                    });
+            });
+
+        new Setting(containerEl)
+            .setName("Chunk size")
+            .setDesc(
+                "Target chunk size in MB for chunked uploads and parallel range downloads."
+            )
+            .addText((text) => {
+                text.inputEl.type = "number";
+                text.inputEl.min = "1";
+                return text
+                    .setPlaceholder("10")
+                    .setValue(String(this.pluginInstance.settings.chunkSizeMB))
+                    .onChange(async (value: string): Promise<void> => {
+                        const trimmed: string = value.trim();
+                        const parsed: number =
+                            trimmed === "" ? Number.NaN : Number(trimmed);
+                        this.pluginInstance.settings.chunkSizeMB =
+                            !Number.isFinite(parsed) || parsed < 1
+                                ? DEFAULT_SETTINGS.chunkSizeMB
+                                : Math.floor(parsed);
+                        await this.pluginInstance.saveSettings();
+                    });
+            });
     }
 }

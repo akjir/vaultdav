@@ -30,6 +30,8 @@ function createMockResponse(
 
 const DEFAULT_TEST_SETTINGS: VaultDavSettings = {
     appPassword: "app-password-123",
+    chunkSizeMB: 10,
+    chunkingThresholdMB: 90,
     conflictStrategy: "keep_both",
     remoteBaseDir: "Vault/SubVault",
     syncInterval: 5,
@@ -633,9 +635,9 @@ describe("WebDavClient", () => {
         expect(deepItems.length).toBe(64);
     });
 
-    it("rejects oversized files (> MAX_FILE_SIZE_BYTES) in uploadFile and downloadFile with a warning", async () => {
+    it("rejects oversized files (> chunkingThresholdMB / MAX_FILE_SIZE_BYTES) in unchunked uploadFile and downloadFile with a warning", async () => {
         const client: WebDavClient = new WebDavClient(DEFAULT_TEST_SETTINGS, 1);
-        const oversizedLength: number = 60 * 1024 * 1024;
+        const oversizedLength: number = 100 * 1024 * 1024;
         const fakeOversizedBuffer: ArrayBuffer = {
             byteLength: oversizedLength,
             slice: () => new ArrayBuffer(0)
@@ -758,5 +760,191 @@ describe("WebDavClient", () => {
         const items: RemoteItem[] = await client.walkRemote();
         expect(items.map((i: RemoteItem) => i.path)).toEqual(["Note.md"]);
         expect(items[0]?.etag).toBe("etag-upper");
+    });
+
+    it("executes Nextcloud OC-Chunked upload (MKCOL, padded PUT chunks with retry, MOVE .file assembly with Destination & X-OC-Mtime, and ETag extraction)", async () => {
+        const recordedRequests: Array<{
+            bodyLength: number;
+            headers: Record<string, string>;
+            method: string;
+            url: string;
+        }> = [];
+        let secondChunkAttempts: number = 0;
+
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (req: RequestUrlParam | string): RequestUrlResponsePromise => {
+                const param: RequestUrlParam =
+                    typeof req === "string" ? { url: req } : req;
+                const method: string = param.method ?? "GET";
+                const bodyLength: number =
+                    param.body instanceof ArrayBuffer ? param.body.byteLength : 0;
+                recordedRequests.push({
+                    bodyLength,
+                    headers: param.headers ?? {},
+                    method,
+                    url: param.url
+                });
+
+                if (method === "MKCOL") {
+                    return createMockResponse(201);
+                }
+                if (method === "PUT") {
+                    if (param.url.endsWith("/0000000000000002")) {
+                        secondChunkAttempts += 1;
+                        if (secondChunkAttempts === 1) {
+                            return createMockResponse(423, "Locked");
+                        }
+                    }
+                    return createMockResponse(201);
+                }
+                if (method === "MOVE") {
+                    return createMockResponse(201, "", {
+                        "OC-ETag": '"chunked-etag-42"'
+                    });
+                }
+                return createMockResponse(500);
+            }
+        );
+
+        const client: WebDavClient = new WebDavClient(
+            {
+                ...DEFAULT_TEST_SETTINGS,
+                chunkSizeMB: 4 / (1024 * 1024)
+            },
+            1
+        );
+        const payloadBytes: Uint8Array<ArrayBuffer> = new Uint8Array([
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+        ]);
+        const progressEvents: Array<[number, number]> = [];
+
+        const item: RemoteItem = await client.uploadFileChunked(
+            "Notes/Large Video.mp4",
+            payloadBytes.buffer,
+            1728928291789,
+            (done: number, total: number): void => {
+                progressEvents.push([done, total]);
+            }
+        );
+
+        expect(secondChunkAttempts).toBe(2);
+        expect(progressEvents).toEqual([
+            [1, 3],
+            [2, 3],
+            [3, 3]
+        ]);
+        expect(item.etag).toBe("chunked-etag-42");
+        expect(item.mtime).toBe(1728928291000);
+        expect(item.size).toBe(10);
+
+        const mkcolReq = recordedRequests[0];
+        expect(mkcolReq?.method).toBe("MKCOL");
+        expect(mkcolReq?.url).toMatch(
+            /^https:\/\/cloud\.example\.com\/remote\.php\/dav\/uploads\/alice\/[A-Za-z0-9-]+$/
+        );
+
+        const transferPrefix: string = mkcolReq?.url ?? "";
+        const putUrls: string[] = recordedRequests
+            .filter((r) => r.method === "PUT")
+            .map((r) => r.url);
+        expect(putUrls).toEqual([
+            `${transferPrefix}/0000000000000001`,
+            `${transferPrefix}/0000000000000002`,
+            `${transferPrefix}/0000000000000002`,
+            `${transferPrefix}/0000000000000003`
+        ]);
+
+        const moveReq = recordedRequests[recordedRequests.length - 1];
+        expect(moveReq?.method).toBe("MOVE");
+        expect(moveReq?.url).toBe(`${transferPrefix}/.file`);
+        expect(moveReq?.headers["Destination"]).toBe(
+            "https://cloud.example.com/remote.php/dav/files/alice/Vault/SubVault/Notes/Large%20Video.mp4"
+        );
+        expect(moveReq?.headers["X-OC-Mtime"]).toBe("1728928291");
+    });
+
+    it("downloads large files in parallel Range chunks using Uint8Array.set() with retry backoff and progress reporting", async () => {
+        const fullPayload: Uint8Array<ArrayBuffer> = new Uint8Array([
+            10, 11, 12, 13, 20, 21, 22, 23, 30, 31
+        ]);
+        const rangeHeaders: string[] = [];
+        let secondRangeAttempts: number = 0;
+
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (req: RequestUrlParam | string): RequestUrlResponsePromise => {
+                const param: RequestUrlParam =
+                    typeof req === "string" ? { url: req } : req;
+                const rangeHeader: string = param.headers?.["Range"] ?? "";
+                rangeHeaders.push(rangeHeader);
+
+                if (rangeHeader === "bytes=4-7") {
+                    secondRangeAttempts += 1;
+                    if (secondRangeAttempts === 1) {
+                        return createMockResponse(503, "Service Unavailable");
+                    }
+                }
+
+                const match: RegExpExecArray | null =
+                    /^bytes=(\d+)-(\d+)$/.exec(rangeHeader);
+                if (match === null) {
+                    return createMockResponse(400);
+                }
+                const start: number = Number(match[1]);
+                const end: number = Number(match[2]);
+                const slice: ArrayBuffer = fullPayload.buffer.slice(start, end + 1);
+                return createMockResponse(206, "", {}, slice);
+            }
+        );
+
+        const client: WebDavClient = new WebDavClient(
+            {
+                ...DEFAULT_TEST_SETTINGS,
+                chunkSizeMB: 4 / (1024 * 1024)
+            },
+            1
+        );
+        const progressEvents: Array<[number, number]> = [];
+
+        const downloaded: ArrayBuffer = await client.downloadFileChunked(
+            "Notes/LargeArchive.zip",
+            fullPayload.byteLength,
+            (done: number, total: number): void => {
+                progressEvents.push([done, total]);
+            }
+        );
+
+        expect(secondRangeAttempts).toBe(2);
+        expect(new Uint8Array(downloaded)).toEqual(fullPayload);
+        expect(rangeHeaders).toContain("bytes=0-3");
+        expect(rangeHeaders).toContain("bytes=4-7");
+        expect(rangeHeaders).toContain("bytes=8-9");
+        expect(progressEvents).toEqual([
+            [1, 3],
+            [2, 3],
+            [3, 3]
+        ]);
+
+        // Defensive guards on empty / invalid paths and sizes
+        await expect(
+            client.downloadFileChunked("../escape.bin", 10)
+        ).rejects.toThrow(/refused on empty root path/);
+        await expect(
+            client.downloadFileChunked(".git/config", 10)
+        ).rejects.toThrow(/refused on excluded path/);
+        await expect(
+            client.downloadFileChunked("Notes/Valid.bin", Number.NaN)
+        ).rejects.toThrow(/Invalid file size/);
+        await expect(
+            client.uploadFileChunked("../escape.bin", new ArrayBuffer(4), 1000)
+        ).rejects.toThrow(/refused on empty root path/);
+        await expect(
+            client.uploadFileChunked(".git/config", new ArrayBuffer(4), 1000)
+        ).rejects.toThrow(/refused on excluded path/);
+
+        const emptyBuf: ArrayBuffer = await client.downloadFileChunked(
+            "Notes/Empty.bin",
+            0
+        );
+        expect(emptyBuf.byteLength).toBe(0);
     });
 });

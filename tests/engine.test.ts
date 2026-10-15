@@ -310,6 +310,8 @@ describe("SyncEngine delta calculation and execution", () => {
 
         const settings: VaultDavSettings = {
             appPassword: "pw",
+            chunkSizeMB: 10,
+            chunkingThresholdMB: 90,
             conflictStrategy: "keep_both",
             remoteBaseDir: "Vault",
             syncInterval: 0,
@@ -461,6 +463,8 @@ describe("SyncEngine delta calculation and execution", () => {
 
         const settings: VaultDavSettings = {
             appPassword: "pw",
+            chunkSizeMB: 10,
+            chunkingThresholdMB: 90,
             conflictStrategy: "newest_wins",
             remoteBaseDir: "Vault",
             syncInterval: 0,
@@ -538,6 +542,8 @@ describe("SyncEngine delta calculation and execution", () => {
             new SyncStateStore(adapter as DataAdapter),
             {
                 appPassword: "pw",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
@@ -616,6 +622,8 @@ describe("SyncEngine delta calculation and execution", () => {
             stateStore,
             {
                 appPassword: "pw",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
@@ -693,6 +701,8 @@ describe("SyncEngine delta calculation and execution", () => {
             stateStore,
             {
                 appPassword: "pw",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
@@ -745,6 +755,8 @@ describe("SyncEngine delta calculation and execution", () => {
             new SyncStateStore(cyclicAdapter as DataAdapter),
             {
                 appPassword: "pw",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
@@ -789,6 +801,8 @@ describe("SyncEngine delta calculation and execution", () => {
             new SyncStateStore(deepAdapter as DataAdapter),
             {
                 appPassword: "pw",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
@@ -821,6 +835,8 @@ describe("SyncEngine delta calculation and execution", () => {
             new SyncStateStore(adapter as DataAdapter),
             {
                 appPassword: "pw",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
@@ -869,6 +885,8 @@ describe("SyncEngine delta calculation and execution", () => {
             new SyncStateStore(trashAdapter as DataAdapter),
             {
                 appPassword: "pw",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
@@ -992,6 +1010,8 @@ describe("SyncEngine delta calculation and execution", () => {
             stateStore,
             {
                 appPassword: "pw",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
@@ -1030,19 +1050,26 @@ describe("SyncEngine delta calculation and execution", () => {
         expect(uploadedConflictPaths).toContain("Note.conflict-20261014-190000-2.md");
     });
 
-    it("skips oversized 60MB local and remote files (> MAX_FILE_SIZE_BYTES), logs a warn, and records errors in SyncResult without buffering in memory", async () => {
-        const warnSpy = vi.spyOn(log, "warn").mockImplementation((): void => undefined);
-        const errorSpy = vi.spyOn(log, "error").mockImplementation((): void => undefined);
+    it("selects standard vs chunked upload/download based on file size thresholds and reports real-time progress", async () => {
         const t0: number = Date.UTC(2026, 9, 14, 18, 0, 0);
-        const sixtyMb: number = 60 * 1024 * 1024;
-        const fakeOversizedBuffer: ArrayBuffer = Object.defineProperty(
+        const hundredMb: number = 100 * 1024 * 1024;
+        const eightMb: number = 8 * 1024 * 1024;
+        const fakeLargeUploadBuffer: ArrayBuffer = Object.defineProperty(
             new ArrayBuffer(0),
             "byteLength",
-            { value: sixtyMb }
+            { value: hundredMb }
+        );
+        const fakeLargeDownloadBuffer: ArrayBuffer = Object.defineProperty(
+            new ArrayBuffer(0),
+            "byteLength",
+            { value: eightMb }
         );
 
-        let readBinaryCalls: number = 0;
-        let downloadFileCalls: number = 0;
+        const standardUploads: string[] = [];
+        const chunkedUploads: string[] = [];
+        const standardDownloads: string[] = [];
+        const chunkedDownloads: Array<{ path: string; size: number }> = [];
+        const reportedMessages: string[] = [];
         const textFiles: Map<string, string> = new Map<string, string>();
 
         const adapter: Partial<DataAdapter> = {
@@ -1050,19 +1077,20 @@ describe("SyncEngine delta calculation and execution", () => {
             mkdir: async (): Promise<void> => undefined,
             read: async (p: string): Promise<string> => textFiles.get(p) ?? "",
             readBinary: async (p: string): Promise<ArrayBuffer> => {
-                readBinaryCalls += 1;
-                if (p === "SmallNote.md") {
-                    return new Uint8Array([1, 2, 3]).buffer;
+                if (p === "HugeLocal.zip") {
+                    return fakeLargeUploadBuffer;
                 }
-                if (p === "GrewOnDiskLocal.bin") {
-                    return fakeOversizedBuffer;
-                }
-                throw new Error(`Should not readBinary oversized file: ${p}`);
+                return new Uint8Array([1, 2, 3]).buffer;
             },
-            stat: async (): Promise<Stat | null> => ({
+            stat: async (p: string): Promise<Stat | null> => ({
                 ctime: t0,
                 mtime: t0,
-                size: 3,
+                size:
+                    p === "HugeLocal.zip"
+                        ? hundredMb
+                        : p === "LargeRemote.mov"
+                          ? eightMb
+                          : 3,
                 type: "file"
             }),
             write: async (p: string, d: string): Promise<void> => {
@@ -1073,46 +1101,51 @@ describe("SyncEngine delta calculation and execution", () => {
 
         const mockClient: Partial<WebDavClient> = {
             downloadFile: async (p: string): Promise<ArrayBuffer> => {
-                downloadFileCalls += 1;
-                if (p === "UnderReportedRemote.bin") {
-                    return fakeOversizedBuffer;
-                }
-                throw new Error(`Should not downloadFile oversized file: ${p}`);
+                standardDownloads.push(p);
+                return new Uint8Array([4, 5, 6]).buffer;
+            },
+            downloadFileChunked: async (
+                p: string,
+                totalSize: number,
+                onProgress?: (completed: number, total: number) => void
+            ): Promise<ArrayBuffer> => {
+                chunkedDownloads.push({ path: p, size: totalSize });
+                onProgress?.(1, 2);
+                onProgress?.(2, 2);
+                return fakeLargeDownloadBuffer;
             },
             uploadFile: async (
                 p: string,
                 content: ArrayBuffer,
                 mtime: number
-            ): Promise<RemoteItem> => makeRemote(p, mtime, content.byteLength, `etag-${p}`)
+            ): Promise<RemoteItem> => {
+                standardUploads.push(p);
+                return makeRemote(p, mtime, content.byteLength, `etag-${p}`);
+            },
+            uploadFileChunked: async (
+                p: string,
+                content: ArrayBuffer,
+                mtime: number,
+                onProgress?: (completed: number, total: number) => void
+            ): Promise<RemoteItem> => {
+                chunkedUploads.push(p);
+                onProgress?.(1, 10);
+                onProgress?.(5, 10);
+                onProgress?.(10, 10);
+                return makeRemote(p, mtime, content.byteLength, `etag-chunked-${p}`);
+            }
         };
 
         const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
         await stateStore.load();
 
         const localItems: LocalItem[] = [
-            makeLocal("HugeLocal.zip", t0, sixtyMb, false),
-            makeLocal("HugeConflict.bin", t0, sixtyMb, false),
-            makeLocal("HugeRemoteConflict.bin", t0, 100, false),
-            makeLocal("GrewOnDiskLocal.bin", t0, 100, false),
-            makeLocal("SmallNote.md", t0, 3, false)
+            makeLocal("HugeLocal.zip", t0, hundredMb, false),
+            makeLocal("SmallLocal.md", t0, 3, false)
         ];
         const remoteItems: RemoteItem[] = [
-            makeRemote("HugeRemote.mov", t0, sixtyMb, "etag-huge-remote", false),
-            makeRemote("HugeConflict.bin", t0 + 1000, sixtyMb, "etag-huge-conf", false),
-            makeRemote(
-                "HugeRemoteConflict.bin",
-                t0 + 1000,
-                sixtyMb,
-                "etag-huge-rconf",
-                false
-            ),
-            makeRemote(
-                "UnderReportedRemote.bin",
-                t0,
-                100,
-                "etag-under-reported",
-                false
-            )
+            makeRemote("LargeRemote.mov", t0, eightMb, "etag-large-remote", false),
+            makeRemote("SmallRemote.md", t0, 3, "etag-small-remote", false)
         ];
 
         const plan: SyncPlan = buildSyncPlan(localItems, remoteItems, {}, t0);
@@ -1122,45 +1155,39 @@ describe("SyncEngine delta calculation and execution", () => {
             stateStore,
             {
                 appPassword: "pw",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
                 url: "https://cloud.example.com",
                 username: "alice"
+            },
+            {
+                reportProgress: (msg: string): void => {
+                    reportedMessages.push(msg);
+                }
             }
         );
 
-        try {
-            const result = await engine.executePlan(plan, localItems, remoteItems);
-            expect(readBinaryCalls).toBe(2);
-            expect(downloadFileCalls).toBe(1);
-            expect(result.uploaded).toBe(1);
-            expect(result.downloaded).toBe(0);
-            expect(result.conflictsResolved).toBe(0);
-            expect(result.errors).toHaveLength(6);
-            expect(result.errors.some((e: string) => e.includes("HugeLocal.zip"))).toBe(
-                true
-            );
-            expect(result.errors.some((e: string) => e.includes("HugeRemote.mov"))).toBe(
-                true
-            );
-            expect(
-                result.errors.some((e: string) => e.includes("HugeConflict.bin"))
-            ).toBe(true);
-            expect(
-                result.errors.some((e: string) => e.includes("HugeRemoteConflict.bin"))
-            ).toBe(true);
-            expect(
-                result.errors.some((e: string) => e.includes("GrewOnDiskLocal.bin"))
-            ).toBe(true);
-            expect(
-                result.errors.some((e: string) => e.includes("UnderReportedRemote.bin"))
-            ).toBe(true);
-            expect(warnSpy).toHaveBeenCalled();
-        } finally {
-            warnSpy.mockRestore();
-            errorSpy.mockRestore();
-        }
+        const result = await engine.executePlan(plan, localItems, remoteItems);
+        expect(result.errors).toEqual([]);
+        expect(result.uploaded).toBe(2);
+        expect(result.downloaded).toBe(2);
+        expect(standardUploads).toEqual(["SmallLocal.md"]);
+        expect(chunkedUploads).toEqual(["HugeLocal.zip"]);
+        expect(standardDownloads).toEqual(["SmallRemote.md"]);
+        expect(chunkedDownloads).toEqual([{ path: "LargeRemote.mov", size: eightMb }]);
+        expect(
+            reportedMessages.some((m: string) =>
+                /^Uploading HugeLocal\.zip \(5\/10 · file \d+\/4\)$/.test(m)
+            )
+        ).toBe(true);
+        expect(
+            reportedMessages.some((m: string) =>
+                /^Downloading LargeRemote\.mov \(2\/2 · file \d+\/4\)$/.test(m)
+            )
+        ).toBe(true);
     });
 
     it("prevents infinite PUT upload loops by persisting normalized ETag and second-precision mtime after upload", async () => {
@@ -1205,6 +1232,8 @@ describe("SyncEngine delta calculation and execution", () => {
             stateStore,
             {
                 appPassword: "pw",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
@@ -1395,6 +1424,8 @@ describe("SyncEngine delta calculation and execution", () => {
                 stateStore,
                 {
                     appPassword: "pw",
+                    chunkSizeMB: 10,
+                    chunkingThresholdMB: 90,
                     conflictStrategy: "keep_both",
                     remoteBaseDir: "Vault",
                     syncInterval: 0,

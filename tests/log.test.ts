@@ -1,6 +1,6 @@
 import * as obsidian from "obsidian";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { log } from "../src/log";
+import { formatTransferProgress, log } from "../src/log";
 
 describe("log", () => {
     beforeEach(() => {
@@ -107,5 +107,24 @@ describe("log", () => {
             "VaultDAV: Connection failed for https://[REDACTED]@cloud.example.com (Basic [REDACTED])",
             4000
         );
+    });
+
+    it("formats real-time status bar transfer progress strings with numeric guards", () => {
+        expect(formatTransferProgress("Uploading", "notes.md", 5, 18, 3, 12)).toBe(
+            "Uploading notes.md (3/12 · file 5/18)"
+        );
+        expect(formatTransferProgress("Downloading", "video.mp4", 1, 2, 1, 1)).toBe(
+            "Downloading video.mp4 (1/1 · file 1/2)"
+        );
+        expect(
+            formatTransferProgress(
+                "Uploading",
+                "notes.md",
+                Number.NaN,
+                -4,
+                0,
+                Number.NaN
+            )
+        ).toBe("Uploading notes.md (file 1/1)");
     });
 });
