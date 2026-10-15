@@ -947,4 +947,203 @@ describe("WebDavClient", () => {
         );
         expect(emptyBuf.byteLength).toBe(0);
     });
+
+    it("prevents silent zero-fill corruption on truncated 206 chunks, slices full-body 200 fallback at chunk offset, and enforces MAX_CHUNKED_FILE_SIZE_BYTES", async () => {
+        const client: WebDavClient = new WebDavClient(
+            {
+                ...DEFAULT_TEST_SETTINGS,
+                chunkSizeMB: 4 / (1024 * 1024)
+            },
+            1
+        );
+
+        // 1. Truncated 206 Partial Content (returns 2 bytes instead of 4) must throw, never zero-fill
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (): RequestUrlResponsePromise => {
+                return createMockResponse(
+                    206,
+                    "",
+                    {},
+                    new Uint8Array([10, 11]).buffer
+                );
+            }
+        );
+        await expect(
+            client.downloadFileChunked("Notes/Truncated206.bin", 8)
+        ).rejects.toThrow(/unexpected chunk length/i);
+
+        // 2. Server ignores Range header and returns HTTP 200 with full 10-byte file
+        const fullPayload: Uint8Array<ArrayBuffer> = new Uint8Array([
+            10, 11, 12, 13, 20, 21, 22, 23, 30, 31
+        ]);
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (): RequestUrlResponsePromise => {
+                return createMockResponse(200, "", {}, fullPayload.buffer);
+            }
+        );
+        const downloaded200: ArrayBuffer = await client.downloadFileChunked(
+            "Notes/FullBody200.bin",
+            fullPayload.byteLength
+        );
+        expect(new Uint8Array(downloaded200)).toEqual(fullPayload);
+
+        // 3. Server returns HTTP 200 with truncated body must throw
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (): RequestUrlResponsePromise => {
+                return createMockResponse(
+                    200,
+                    "",
+                    {},
+                    new Uint8Array([1, 2, 3]).buffer
+                );
+            }
+        );
+        await expect(
+            client.downloadFileChunked("Notes/Truncated200.bin", 10)
+        ).rejects.toThrow(/unexpected full body length/i);
+
+        // 4. Oversized totalSize (> 1 GB) must be rejected before allocating memory
+        await expect(
+            client.downloadFileChunked("Notes/Bomb.bin", 2 * 1024 * 1024 * 1024)
+        ).rejects.toThrow(/oversized chunked file/i);
+    });
+
+    it("cleans up orphaned remote chunk staging directory via DELETE when uploadFileChunked fails on PUT or MOVE", async () => {
+        const client: WebDavClient = new WebDavClient(
+            {
+                ...DEFAULT_TEST_SETTINGS,
+                chunkSizeMB: 4 / (1024 * 1024)
+            },
+            1
+        );
+        const payload: ArrayBuffer = new Uint8Array([1, 2, 3, 4, 5, 6]).buffer;
+
+        // 1. Failure during chunk PUT triggers DELETE on transferDirUrl
+        const putFailCalls: Array<{ method: string; url: string }> = [];
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (req: RequestUrlParam | string): RequestUrlResponsePromise => {
+                const param: RequestUrlParam =
+                    typeof req === "string" ? { url: req } : req;
+                const method: string = param.method ?? "GET";
+                putFailCalls.push({ method, url: param.url });
+                if (method === "MKCOL") {
+                    return createMockResponse(201);
+                }
+                if (method === "PUT") {
+                    return createMockResponse(507);
+                }
+                if (method === "DELETE") {
+                    return createMockResponse(204);
+                }
+                return createMockResponse(500);
+            }
+        );
+
+        await expect(
+            client.uploadFileChunked("Notes/AbortPut.bin", payload, 1728928291000)
+        ).rejects.toThrow(/507 Insufficient Storage/);
+
+        const mkcolUrl: string = putFailCalls[0]?.url ?? "";
+        expect(putFailCalls.map((c) => c.method)).toEqual([
+            "MKCOL",
+            "PUT",
+            "DELETE"
+        ]);
+        expect(putFailCalls[2]?.url).toBe(mkcolUrl);
+
+        // 2. Failure during final MOVE triggers DELETE on transferDirUrl and preserves original error even if DELETE fails
+        const moveFailCalls: Array<{ method: string; url: string }> = [];
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (req: RequestUrlParam | string): RequestUrlResponsePromise => {
+                const param: RequestUrlParam =
+                    typeof req === "string" ? { url: req } : req;
+                const method: string = param.method ?? "GET";
+                moveFailCalls.push({ method, url: param.url });
+                if (method === "MKCOL" || method === "PUT") {
+                    return createMockResponse(201);
+                }
+                if (method === "MOVE") {
+                    return createMockResponse(409);
+                }
+                if (method === "DELETE") {
+                    return createMockResponse(500);
+                }
+                return createMockResponse(500);
+            }
+        );
+
+        await expect(
+            client.uploadFileChunked("Notes/AbortMove.bin", payload, 1728928291000)
+        ).rejects.toThrow(/409 Conflict/);
+        expect(moveFailCalls.map((c) => c.method)).toEqual([
+            "MKCOL",
+            "PUT",
+            "PUT",
+            "MOVE",
+            "DELETE"
+        ]);
+        expect(moveFailCalls[4]?.url).toBe(moveFailCalls[0]?.url);
+    });
+
+    it("rejects traversal and excluded paths in listDirectory and statRemote, isolates settings from external mutation, and blocks root/excluded remoteBaseDir across all methods", async () => {
+        const requestSpy = vi.spyOn(obsidian, "requestUrl");
+        const mutableSettings: VaultDavSettings = { ...DEFAULT_TEST_SETTINGS };
+        const client: WebDavClient = new WebDavClient(mutableSettings, 1);
+
+        // Traversal paths must throw in listDirectory and statRemote instead of normalizing to ""
+        for (const badPath of [".", "..", "../secret", "Notes/../../secret", "a\0b"]) {
+            await expect(client.listDirectory(badPath)).rejects.toThrow(
+                /refused on empty root path/
+            );
+            await expect(client.statRemote(badPath, false)).rejects.toThrow(
+                /refused on empty root path/
+            );
+        }
+
+        // Excluded paths must throw in listDirectory and statRemote
+        for (const excludedPath of [
+            ".git",
+            ".trash",
+            ".obsidian/plugins/vaultdav/data.json",
+            ".obsidian/plugins/vaultdav/sync-state.json"
+        ]) {
+            await expect(client.listDirectory(excludedPath)).rejects.toThrow(
+                /refused on excluded path/
+            );
+            await expect(client.statRemote(excludedPath, false)).rejects.toThrow(
+                /refused on excluded path/
+            );
+        }
+        expect(requestSpy).not.toHaveBeenCalled();
+
+        // External mutation of the settings object passed to constructor must not affect client
+        mutableSettings.remoteBaseDir = "";
+        mutableSettings.username = "attacker";
+        expect(client.buildResourceUrl("Notes/Test.md", false)).toBe(
+            "https://cloud.example.com/remote.php/dav/files/alice/Vault/SubVault/Notes/Test.md"
+        );
+
+        // Client initialized with empty, traversal, or excluded remoteBaseDir must refuse all operations
+        for (const badBaseDir of ["", "/", "..", ".obsidian/plugins/vaultdav", ".git"]) {
+            const badClient: WebDavClient = new WebDavClient(
+                {
+                    ...DEFAULT_TEST_SETTINGS,
+                    remoteBaseDir: badBaseDir
+                },
+                1
+            );
+            expect(() => badClient.buildResourceUrl("Notes/File.md", false)).toThrow(
+                /remoteBaseDir/
+            );
+            await expect(badClient.deleteItem("Notes/File.md", false)).rejects.toThrow(
+                /remoteBaseDir/
+            );
+            await expect(badClient.walkRemote()).rejects.toThrow(/remoteBaseDir/);
+            await expect(badClient.statRemote("", true)).rejects.toThrow(
+                /remoteBaseDir/
+            );
+        }
+        expect(requestSpy).not.toHaveBeenCalled();
+    });
 });
+

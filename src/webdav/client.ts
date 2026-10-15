@@ -4,6 +4,7 @@ import type { RemoteItem, VaultDavSettings, WebDavRequestOptions } from "../type
 import { util } from "../utilities";
 import { buildPropfindBody, parseMultiStatus, parseSingleStat } from "./xml_parser";
 
+export const MAX_CHUNKED_FILE_SIZE_BYTES: number = 1024 * 1024 * 1024;
 export const MAX_FILE_SIZE_BYTES: number = util.MAX_FILE_SIZE_BYTES;
 
 const BYTES_PER_MB: number = 1024 * 1024;
@@ -31,7 +32,7 @@ export class WebDavClient {
     private readonly authHeader: string;
     private readonly baseUrl: string;
     private readonly retryBaseMs: number;
-    private readonly settings: VaultDavSettings;
+    private readonly settings: Readonly<VaultDavSettings>;
     private readonly uploadsRootUrl: string;
     private readonly userRootUrl: string;
 
@@ -39,18 +40,21 @@ export class WebDavClient {
         settings: VaultDavSettings,
         retryBaseMs: number = DEFAULT_RETRY_BASE_MS
     ) {
-        this.settings = settings;
+        const frozenSettings: Readonly<VaultDavSettings> = Object.freeze({
+            ...settings
+        });
+        this.settings = frozenSettings;
         this.authHeader = util.encodeBasicAuth(
-            settings.username,
-            settings.appPassword
+            frozenSettings.username,
+            frozenSettings.appPassword
         );
         this.retryBaseMs =
             Number.isFinite(retryBaseMs) && retryBaseMs >= 0
                 ? retryBaseMs
                 : DEFAULT_RETRY_BASE_MS;
         this.userRootUrl = util.buildNextcloudWebDavBaseUrl(
-            settings.url,
-            settings.username,
+            frozenSettings.url,
+            frozenSettings.username,
             ""
         );
         const markerIndex: number = this.userRootUrl.lastIndexOf(FILES_DAV_MARKER);
@@ -59,13 +63,29 @@ export class WebDavClient {
                 ? `${this.userRootUrl.slice(0, markerIndex)}${UPLOADS_DAV_MARKER}${this.userRootUrl.slice(markerIndex + FILES_DAV_MARKER.length)}`
                 : `${this.userRootUrl}/uploads`;
         this.baseUrl = util.buildNextcloudWebDavBaseUrl(
-            settings.url,
-            settings.username,
-            settings.remoteBaseDir
+            frozenSettings.url,
+            frozenSettings.username,
+            frozenSettings.remoteBaseDir
         );
     }
 
+    private assertValidRemoteBaseDir(): string {
+        const normalizedBase: string = util.normalizeVaultPath(
+            this.settings.remoteBaseDir
+        );
+        if (normalizedBase === "") {
+            throw new Error("WebDAV remoteBaseDir must not be empty");
+        }
+        if (util.isExcludedPath(normalizedBase)) {
+            throw new Error(
+                `WebDAV remoteBaseDir refused on excluded path: ${normalizedBase}`
+            );
+        }
+        return normalizedBase;
+    }
+
     public buildResourceUrl(path: string, isDirectory: boolean): string {
+        this.assertValidRemoteBaseDir();
         const encodedRel: string = util.encodeWebDavPath(path);
         const rawUrl: string =
             encodedRel === "" ? this.baseUrl : `${this.baseUrl}/${encodedRel}`;
@@ -81,14 +101,30 @@ export class WebDavClient {
         return rootStat !== null && rootStat.isDirectory;
     }
 
+    private async cleanupTransferDir(
+        transferDirUrl: string,
+        normalizedPath: string
+    ): Promise<void> {
+        try {
+            await this.requestWithRetry(
+                {
+                    method: "DELETE",
+                    path: normalizedPath,
+                    timeoutMs: CHUNK_UPLOAD_TIMEOUT_MS
+                },
+                true,
+                transferDirUrl
+            );
+        } catch (cleanupErr: unknown) {
+            log.warn(
+                `Failed to clean up aborted chunked upload directory for ${normalizedPath}`,
+                cleanupErr
+            );
+        }
+    }
+
     public async createDirectory(path: string): Promise<void> {
-        const normalizedPath: string = util.normalizeVaultPath(path);
-        if (normalizedPath === "") {
-            throw new Error("WebDAV MKCOL refused on empty root path");
-        }
-        if (util.isExcludedPath(normalizedPath)) {
-            throw new Error(`WebDAV MKCOL refused on excluded path: ${normalizedPath}`);
-        }
+        const normalizedPath: string = this.resolveScopedPath(path, false, "MKCOL");
         const response: RequestUrlResponse = await this.requestWithRetry(
             {
                 method: "MKCOL",
@@ -103,13 +139,11 @@ export class WebDavClient {
     }
 
     public async deleteItem(path: string, isDirectory: boolean): Promise<void> {
-        const normalizedPath: string = util.normalizeVaultPath(path);
-        if (normalizedPath === "") {
-            throw new Error("WebDAV DELETE refused on empty root path");
-        }
-        if (util.isExcludedPath(normalizedPath)) {
-            throw new Error(`WebDAV DELETE refused on excluded path: ${normalizedPath}`);
-        }
+        const normalizedPath: string = this.resolveScopedPath(
+            path,
+            false,
+            "DELETE"
+        );
         const response: RequestUrlResponse = await this.requestWithRetry(
             {
                 method: "DELETE",
@@ -128,13 +162,7 @@ export class WebDavClient {
     }
 
     public async downloadFile(path: string): Promise<ArrayBuffer> {
-        const normalizedPath: string = util.normalizeVaultPath(path);
-        if (normalizedPath === "") {
-            throw new Error("WebDAV GET refused on empty root path");
-        }
-        if (util.isExcludedPath(normalizedPath)) {
-            throw new Error(`WebDAV GET refused on excluded path: ${normalizedPath}`);
-        }
+        const normalizedPath: string = this.resolveScopedPath(path, false, "GET");
         const response: RequestUrlResponse = await this.requestWithRetry(
             {
                 method: "GET",
@@ -162,15 +190,14 @@ export class WebDavClient {
         totalSize: number,
         onProgress?: (completedChunks: number, totalChunks: number) => void
     ): Promise<ArrayBuffer> {
-        const normalizedPath: string = util.normalizeVaultPath(path);
-        if (normalizedPath === "") {
-            throw new Error("WebDAV GET refused on empty root path");
-        }
-        if (util.isExcludedPath(normalizedPath)) {
-            throw new Error(`WebDAV GET refused on excluded path: ${normalizedPath}`);
-        }
+        const normalizedPath: string = this.resolveScopedPath(path, false, "GET");
         if (!Number.isFinite(totalSize) || totalSize < 0) {
             throw new Error(`Invalid file size for chunked download: ${totalSize}`);
+        }
+        if (totalSize > MAX_CHUNKED_FILE_SIZE_BYTES) {
+            throw new Error(
+                `WebDAV GET refused on oversized chunked file (${totalSize} bytes exceeds ${MAX_CHUNKED_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+            );
         }
         const safeTotalSize: number = Math.floor(totalSize);
         if (safeTotalSize === 0) {
@@ -210,10 +237,20 @@ export class WebDavClient {
                     );
                 }
                 const chunkBytes: Uint8Array = new Uint8Array(response.arrayBuffer);
-                if (chunkBytes.byteLength > expectedLength) {
-                    assembled.set(chunkBytes.subarray(0, expectedLength), start);
-                } else {
+                if (response.status === 206) {
+                    if (chunkBytes.byteLength !== expectedLength) {
+                        throw new Error(
+                            `WebDAV GET ${normalizedPath} returned unexpected chunk length (${chunkBytes.byteLength} bytes, expected ${expectedLength} bytes)`
+                        );
+                    }
                     assembled.set(chunkBytes, start);
+                } else {
+                    if (chunkBytes.byteLength !== safeTotalSize) {
+                        throw new Error(
+                            `WebDAV GET ${normalizedPath} returned unexpected full body length (${chunkBytes.byteLength} bytes, expected ${safeTotalSize} bytes)`
+                        );
+                    }
+                    assembled.set(chunkBytes.subarray(start, end + 1), start);
                 }
                 completedChunks += 1;
                 onProgress?.(completedChunks, totalChunks);
@@ -225,10 +262,8 @@ export class WebDavClient {
     }
 
     public async ensureRemoteBaseDir(): Promise<void> {
-        const levels: string[] = util.getFolderLevels(this.settings.remoteBaseDir, true);
-        if (levels.length === 0) {
-            throw new Error("WebDAV remoteBaseDir must not be empty");
-        }
+        const normalizedBaseDir: string = this.assertValidRemoteBaseDir();
+        const levels: string[] = util.getFolderLevels(normalizedBaseDir, true);
 
         for (const levelPath of levels) {
             const encodedLevel: string = util.encodeWebDavPath(levelPath);
@@ -405,26 +440,35 @@ export class WebDavClient {
     }
 
     public async listDirectory(dirPath: string): Promise<RemoteItem[]> {
+        const normalizedDir: string = this.resolveScopedPath(
+            dirPath,
+            true,
+            "PROPFIND"
+        );
         const response: RequestUrlResponse = await this.requestWithRetry(
             {
                 body: buildPropfindBody(),
                 contentType: XML_CONTENT_TYPE,
                 depth: "1",
                 method: "PROPFIND",
-                path: dirPath
+                path: normalizedDir
             },
             true
         );
 
         if (response.status !== 207 && response.status !== 200) {
-            throw this.formatStatusError("PROPFIND", dirPath, response.status);
+            throw this.formatStatusError(
+                "PROPFIND",
+                normalizedDir,
+                response.status
+            );
         }
 
         return parseMultiStatus(
             response.text,
             this.settings.username,
             this.settings.remoteBaseDir,
-            dirPath
+            normalizedDir
         );
     }
 
@@ -494,17 +538,45 @@ export class WebDavClient {
         }
     }
 
+    private resolveScopedPath(
+        path: string,
+        allowRoot: boolean,
+        method: string
+    ): string {
+        this.assertValidRemoteBaseDir();
+        const trimmed: string = path.trim();
+        const isExplicitRoot: boolean = trimmed === "" || trimmed === "/";
+        const normalizedPath: string = util.normalizeVaultPath(path);
+        if (normalizedPath === "") {
+            if (allowRoot && isExplicitRoot) {
+                return "";
+            }
+            throw new Error(`WebDAV ${method} refused on empty root path`);
+        }
+        if (util.isExcludedPath(normalizedPath)) {
+            throw new Error(
+                `WebDAV ${method} refused on excluded path: ${normalizedPath}`
+            );
+        }
+        return normalizedPath;
+    }
+
     public async statRemote(
         path: string,
         isDirectory: boolean = false
     ): Promise<RemoteItem | null> {
+        const normalizedPath: string = this.resolveScopedPath(
+            path,
+            true,
+            "PROPFIND"
+        );
         const response: RequestUrlResponse = await this.requestWithRetry(
             {
                 body: buildPropfindBody(),
                 contentType: XML_CONTENT_TYPE,
                 depth: "0",
                 method: "PROPFIND",
-                path
+                path: normalizedPath
             },
             isDirectory
         );
@@ -513,14 +585,18 @@ export class WebDavClient {
             return null;
         }
         if (response.status !== 207 && response.status !== 200) {
-            throw this.formatStatusError("PROPFIND", path, response.status);
+            throw this.formatStatusError(
+                "PROPFIND",
+                normalizedPath,
+                response.status
+            );
         }
 
         return parseSingleStat(
             response.text,
             this.settings.username,
             this.settings.remoteBaseDir,
-            path
+            normalizedPath
         );
     }
 
@@ -529,13 +605,7 @@ export class WebDavClient {
         content: ArrayBuffer,
         localMtime: number
     ): Promise<RemoteItem> {
-        const normalizedPath: string = util.normalizeVaultPath(path);
-        if (normalizedPath === "") {
-            throw new Error("WebDAV PUT refused on empty root path");
-        }
-        if (util.isExcludedPath(normalizedPath)) {
-            throw new Error(`WebDAV PUT refused on excluded path: ${normalizedPath}`);
-        }
+        const normalizedPath: string = this.resolveScopedPath(path, false, "PUT");
         const maxSingleUploadBytes: number = this.getChunkingThresholdBytes();
         if (content.byteLength > maxSingleUploadBytes) {
             log.warn(
@@ -583,8 +653,11 @@ export class WebDavClient {
             };
         }
 
-        const fallbackStat: RemoteItem | null = await this.statRemote(normalizedPath, false);
-        if (fallbackStat !== null) {
+        const fallbackStat: RemoteItem | null = await this.statRemote(
+            normalizedPath,
+            false
+        );
+        if (fallbackStat !== null && !fallbackStat.isDirectory) {
             return {
                 ...fallbackStat,
                 etag: util.normalizeEtag(fallbackStat.etag),
@@ -611,12 +684,11 @@ export class WebDavClient {
         localMtime: number,
         onProgress?: (completedChunks: number, totalChunks: number) => void
     ): Promise<RemoteItem> {
-        const normalizedPath: string = util.normalizeVaultPath(path);
-        if (normalizedPath === "") {
-            throw new Error("WebDAV PUT refused on empty root path");
-        }
-        if (util.isExcludedPath(normalizedPath)) {
-            throw new Error(`WebDAV PUT refused on excluded path: ${normalizedPath}`);
+        const normalizedPath: string = this.resolveScopedPath(path, false, "PUT");
+        if (content.byteLength > MAX_CHUNKED_FILE_SIZE_BYTES) {
+            throw new Error(
+                `WebDAV PUT refused on oversized chunked file (${content.byteLength} bytes exceeds ${MAX_CHUNKED_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+            );
         }
 
         const safeMtime: number =
@@ -645,59 +717,77 @@ export class WebDavClient {
         const totalBytes: number = content.byteLength;
         const totalChunks: number =
             totalBytes === 0 ? 1 : Math.ceil(totalBytes / chunkSizeBytes);
+        const destinationUrl: string = this.buildResourceUrl(normalizedPath, false);
+        let moveResp: RequestUrlResponse | null = null;
 
-        for (let chunkIndex: number = 0; chunkIndex < totalChunks; chunkIndex += 1) {
-            const start: number = chunkIndex * chunkSizeBytes;
-            const end: number = Math.min(start + chunkSizeBytes, totalBytes);
-            const chunkBuffer: ArrayBuffer = content.slice(start, end);
-            const paddedIndex: string = String(chunkIndex + 1).padStart(
-                CHUNK_INDEX_PAD_LENGTH,
-                "0"
-            );
-            const chunkUrl: string = `${transferDirUrl}/${paddedIndex}`;
-            const putResp: RequestUrlResponse = await this.requestWithRetry(
+        try {
+            for (
+                let chunkIndex: number = 0;
+                chunkIndex < totalChunks;
+                chunkIndex += 1
+            ) {
+                const start: number = chunkIndex * chunkSizeBytes;
+                const end: number = Math.min(start + chunkSizeBytes, totalBytes);
+                const chunkBuffer: ArrayBuffer = content.slice(start, end);
+                const paddedIndex: string = String(chunkIndex + 1).padStart(
+                    CHUNK_INDEX_PAD_LENGTH,
+                    "0"
+                );
+                const chunkUrl: string = `${transferDirUrl}/${paddedIndex}`;
+                const putResp: RequestUrlResponse = await this.requestWithRetry(
+                    {
+                        body: chunkBuffer,
+                        contentType: OCTET_STREAM_CONTENT_TYPE,
+                        method: "PUT",
+                        path: normalizedPath,
+                        timeoutMs: CHUNK_UPLOAD_TIMEOUT_MS
+                    },
+                    false,
+                    chunkUrl
+                );
+                if (
+                    putResp.status !== 200 &&
+                    putResp.status !== 201 &&
+                    putResp.status !== 204
+                ) {
+                    throw this.formatStatusError(
+                        "PUT",
+                        normalizedPath,
+                        putResp.status
+                    );
+                }
+                onProgress?.(chunkIndex + 1, totalChunks);
+            }
+
+            const assembleUrl: string = `${transferDirUrl}/.file`;
+            moveResp = await this.requestWithRetry(
                 {
-                    body: chunkBuffer,
-                    contentType: OCTET_STREAM_CONTENT_TYPE,
-                    method: "PUT",
+                    headers: {
+                        Destination: destinationUrl,
+                        Overwrite: "T",
+                        "X-OC-Mtime": String(mtimeSeconds)
+                    },
+                    method: "MOVE",
                     path: normalizedPath,
                     timeoutMs: CHUNK_UPLOAD_TIMEOUT_MS
                 },
                 false,
-                chunkUrl
+                assembleUrl
             );
             if (
-                putResp.status !== 200 &&
-                putResp.status !== 201 &&
-                putResp.status !== 204
+                moveResp.status !== 200 &&
+                moveResp.status !== 201 &&
+                moveResp.status !== 204
             ) {
-                throw this.formatStatusError("PUT", normalizedPath, putResp.status);
+                throw this.formatStatusError(
+                    "MOVE",
+                    normalizedPath,
+                    moveResp.status
+                );
             }
-            onProgress?.(chunkIndex + 1, totalChunks);
-        }
-
-        const destinationUrl: string = this.buildResourceUrl(normalizedPath, false);
-        const assembleUrl: string = `${transferDirUrl}/.file`;
-        const moveResp: RequestUrlResponse = await this.requestWithRetry(
-            {
-                headers: {
-                    Destination: destinationUrl,
-                    Overwrite: "T",
-                    "X-OC-Mtime": String(mtimeSeconds)
-                },
-                method: "MOVE",
-                path: normalizedPath,
-                timeoutMs: CHUNK_UPLOAD_TIMEOUT_MS
-            },
-            false,
-            assembleUrl
-        );
-        if (
-            moveResp.status !== 200 &&
-            moveResp.status !== 201 &&
-            moveResp.status !== 204
-        ) {
-            throw this.formatStatusError("MOVE", normalizedPath, moveResp.status);
+        } catch (err: unknown) {
+            await this.cleanupTransferDir(transferDirUrl, normalizedPath);
+            throw err;
         }
 
         const headerEtag: string = this.extractHeaderEtag(moveResp.headers);
@@ -716,7 +806,7 @@ export class WebDavClient {
             normalizedPath,
             false
         );
-        if (fallbackStat !== null) {
+        if (fallbackStat !== null && !fallbackStat.isDirectory) {
             return {
                 ...fallbackStat,
                 etag: util.normalizeEtag(fallbackStat.etag),
