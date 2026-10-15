@@ -18,10 +18,10 @@ Synchronize Obsidian vaults bidirectionally with Nextcloud via WebDAV.
 | Username | `username` | Nextcloud account username. |
 | App password | `appPassword` | Nextcloud app password for HTTP Basic authentication. |
 | Remote base directory | `remoteBaseDir` | Target remote folder path inside the Nextcloud user files root. |
-| Sync interval | `syncInterval` | Automatic synchronization interval in minutes (`0` to disable). |
+| Sync interval | `syncInterval` | Automatic synchronization interval in minutes (`0` to `10080`, `0` to disable). |
 | Conflict strategy | `conflictStrategy` | Resolution mode for concurrent edits (`keep_both` or `newest_wins`). |
-| Chunking threshold | `chunkingThresholdMB` | File size threshold in MB (`>= 1`, default `90`) above which uploads use Nextcloud OC-Chunked transfers. |
-| Chunk size | `chunkSizeMB` | Individual chunk size in MB (`>= 1`, default `10`) for chunked uploads and parallel HTTP `Range` downloads. |
+| Chunking threshold | `chunkingThresholdMB` | File size threshold in MB (`1` to `1024`, default `90`) above which uploads use Nextcloud OC-Chunked transfers. |
+| Chunk size | `chunkSizeMB` | Individual chunk size in MB (`1` to `512`, default `10`) for chunked uploads and parallel HTTP `Range` downloads. |
 
 ## Commands
 

@@ -3,16 +3,59 @@ import type VaultDavPlugin from "./main";
 import type { ConflictStrategy, VaultDavSettings } from "./types";
 import { util } from "./utilities";
 
-export const DEFAULT_SETTINGS: VaultDavSettings = {
-    appPassword: "",
-    chunkSizeMB: 10,
-    chunkingThresholdMB: 90,
-    conflictStrategy: "keep_both",
-    remoteBaseDir: "",
-    syncInterval: 0,
-    url: "",
-    username: ""
-};
+export const DEFAULT_SETTINGS: Readonly<VaultDavSettings> =
+    Object.freeze<VaultDavSettings>({
+        appPassword: "",
+        chunkSizeMB: 10,
+        chunkingThresholdMB: 90,
+        conflictStrategy: "keep_both",
+        remoteBaseDir: "",
+        syncInterval: 0,
+        url: "",
+        username: ""
+    });
+export const MAX_CHUNK_SIZE_MB: number = 512;
+export const MAX_CHUNKING_THRESHOLD_MB: number = 1024;
+export const MAX_SYNC_INTERVAL_MINUTES: number = 10080;
+
+const CONTROL_CHAR_REGEX: RegExp = /[\x00-\x1f\x7f]/;
+const URL_USERINFO_REGEX: RegExp = /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/\s@]+@/i;
+
+function sanitizeAppPassword(value: string): string {
+    if (CONTROL_CHAR_REGEX.test(value)) {
+        return "";
+    }
+    return value.trim();
+}
+
+function sanitizeRemoteBaseDir(value: string): string {
+    const normalized: string = util.normalizeVaultPath(value);
+    return normalized !== "" && util.isExcludedPath(normalized)
+        ? ""
+        : normalized;
+}
+
+function sanitizeServerUrl(value: string): string {
+    if (CONTROL_CHAR_REGEX.test(value)) {
+        return "";
+    }
+    return value.trim().replace(URL_USERINFO_REGEX, "$1");
+}
+
+function sanitizeUsername(value: string): string {
+    if (CONTROL_CHAR_REGEX.test(value)) {
+        return "";
+    }
+    const trimmed: string = value.normalize("NFC").trim();
+    if (
+        trimmed.includes(":") ||
+        trimmed.includes("/") ||
+        trimmed.includes("\\")
+    ) {
+        return "";
+    }
+    return trimmed;
+}
 
 export class VaultDavSettingTab extends PluginSettingTab {
     private readonly pluginInstance: VaultDavPlugin;
@@ -40,7 +83,8 @@ export class VaultDavSettingTab extends PluginSettingTab {
                     .setPlaceholder("https://cloud.example.com")
                     .setValue(this.pluginInstance.settings.url)
                     .onChange(async (value: string): Promise<void> => {
-                        this.pluginInstance.settings.url = value.trim();
+                        this.pluginInstance.settings.url =
+                            sanitizeServerUrl(value);
                         await this.pluginInstance.saveSettings();
                     });
             });
@@ -55,7 +99,8 @@ export class VaultDavSettingTab extends PluginSettingTab {
                     .setPlaceholder("username")
                     .setValue(this.pluginInstance.settings.username)
                     .onChange(async (value: string): Promise<void> => {
-                        this.pluginInstance.settings.username = value.trim();
+                        this.pluginInstance.settings.username =
+                            sanitizeUsername(value);
                         await this.pluginInstance.saveSettings();
                     });
             });
@@ -71,7 +116,8 @@ export class VaultDavSettingTab extends PluginSettingTab {
                     .setPlaceholder("xxxxx-xxxxx-xxxxx-xxxxx-xxxxx")
                     .setValue(this.pluginInstance.settings.appPassword)
                     .onChange(async (value: string): Promise<void> => {
-                        this.pluginInstance.settings.appPassword = value.trim();
+                        this.pluginInstance.settings.appPassword =
+                            sanitizeAppPassword(value);
                         await this.pluginInstance.saveSettings();
                     });
             });
@@ -87,7 +133,7 @@ export class VaultDavSettingTab extends PluginSettingTab {
                     .setValue(this.pluginInstance.settings.remoteBaseDir)
                     .onChange(async (value: string): Promise<void> => {
                         this.pluginInstance.settings.remoteBaseDir =
-                            util.normalizeVaultPath(value);
+                            sanitizeRemoteBaseDir(value);
                         await this.pluginInstance.saveSettings();
                     });
             });
@@ -98,6 +144,7 @@ export class VaultDavSettingTab extends PluginSettingTab {
             .addText((text) => {
                 text.inputEl.type = "number";
                 text.inputEl.min = "0";
+                text.inputEl.max = String(MAX_SYNC_INTERVAL_MINUTES);
                 return text
                     .setPlaceholder("0")
                     .setValue(String(this.pluginInstance.settings.syncInterval))
@@ -108,7 +155,10 @@ export class VaultDavSettingTab extends PluginSettingTab {
                         this.pluginInstance.settings.syncInterval =
                             !Number.isFinite(parsed) || parsed < 0
                                 ? 0
-                                : Math.floor(parsed);
+                                : Math.min(
+                                      MAX_SYNC_INTERVAL_MINUTES,
+                                      Math.floor(parsed)
+                                  );
                         await this.pluginInstance.saveSettings();
                     });
             });
@@ -158,6 +208,7 @@ export class VaultDavSettingTab extends PluginSettingTab {
             .addText((text) => {
                 text.inputEl.type = "number";
                 text.inputEl.min = "1";
+                text.inputEl.max = String(MAX_CHUNKING_THRESHOLD_MB);
                 return text
                     .setPlaceholder("90")
                     .setValue(
@@ -170,7 +221,10 @@ export class VaultDavSettingTab extends PluginSettingTab {
                         this.pluginInstance.settings.chunkingThresholdMB =
                             !Number.isFinite(parsed) || parsed < 1
                                 ? DEFAULT_SETTINGS.chunkingThresholdMB
-                                : Math.floor(parsed);
+                                : Math.min(
+                                      MAX_CHUNKING_THRESHOLD_MB,
+                                      Math.floor(parsed)
+                                  );
                         await this.pluginInstance.saveSettings();
                     });
             });
@@ -183,6 +237,7 @@ export class VaultDavSettingTab extends PluginSettingTab {
             .addText((text) => {
                 text.inputEl.type = "number";
                 text.inputEl.min = "1";
+                text.inputEl.max = String(MAX_CHUNK_SIZE_MB);
                 return text
                     .setPlaceholder("10")
                     .setValue(String(this.pluginInstance.settings.chunkSizeMB))
@@ -193,7 +248,10 @@ export class VaultDavSettingTab extends PluginSettingTab {
                         this.pluginInstance.settings.chunkSizeMB =
                             !Number.isFinite(parsed) || parsed < 1
                                 ? DEFAULT_SETTINGS.chunkSizeMB
-                                : Math.floor(parsed);
+                                : Math.min(
+                                      MAX_CHUNK_SIZE_MB,
+                                      Math.floor(parsed)
+                                  );
                         await this.pluginInstance.saveSettings();
                     });
             });

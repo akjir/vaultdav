@@ -1,7 +1,13 @@
 import type { App, PluginManifest } from "obsidian";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import VaultDavPlugin from "../src/main";
-import { DEFAULT_SETTINGS, VaultDavSettingTab } from "../src/settings";
+import {
+    DEFAULT_SETTINGS,
+    MAX_CHUNK_SIZE_MB,
+    MAX_CHUNKING_THRESHOLD_MB,
+    MAX_SYNC_INTERVAL_MINUTES,
+    VaultDavSettingTab
+} from "../src/settings";
 import { Setting as MockSetting } from "./obsidian_mock";
 
 function createTestPlugin(): { app: App; plugin: VaultDavPlugin } {
@@ -46,7 +52,7 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         MockSetting.instances.length = 0;
     });
 
-    it("defines expected DEFAULT_SETTINGS keys and default values", () => {
+    it("defines expected DEFAULT_SETTINGS keys, default values, and freezes the object against mutation", () => {
         expect(Object.keys(DEFAULT_SETTINGS).sort()).toEqual([
             "appPassword",
             "chunkSizeMB",
@@ -67,6 +73,10 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             url: "",
             username: ""
         });
+        expect(Object.isFrozen(DEFAULT_SETTINGS)).toBe(true);
+        expect(() => {
+            (DEFAULT_SETTINGS as { chunkSizeMB: number }).chunkSizeMB = 9999;
+        }).toThrow();
     });
 
     it("clears containerEl via empty() without touching innerHTML, and falls back to replaceChildren()", () => {
@@ -151,7 +161,7 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         );
     });
 
-    it("configures mobile input hygiene and input types on text controls", () => {
+    it("configures mobile input hygiene and input types/bounds on text controls", () => {
         const { app, plugin } = createTestPlugin();
         const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
 
@@ -178,16 +188,19 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             getSettingByName("Sync interval").textComponent?.inputEl;
         expect(intervalInput?.type).toBe("number");
         expect(intervalInput?.min).toBe("0");
+        expect(intervalInput?.max).toBe(String(MAX_SYNC_INTERVAL_MINUTES));
 
         const thresholdInput: HTMLInputElement | undefined =
             getSettingByName("Chunking threshold").textComponent?.inputEl;
         expect(thresholdInput?.type).toBe("number");
         expect(thresholdInput?.min).toBe("1");
+        expect(thresholdInput?.max).toBe(String(MAX_CHUNKING_THRESHOLD_MB));
 
         const chunkSizeInput: HTMLInputElement | undefined =
             getSettingByName("Chunk size").textComponent?.inputEl;
         expect(chunkSizeInput?.type).toBe("number");
         expect(chunkSizeInput?.min).toBe("1");
+        expect(chunkSizeInput?.max).toBe(String(MAX_CHUNK_SIZE_MB));
     });
 
     it("normalizes and persists setting changes across all controls", async () => {
@@ -255,6 +268,61 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         expect(plugin.settings.chunkSizeMB).toBe(10);
 
         expect(saveSpy).toHaveBeenCalledTimes(17);
+    });
+
+    it("blocks red-team exploit inputs (32-bit timer overflow, OOM chunk sizes, excluded remoteBaseDir, embedded URL credentials, and control/colon injection)", async () => {
+        const { app, plugin } = createTestPlugin();
+        vi.spyOn(plugin, "saveSettings").mockResolvedValue(undefined);
+        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
+
+        tab.display();
+
+        await getSettingByName("Sync interval").textOnChange?.("99999999");
+        expect(plugin.settings.syncInterval).toBe(MAX_SYNC_INTERVAL_MINUTES);
+        expect(plugin.settings.syncInterval * 60 * 1000).toBeLessThanOrEqual(
+            2_147_483_647
+        );
+
+        await getSettingByName("Chunking threshold").textOnChange?.("999999");
+        expect(plugin.settings.chunkingThresholdMB).toBe(MAX_CHUNKING_THRESHOLD_MB);
+
+        await getSettingByName("Chunk size").textOnChange?.("999999");
+        expect(plugin.settings.chunkSizeMB).toBe(MAX_CHUNK_SIZE_MB);
+
+        await getSettingByName("Remote base directory").textOnChange?.(
+            ".obsidian/plugins/vaultdav"
+        );
+        expect(plugin.settings.remoteBaseDir).toBe("");
+
+        await getSettingByName("Remote base directory").textOnChange?.(".trash");
+        expect(plugin.settings.remoteBaseDir).toBe("");
+
+        await getSettingByName("Remote base directory").textOnChange?.(".git/hooks");
+        expect(plugin.settings.remoteBaseDir).toBe("");
+
+        await getSettingByName("Server URL").textOnChange?.(
+            "  https://alice:super-secret@cloud.example.com/remote.php/dav  "
+        );
+        expect(plugin.settings.url).toBe(
+            "https://cloud.example.com/remote.php/dav"
+        );
+
+        await getSettingByName("Server URL").textOnChange?.(
+            "https://cloud.example.com\r\nX-Injected: true"
+        );
+        expect(plugin.settings.url).toBe("");
+
+        await getSettingByName("Username").textOnChange?.("alice:injected");
+        expect(plugin.settings.username).toBe("");
+
+        await getSettingByName("Username").textOnChange?.("alice/../../root");
+        expect(plugin.settings.username).toBe("");
+
+        await getSettingByName("Username").textOnChange?.("alice\x00admin");
+        expect(plugin.settings.username).toBe("");
+
+        await getSettingByName("App password").textOnChange?.("token\r\ninjected");
+        expect(plugin.settings.appPassword).toBe("");
     });
 
     it("disables Test connection button during execution and restores state in finally", async () => {
