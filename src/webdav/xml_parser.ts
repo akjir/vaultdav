@@ -1,7 +1,10 @@
 import type { RemoteItem } from "../types";
 import { util } from "../utilities";
 
+export const MAX_XML_BODY_LENGTH: number = 10 * 1024 * 1024;
+
 const DIGITS_ONLY_REGEX: RegExp = /^\d+$/;
+const DTD_OR_ENTITY_REGEX: RegExp = /<!\s*(?:DOCTYPE|ENTITY)\b/i;
 const MAX_PARSER_ERROR_LENGTH: number = 200;
 const PROPFIND_XML_BODY: string = [
     '<?xml version="1.0" encoding="utf-8"?>',
@@ -48,19 +51,6 @@ export function findChildByLocalName(
     return null;
 }
 
-function findChildInElements(
-    parents: ReadonlyArray<Element>,
-    localName: string
-): Element | null {
-    for (const parent of parents) {
-        const found: Element | null = findChildByLocalName(parent, localName);
-        if (found !== null) {
-            return found;
-        }
-    }
-    return null;
-}
-
 export function findChildrenByLocalName(
     parent: Document | Element,
     localName: string
@@ -91,6 +81,19 @@ export function findChildrenByLocalName(
     return matched;
 }
 
+function findEtagInElements(propElements: ReadonlyArray<Element>): string {
+    for (const propEl of propElements) {
+        const children: Element[] = findChildrenByLocalName(propEl, "getetag");
+        for (const child of children) {
+            const normalized: string = util.normalizeEtag(child.textContent);
+            if (normalized !== "") {
+                return normalized;
+            }
+        }
+    }
+    return "";
+}
+
 function findParserError(doc: Document): Element | null {
     const allElements: HTMLCollectionOf<Element> = doc.getElementsByTagName("*");
     for (let i: number = 0; i < allElements.length; i += 1) {
@@ -102,10 +105,48 @@ function findParserError(doc: Document): Element | null {
     return null;
 }
 
+function findPropertyTextInElements(
+    propElements: ReadonlyArray<Element>,
+    localName: string
+): string {
+    for (const propEl of propElements) {
+        const children: Element[] = findChildrenByLocalName(propEl, localName);
+        for (const child of children) {
+            const text: string = (child.textContent ?? "").trim();
+            if (text !== "") {
+                return text;
+            }
+        }
+    }
+    return "";
+}
+
 function getElementLocalName(element: Element): string {
     const rawTag: string = (element.localName || element.tagName).toLowerCase();
     const colonIndex: number = rawTag.indexOf(":");
     return colonIndex === -1 ? rawTag : rawTag.slice(colonIndex + 1);
+}
+
+function hasCollectionResourceType(
+    propElements: ReadonlyArray<Element>
+): boolean {
+    for (const propEl of propElements) {
+        const resourceTypes: Element[] = findChildrenByLocalName(
+            propEl,
+            "resourcetype"
+        );
+        for (const resourceTypeEl of resourceTypes) {
+            if (findChildByLocalName(resourceTypeEl, "collection") !== null) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+function isExplicitRootPath(path: string): boolean {
+    const trimmed: string = path.trim();
+    return trimmed === "" || trimmed === "/";
 }
 
 export function parseMultiStatus(
@@ -115,7 +156,14 @@ export function parseMultiStatus(
     queriedDirPath: string = ""
 ): RemoteItem[] {
     const doc: Document = parseXmlDocument(xmlText);
+    const normalizedBase: string = util.normalizeVaultPath(remoteBaseDir);
+    if (normalizedBase === "" && !isExplicitRootPath(remoteBaseDir)) {
+        throw new Error("Invalid WebDAV remote base directory path");
+    }
     const normalizedQueriedDir: string = util.normalizeVaultPath(queriedDirPath);
+    if (normalizedQueriedDir === "" && !isExplicitRootPath(queriedDirPath)) {
+        throw new Error("Invalid WebDAV queried directory path");
+    }
     const lowerQueriedDir: string = normalizedQueriedDir.toLowerCase();
     const responses: Element[] = findChildrenByLocalName(doc, "response");
     const seenPaths: Set<string> = new Set<string>();
@@ -136,6 +184,11 @@ export function parseMultiStatus(
             parsed.path === normalizedQueriedDir ||
             lowerParsedPath === lowerQueriedDir
         ) {
+            if (!parsed.isDirectory) {
+                throw new Error(
+                    "Invalid WebDAV XML response: queried path is not a directory"
+                );
+            }
             inScopeCount += 1;
             continue;
         }
@@ -153,7 +206,7 @@ export function parseMultiStatus(
         items.push(parsed);
     }
 
-    if (responses.length > 0 && inScopeCount === 0) {
+    if (inScopeCount === 0) {
         throw new Error(
             "Invalid WebDAV XML response: no in-scope responses for queried directory"
         );
@@ -167,6 +220,11 @@ export function parseResponseElement(
     username: string,
     remoteBaseDir: string
 ): RemoteItem | null {
+    const normalizedBase: string = util.normalizeVaultPath(remoteBaseDir);
+    if (normalizedBase === "" && !isExplicitRootPath(remoteBaseDir)) {
+        return null;
+    }
+
     const hrefEl: Element | null = findChildByLocalName(responseEl, "href");
     if (hrefEl === null || hrefEl.textContent === null) {
         return null;
@@ -200,39 +258,31 @@ export function parseResponseElement(
         return null;
     }
 
-    const resourceTypeEl: Element | null = findChildInElements(okPropEls, "resourcetype");
-    const collectionEl: Element | null =
-        resourceTypeEl !== null
-            ? findChildByLocalName(resourceTypeEl, "collection")
-            : null;
-    const isDirectory: boolean = collectionEl !== null;
+    const isDirectory: boolean = hasCollectionResourceType(okPropEls);
+    const etag: string = findEtagInElements(okPropEls);
 
-    const etagEl: Element | null = findChildInElements(okPropEls, "getetag");
-    const etag: string = util.normalizeEtag(etagEl?.textContent);
-
-    const lastModifiedEl: Element | null = findChildInElements(
+    const rawLastModified: string = findPropertyTextInElements(
         okPropEls,
         "getlastmodified"
     );
     const parsedTime: number =
-        lastModifiedEl?.textContent !== undefined && lastModifiedEl.textContent !== null
-            ? Date.parse(lastModifiedEl.textContent.trim())
-            : 0;
+        rawLastModified !== "" ? Date.parse(rawLastModified) : 0;
     const mtime: number =
         Number.isFinite(parsedTime) && parsedTime > 0
             ? util.toSecondPrecision(parsedTime)
             : 0;
 
-    const contentLengthEl: Element | null = findChildInElements(
+    const rawSize: string = findPropertyTextInElements(
         okPropEls,
         "getcontentlength"
     );
-    const rawSize: string = (contentLengthEl?.textContent ?? "").trim();
     const parsedSize: number = DIGITS_ONLY_REGEX.test(rawSize)
         ? Number.parseInt(rawSize, 10)
         : 0;
     const size: number =
-        isDirectory || !Number.isFinite(parsedSize) || parsedSize < 0 ? 0 : parsedSize;
+        isDirectory || !Number.isSafeInteger(parsedSize) || parsedSize < 0
+            ? 0
+            : parsedSize;
 
     return {
         etag,
@@ -251,7 +301,14 @@ export function parseSingleStat(
     targetPath: string
 ): RemoteItem | null {
     const doc: Document = parseXmlDocument(xmlText);
+    const normalizedBase: string = util.normalizeVaultPath(remoteBaseDir);
+    if (normalizedBase === "" && !isExplicitRootPath(remoteBaseDir)) {
+        return null;
+    }
     const normalizedTarget: string = util.normalizeVaultPath(targetPath);
+    if (normalizedTarget === "" && !isExplicitRootPath(targetPath)) {
+        return null;
+    }
     const lowerTarget: string = normalizedTarget.toLowerCase();
     const responses: Element[] = findChildrenByLocalName(doc, "response");
 
@@ -273,8 +330,18 @@ export function parseSingleStat(
 }
 
 export function parseXmlDocument(xmlText: string): Document {
+    if (xmlText.length > MAX_XML_BODY_LENGTH) {
+        throw new Error(
+            `Invalid WebDAV XML response: payload exceeds maximum length (${MAX_XML_BODY_LENGTH} characters)`
+        );
+    }
     if (xmlText.trim() === "") {
         throw new Error("Invalid WebDAV XML response: empty body");
+    }
+    if (DTD_OR_ENTITY_REGEX.test(xmlText)) {
+        throw new Error(
+            "Invalid WebDAV XML response: DTD and ENTITY declarations are forbidden"
+        );
     }
 
     const parser: DOMParser = new DOMParser();
@@ -296,3 +363,4 @@ export function parseXmlDocument(xmlText: string): Document {
 
     return doc;
 }
+

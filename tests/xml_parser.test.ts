@@ -384,4 +384,179 @@ describe("webdav xml_parser", () => {
             "Invalid WebDAV XML response: no in-scope responses for queried directory"
         );
     });
+
+    it("rejects empty multistatus without responses and non-collection self-entries in parseMultiStatus", () => {
+        const emptyMultiStatusXml: string =
+            '<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"/>';
+        expect(() => parseMultiStatus(emptyMultiStatusXml, "alice", "Vault", "")).toThrow(
+            "Invalid WebDAV XML response: no in-scope responses for queried directory"
+        );
+
+        const fileAsRootSelfEntryXml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault</d:href>
+        <d:propstat>
+            <d:prop>
+                <d:getcontentlength>10</d:getcontentlength>
+                <d:resourcetype/>
+            </d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+        expect(() =>
+            parseMultiStatus(fileAsRootSelfEntryXml, "alice", "Vault", "")
+        ).toThrow("Invalid WebDAV XML response: queried path is not a directory");
+
+        const fileAsSubdirSelfEntryXml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/Notes</d:href>
+        <d:propstat>
+            <d:prop>
+                <d:getcontentlength>10</d:getcontentlength>
+                <d:resourcetype/>
+            </d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+        expect(() =>
+            parseMultiStatus(fileAsSubdirSelfEntryXml, "alice", "Vault", "Notes")
+        ).toThrow("Invalid WebDAV XML response: queried path is not a directory");
+    });
+
+    it("rejects traversal or invalid queriedDirPath, targetPath, and remoteBaseDir without falling back to root", () => {
+        const validRootXml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/</d:href>
+        <d:propstat>
+            <d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/RootNote.md</d:href>
+        <d:propstat>
+            <d:prop><d:getcontentlength>12</d:getcontentlength><d:resourcetype/></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+
+        for (const badPath of [".", "..", "../secret", "Notes/../../secret", "bad\0path"]) {
+            expect(() =>
+                parseMultiStatus(validRootXml, "alice", "Vault", badPath)
+            ).toThrow("Invalid WebDAV queried directory path");
+            expect(() =>
+                parseMultiStatus(validRootXml, "alice", badPath, "")
+            ).toThrow("Invalid WebDAV remote base directory path");
+            expect(parseSingleStat(validRootXml, "alice", "Vault", badPath)).toBeNull();
+            expect(parseSingleStat(validRootXml, "alice", badPath, "RootNote.md")).toBeNull();
+        }
+    });
+
+    it("rejects XML payloads with DOCTYPE/ENTITY declarations or exceeding MAX_XML_BODY_LENGTH", () => {
+        const billionLaughsXml: string = `<?xml version="1.0"?>
+<!DOCTYPE lolz [
+    <!ENTITY lol "lol">
+    <!ENTITY lol2 "&lol;&lol;">
+]>
+<d:multistatus xmlns:d="DAV:"/>`;
+
+        expect(() => parseMultiStatus(billionLaughsXml, "alice", "Vault", "")).toThrow(
+            "Invalid WebDAV XML response: DTD and ENTITY declarations are forbidden"
+        );
+        expect(() =>
+            parseSingleStat(billionLaughsXml, "alice", "Vault", "Note.md")
+        ).toThrow("Invalid WebDAV XML response: DTD and ENTITY declarations are forbidden");
+
+        const oversizedFakeXml: string = {
+            length: 10 * 1024 * 1024 + 1,
+            trim: (): string => "<d:multistatus/>"
+        } as unknown as string;
+
+        expect(() => parseMultiStatus(oversizedFakeXml, "alice", "Vault", "")).toThrow(
+            /payload exceeds maximum length/
+        );
+    });
+
+    it("sanitizes unsafe integer content lengths (> Number.MAX_SAFE_INTEGER) and resolves non-empty properties across multiple 200 propstat blocks", () => {
+        const xml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/UnsafeIntSize.bin</d:href>
+        <d:propstat>
+            <d:prop>
+                <d:getcontentlength>9007199254740993</d:getcontentlength>
+                <d:getetag>"unsafe-int"</d:getetag>
+                <d:resourcetype/>
+            </d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/ShadowedDir/</d:href>
+        <d:propstat>
+            <d:prop>
+                <d:getlastmodified/>
+                <d:getetag>""</d:getetag>
+                <d:resourcetype/>
+            </d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+        <d:propstat>
+            <d:prop>
+                <d:getlastmodified>Wed, 14 Oct 2026 21:00:00 GMT</d:getlastmodified>
+                <d:getetag>"shadowed-dir-etag"</d:getetag>
+                <d:resourcetype><d:collection/></d:resourcetype>
+            </d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/ShadowedFile.md</d:href>
+        <d:propstat>
+            <d:prop>
+                <d:getcontentlength/>
+                <d:getetag/>
+                <d:resourcetype/>
+            </d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+        <d:propstat>
+            <d:prop>
+                <d:getcontentlength>777</d:getcontentlength>
+                <d:getetag>"shadowed-file-etag"</d:getetag>
+            </d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+
+        const items: RemoteItem[] = parseMultiStatus(xml, "alice", "Vault", "");
+        expect(items).toHaveLength(3);
+
+        const unsafeItem: RemoteItem | undefined = items.find(
+            (i: RemoteItem) => i.path === "UnsafeIntSize.bin"
+        );
+        expect(unsafeItem?.size).toBe(0);
+
+        const dirItem: RemoteItem | undefined = items.find(
+            (i: RemoteItem) => i.path === "ShadowedDir"
+        );
+        expect(dirItem?.isDirectory).toBe(true);
+        expect(dirItem?.etag).toBe("shadowed-dir-etag");
+        expect(dirItem?.mtime).toBe(Date.parse("Wed, 14 Oct 2026 21:00:00 GMT"));
+
+        const fileItem: RemoteItem | undefined = items.find(
+            (i: RemoteItem) => i.path === "ShadowedFile.md"
+        );
+        expect(fileItem?.isDirectory).toBe(false);
+        expect(fileItem?.size).toBe(777);
+        expect(fileItem?.etag).toBe("shadowed-file-etag");
+    });
 });
+
