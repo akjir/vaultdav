@@ -28,7 +28,7 @@ Execute changes autonomously in this strict sequence until all checks pass with 
 4. **Self-Correction:** If any check fails, analyze the output, fix the root cause in `src/` or `tests/`, and re-run step 3 until all three checks pass.
 
 ## 3. Changelog Maintenance (`CHANGELOG.md`)
-Update `CHANGELOG.md` under the `## [Unreleased]` section for every user-facing or architectural change:
+Update `CHANGELOG.md` under the `## [Unreleased]` section (create `## [Unreleased]` above the latest release heading if absent) for every user-facing or architectural change:
 - Use Keep a Changelog categories: `### Added`, `### Changed`, `### Fixed`, `### Removed`.
 - Write entries in the imperative mood (ASD-STE100), starting with a verb.
 - Do not add redundant implementation details already visible in git diffs.

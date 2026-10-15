@@ -1,17 +1,28 @@
 import type { App, PluginManifest } from "obsidian";
 import { describe, expect, it } from "vitest";
 import manifestJson from "../manifest.json";
+import packageLockJson from "../package-lock.json";
 import packageJson from "../package.json";
 import VaultDavPlugin from "../src/main";
 import { VaultDavSettingTab } from "../src/settings";
+import versionsJson from "../versions.json";
+
+const SEMVER_REGEX: RegExp = /^\d+\.\d+\.\d+$/;
 
 describe("Test environment setup and plugin metadata", () => {
-    it("enforces zero external runtime dependencies and vaultdav plugin ID", () => {
+    it("enforces zero external runtime dependencies, vaultdav plugin ID, and synchronized version metadata", () => {
         const record: Record<string, unknown> = packageJson;
+        const versionsRecord: Record<string, string> = versionsJson;
         const devDependencyKeys: string[] = Object.keys(packageJson.devDependencies).sort();
 
         expect(packageJson.name).toBe("vaultdav");
         expect(manifestJson.id).toBe("vaultdav");
+        expect(manifestJson.isDesktopOnly).toBe(false);
+        expect(SEMVER_REGEX.test(packageJson.version)).toBe(true);
+        expect(manifestJson.version).toBe(packageJson.version);
+        expect(packageLockJson.version).toBe(packageJson.version);
+        expect(packageLockJson.packages[""].version).toBe(packageJson.version);
+        expect(versionsRecord[manifestJson.version]).toBe(manifestJson.minAppVersion);
         expect("dependencies" in record).toBe(false);
         expect("optionalDependencies" in record).toBe(false);
         expect("peerDependencies" in record).toBe(false);
