@@ -332,4 +332,185 @@ describe("SyncStateStore", () => {
         await expect(store.load()).rejects.toThrow(/EIO/);
         expect(store.getRecord("Notes/Padded.md")?.etag).toBe("e1");
     });
+
+    it("rejects root, traversal, credential data.json, and non-excluded vault paths as stateFilePath in constructor", () => {
+        const { adapter } = createMockAdapter();
+
+        expect(() => new SyncStateStore(adapter, "")).toThrow(
+            /Invalid sync state file path/
+        );
+        expect(() => new SyncStateStore(adapter, "/")).toThrow(
+            /Invalid sync state file path/
+        );
+        expect(() => new SyncStateStore(adapter, "../escape.json")).toThrow(
+            /Invalid sync state file path/
+        );
+        expect(
+            () =>
+                new SyncStateStore(
+                    adapter,
+                    ".obsidian/plugins/vaultdav/data.json"
+                )
+        ).toThrow(/Invalid sync state file path/);
+        expect(
+            () =>
+                new SyncStateStore(
+                    adapter,
+                    "  //.OBSIDIAN/plugins/other-plugin/DATA.JSON "
+                )
+        ).toThrow(/Invalid sync state file path/);
+        expect(() => new SyncStateStore(adapter, "Notes/UserNote.md")).toThrow(
+            /Invalid sync state file path/
+        );
+    });
+
+    it("neutralizes interior null-byte ReDoS payloads in O(N) time and rejects oversized state files in load()", async () => {
+        const interiorNullPayload: string = `{"version":1,"records":${"\0".repeat(60000)}}`;
+        const { adapter: redosAdapter } = createMockAdapter({
+            [SYNC_STATE_FILE_PATH]: interiorNullPayload
+        });
+        const redosStore: SyncStateStore = new SyncStateStore(redosAdapter);
+
+        const startMs: number = performance.now();
+        const result: SyncStateData = await redosStore.load();
+        const elapsedMs: number = performance.now() - startMs;
+
+        expect(elapsedMs).toBeLessThan(100);
+        expect(result.records).toEqual({});
+
+        const { adapter: oversizedAdapter, files: oversizedFiles } =
+            createMockAdapter();
+        oversizedFiles.set(
+            SYNC_STATE_FILE_PATH,
+            "x".repeat(50 * 1024 * 1024 + 1)
+        );
+        const oversizedStore: SyncStateStore = new SyncStateStore(
+            oversizedAdapter
+        );
+        const oversizedData: SyncStateData = await oversizedStore.load();
+        expect(oversizedData.records).toEqual({});
+    });
+
+    it("returns defensive clones from getRecord(), getAll(), and load() to prevent external mutation of internal state", async () => {
+        const { adapter } = createMockAdapter();
+        const store: SyncStateStore = new SyncStateStore(adapter);
+
+        store.upsertRecord({
+            etag: "immutable-etag",
+            isDirectory: false,
+            lastSyncTime: 5000,
+            localMtime: 5000,
+            path: "Notes/Safe.md",
+            remoteMtime: 5000,
+            size: 42
+        });
+
+        const single: SyncStateRecord | undefined =
+            store.getRecord("Notes/Safe.md");
+        expect(single).toBeDefined();
+        if (single !== undefined) {
+            single.etag = "mutated-etag";
+            single.path = "../evil.md";
+            single.localMtime = Number.NaN;
+        }
+
+        expect(store.getRecord("Notes/Safe.md")).toEqual({
+            etag: "immutable-etag",
+            isDirectory: false,
+            lastSyncTime: 5000,
+            localMtime: 5000,
+            path: "Notes/Safe.md",
+            remoteMtime: 5000,
+            size: 42
+        });
+
+        const allRecords: Record<string, SyncStateRecord> = store.getAll();
+        if (allRecords["Notes/Safe.md"] !== undefined) {
+            allRecords["Notes/Safe.md"].size = 999999;
+        }
+        expect(store.getRecord("Notes/Safe.md")?.size).toBe(42);
+
+        await store.save();
+        const loaded: SyncStateData = await store.load();
+        if (loaded.records["Notes/Safe.md"] !== undefined) {
+            loaded.records["Notes/Safe.md"].etag = "corrupted-after-load";
+        }
+        expect(store.getRecord("Notes/Safe.md")?.etag).toBe("immutable-etag");
+    });
+
+    it("rejects JSON array type confusion, clamps unsafe integers/timestamps, and deduplicates concurrent ensureParentDirectory() calls", async () => {
+        const arrayRecordsJson: string = JSON.stringify({
+            records: ["not", "a", "record", "map"],
+            version: 1
+        });
+        const { adapter: arrayAdapter } = createMockAdapter({
+            [SYNC_STATE_FILE_PATH]: arrayRecordsJson
+        });
+        const arrayStore: SyncStateStore = new SyncStateStore(arrayAdapter);
+        const arrayData: SyncStateData = await arrayStore.load();
+        expect(arrayData.records).toEqual({});
+
+        const extremeJson: string = JSON.stringify({
+            records: {
+                "Notes/ArrayVal.md": [1, 2, 3],
+                "Notes/Extreme.md": {
+                    etag: "ext",
+                    isDirectory: false,
+                    lastSyncTime: 1e308,
+                    localMtime: 9_000_000_000_000_000,
+                    path: "Notes/Extreme.md",
+                    remoteMtime: 1700000000999.8,
+                    size: 123.45
+                }
+            },
+            version: 1
+        });
+        const { adapter: extremeAdapter } = createMockAdapter({
+            [SYNC_STATE_FILE_PATH]: extremeJson
+        });
+        const extremeStore: SyncStateStore = new SyncStateStore(extremeAdapter);
+        await extremeStore.load();
+
+        expect(extremeStore.getRecord("Notes/ArrayVal.md")).toBeUndefined();
+        expect(extremeStore.getRecord("Notes/Extreme.md")).toEqual({
+            etag: "ext",
+            isDirectory: false,
+            lastSyncTime: 0,
+            localMtime: 0,
+            path: "Notes/Extreme.md",
+            remoteMtime: 1700000000999,
+            size: 0
+        });
+
+        extremeStore.upsertRecord({
+            etag: "ext-upsert",
+            isDirectory: false,
+            lastSyncTime: 1e308,
+            localMtime: 8_640_000_000_000_001,
+            path: "Notes/ExtremeUpsert.md",
+            remoteMtime: 2500.9,
+            size: Number.MAX_SAFE_INTEGER + 10
+        });
+        expect(extremeStore.getRecord("Notes/ExtremeUpsert.md")).toEqual({
+            etag: "ext-upsert",
+            isDirectory: false,
+            lastSyncTime: 0,
+            localMtime: 0,
+            path: "Notes/ExtremeUpsert.md",
+            remoteMtime: 2500,
+            size: 0
+        });
+
+        const { adapter: concurrentAdapter } = createMockAdapter();
+        const mkdirSpy = vi.spyOn(concurrentAdapter, "mkdir");
+        const concurrentStore: SyncStateStore = new SyncStateStore(
+            concurrentAdapter
+        );
+        await Promise.all([
+            concurrentStore.ensureParentDirectory(),
+            concurrentStore.ensureParentDirectory(),
+            concurrentStore.ensureParentDirectory()
+        ]);
+        expect(mkdirSpy).toHaveBeenCalledTimes(3);
+    });
 });
