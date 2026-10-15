@@ -18,6 +18,8 @@ export const MAX_FILE_SIZE_BYTES: number = util.MAX_FILE_SIZE_BYTES;
 
 const BYTES_PER_MB: number = 1024 * 1024;
 const DEFAULT_CHUNKING_THRESHOLD_MB: number = 90;
+const MAX_CHUNKED_FILE_SIZE_BYTES: number = 1024 * 1024 * 1024;
+const MAX_CHUNKING_THRESHOLD_MB: number = 1024;
 const PARALLEL_DOWNLOAD_THRESHOLD_BYTES: number = 5 * 1024 * 1024;
 const TRANSFER_CONCURRENCY: number = 4;
 
@@ -354,6 +356,22 @@ export function buildSyncPlan(
     };
 }
 
+function hasCaseInsensitivePath(
+    paths: ReadonlySet<string>,
+    candidatePath: string
+): boolean {
+    if (paths.has(candidatePath)) {
+        return true;
+    }
+    const lowerCandidate: string = candidatePath.toLowerCase();
+    for (const existing of paths) {
+        if (existing.toLowerCase() === lowerCandidate) {
+            return true;
+        }
+    }
+    return false;
+}
+
 export function isLocalModified(local: LocalItem, state: SyncStateRecord): boolean {
     if (local.isDirectory !== state.isDirectory || local.size !== state.size) {
         return true;
@@ -463,26 +481,41 @@ export class SyncEngine {
     ): Promise<ArrayBuffer> {
         if (
             Number.isFinite(remoteSize) &&
+            remoteSize > MAX_CHUNKED_FILE_SIZE_BYTES
+        ) {
+            throw new Error(
+                `Download refused on oversized file (${remoteSize} bytes exceeds ${MAX_CHUNKED_FILE_SIZE_BYTES} bytes): ${progressLabelPath}`
+            );
+        }
+        if (
+            Number.isFinite(remoteSize) &&
             remoteSize > PARALLEL_DOWNLOAD_THRESHOLD_BYTES
         ) {
-            return await this.client.downloadFileChunked(
-                remoteDownloadPath,
-                remoteSize,
-                (chunkIndex: number, totalChunks: number): void => {
-                    if (this.progressReporter !== null) {
-                        this.progressReporter.reportProgress(
-                            formatTransferProgress(
-                                "Downloading",
-                                progressLabelPath,
-                                fileIndex,
-                                totalFiles,
-                                chunkIndex,
-                                totalChunks
-                            )
-                        );
+            const chunkedBuffer: ArrayBuffer =
+                await this.client.downloadFileChunked(
+                    remoteDownloadPath,
+                    remoteSize,
+                    (chunkIndex: number, totalChunks: number): void => {
+                        if (this.progressReporter !== null) {
+                            this.progressReporter.reportProgress(
+                                formatTransferProgress(
+                                    "Downloading",
+                                    progressLabelPath,
+                                    fileIndex,
+                                    totalFiles,
+                                    chunkIndex,
+                                    totalChunks
+                                )
+                            );
+                        }
                     }
-                }
-            );
+                );
+            if (chunkedBuffer.byteLength > MAX_CHUNKED_FILE_SIZE_BYTES) {
+                throw new Error(
+                    `Download refused on oversized file (${chunkedBuffer.byteLength} bytes exceeds ${MAX_CHUNKED_FILE_SIZE_BYTES} bytes): ${progressLabelPath}`
+                );
+            }
+            return chunkedBuffer;
         }
         if (this.progressReporter !== null) {
             this.progressReporter.reportProgress(
@@ -494,7 +527,14 @@ export class SyncEngine {
                 )
             );
         }
-        return await this.client.downloadFile(remoteDownloadPath);
+        const downloadedBuffer: ArrayBuffer =
+            await this.client.downloadFile(remoteDownloadPath);
+        if (downloadedBuffer.byteLength > MAX_CHUNKED_FILE_SIZE_BYTES) {
+            throw new Error(
+                `Download refused on oversized file (${downloadedBuffer.byteLength} bytes exceeds ${MAX_CHUNKED_FILE_SIZE_BYTES} bytes): ${progressLabelPath}`
+            );
+        }
+        return downloadedBuffer;
     }
 
     public async executeConflict(
@@ -516,6 +556,11 @@ export class SyncEngine {
         const remote: RemoteItem | undefined = remoteMap.get(normalizedPath);
         if (local === undefined || remote === undefined) {
             return;
+        }
+        if (local.isDirectory || remote.isDirectory) {
+            throw new Error(
+                `Conflict resolution refused on directory path: ${normalizedPath}`
+            );
         }
 
         if (this.settings.conflictStrategy === "newest_wins") {
@@ -542,6 +587,23 @@ export class SyncEngine {
             return;
         }
 
+        if (
+            Number.isFinite(local.size) &&
+            local.size > MAX_CHUNKED_FILE_SIZE_BYTES
+        ) {
+            throw new Error(
+                `Conflict resolution refused on oversized local file (${local.size} bytes exceeds ${MAX_CHUNKED_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+            );
+        }
+        if (
+            Number.isFinite(remote.size) &&
+            remote.size > MAX_CHUNKED_FILE_SIZE_BYTES
+        ) {
+            throw new Error(
+                `Conflict resolution refused on oversized remote file (${remote.size} bytes exceeds ${MAX_CHUNKED_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+            );
+        }
+
         const localReadPath: string =
             util.normalizeVaultPath(local.path) || normalizedPath;
         const remoteDownloadPath: string =
@@ -560,6 +622,15 @@ export class SyncEngine {
             ]);
 
         if (
+            localBuffer.byteLength > MAX_CHUNKED_FILE_SIZE_BYTES ||
+            remoteBuffer.byteLength > MAX_CHUNKED_FILE_SIZE_BYTES
+        ) {
+            throw new Error(
+                `Conflict resolution refused on oversized file buffer: ${normalizedPath}`
+            );
+        }
+
+        if (
             localBuffer.byteLength === remoteBuffer.byteLength &&
             util.areArrayBuffersEqual(localBuffer, remoteBuffer)
         ) {
@@ -575,16 +646,21 @@ export class SyncEngine {
             return;
         }
 
+        existingPaths.add(normalizedPath);
+        const normalizedPlannedConflict: string =
+            action.conflictCopyPath !== undefined
+                ? util.normalizeVaultPath(action.conflictCopyPath)
+                : "";
         const canUsePlannedConflictPath: boolean =
-            action.conflictCopyPath !== undefined &&
-            action.conflictCopyPath !== "" &&
-            !util.isExcludedPath(action.conflictCopyPath) &&
-            (!existingPaths.has(action.conflictCopyPath) ||
-                this.planReservedConflictPaths.delete(action.conflictCopyPath));
-        const conflictPath: string =
-            canUsePlannedConflictPath && action.conflictCopyPath !== undefined
-                ? action.conflictCopyPath
-                : util.getConflictPath(normalizedPath, now, existingPaths);
+            normalizedPlannedConflict !== "" &&
+            normalizedPlannedConflict.toLowerCase() !==
+                normalizedPath.toLowerCase() &&
+            !util.isExcludedPath(normalizedPlannedConflict) &&
+            (this.planReservedConflictPaths.delete(normalizedPlannedConflict) ||
+                !hasCaseInsensitivePath(existingPaths, normalizedPlannedConflict));
+        const conflictPath: string = canUsePlannedConflictPath
+            ? normalizedPlannedConflict
+            : util.getConflictPath(normalizedPath, now, existingPaths);
         existingPaths.add(conflictPath);
 
         const parentDir: string = util.getParentPath(conflictPath);
@@ -655,6 +731,9 @@ export class SyncEngine {
             throw new Error(`Download refused on invalid or excluded path: ${path}`);
         }
         const remote: RemoteItem | undefined = remoteMap.get(normalizedPath);
+        if (remote?.isDirectory === true) {
+            throw new Error(`Download refused on directory path: ${normalizedPath}`);
+        }
         const remoteDownloadPath: string =
             remote !== undefined
                 ? util.normalizeVaultPath(remote.path) || normalizedPath
@@ -701,7 +780,10 @@ export class SyncEngine {
         localItems: ReadonlyArray<LocalItem>,
         remoteItems: ReadonlyArray<RemoteItem>
     ): Promise<SyncResult> {
-        const now: number = plan.timestamp;
+        const now: number =
+            Number.isFinite(plan.timestamp) && plan.timestamp > 0
+                ? plan.timestamp
+                : 0;
         const localMap: Map<string, LocalItem> = new Map<string, LocalItem>();
         const localLowerMap: Map<string, LocalItem> = new Map<string, LocalItem>();
         for (const item of localItems) {
@@ -728,6 +810,9 @@ export class SyncEngine {
         }
         for (const action of plan.actions) {
             const normActionPath: string = util.normalizeVaultPath(action.path);
+            if (normActionPath === "") {
+                continue;
+            }
             const lowerActionPath: string = normActionPath.toLowerCase();
             if (!localMap.has(normActionPath)) {
                 const matchedLocal: LocalItem | undefined =
@@ -751,13 +836,18 @@ export class SyncEngine {
             ...remoteMap.keys()
         ]);
         for (const action of plan.actions) {
-            if (
-                action.conflictCopyPath !== undefined &&
-                action.conflictCopyPath !== "" &&
-                !existingPaths.has(action.conflictCopyPath)
-            ) {
-                existingPaths.add(action.conflictCopyPath);
-                this.planReservedConflictPaths.add(action.conflictCopyPath);
+            if (action.conflictCopyPath !== undefined) {
+                const normalizedConflict: string = util.normalizeVaultPath(
+                    action.conflictCopyPath
+                );
+                if (
+                    normalizedConflict !== "" &&
+                    !util.isExcludedPath(normalizedConflict) &&
+                    !hasCaseInsensitivePath(existingPaths, normalizedConflict)
+                ) {
+                    existingPaths.add(normalizedConflict);
+                    this.planReservedConflictPaths.add(normalizedConflict);
+                }
             }
         }
 
@@ -771,16 +861,37 @@ export class SyncEngine {
             uploaded: 0
         };
 
+        const protectedDeleteDirsLower: Set<string> = new Set<string>();
+        const protectAncestors = (targetPath: string): void => {
+            for (const ancestor of util.getFolderLevels(targetPath, false)) {
+                protectedDeleteDirsLower.add(ancestor.toLowerCase());
+            }
+        };
+
         let stateDirty: boolean = false;
         for (const action of plan.actions) {
+            const normActionPath: string = util.normalizeVaultPath(action.path);
+            if (normActionPath === "" || util.isExcludedPath(normActionPath)) {
+                continue;
+            }
+            if (
+                action.type === "noop" ||
+                action.type === "upload" ||
+                action.type === "download" ||
+                action.type === "conflict" ||
+                action.type === "create_local_dir" ||
+                action.type === "create_remote_dir"
+            ) {
+                protectAncestors(normActionPath);
+            }
             if (action.type === "prune_state") {
-                this.stateStore.removeRecord(action.path);
+                this.stateStore.removeRecord(normActionPath);
                 stateDirty = true;
             } else if (action.type === "noop") {
                 const existing: SyncStateRecord | undefined =
-                    this.stateStore.getRecord(action.path);
-                const local: LocalItem | undefined = localMap.get(action.path);
-                const remote: RemoteItem | undefined = remoteMap.get(action.path);
+                    this.stateStore.getRecord(normActionPath);
+                const local: LocalItem | undefined = localMap.get(normActionPath);
+                const remote: RemoteItem | undefined = remoteMap.get(normActionPath);
                 if (
                     existing === undefined &&
                     local !== undefined &&
@@ -792,7 +903,7 @@ export class SyncEngine {
                         isDirectory: action.isDirectory,
                         lastSyncTime: now,
                         localMtime: util.toSecondPrecision(local.mtime),
-                        path: action.path,
+                        path: normActionPath,
                         remoteMtime: util.toSecondPrecision(remote.mtime),
                         size: action.isDirectory ? 0 : remote.size
                     });
@@ -809,27 +920,40 @@ export class SyncEngine {
                 a.type === "create_local_dir" || a.type === "create_remote_dir"
         );
         const dirDepthLevels: number[] = Array.from(
-            new Set<number>(dirCreations.map((a: SyncAction) => a.depth))
+            new Set<number>(
+                dirCreations.map((a: SyncAction) => util.getPathDepth(a.path))
+            )
         ).sort((a: number, b: number) => a - b);
 
         for (const level of dirDepthLevels) {
             const levelActions: SyncAction[] = dirCreations.filter(
-                (a: SyncAction) => a.depth === level
+                (a: SyncAction) => util.getPathDepth(a.path) === level
             );
             const tasks: Array<() => Promise<void>> = levelActions.map(
                 (action: SyncAction) => async (): Promise<void> => {
                     try {
+                        const normalizedDir: string = util.normalizeVaultPath(
+                            action.path
+                        );
+                        if (
+                            normalizedDir === "" ||
+                            util.isExcludedPath(normalizedDir)
+                        ) {
+                            throw new Error(
+                                `Directory creation refused on invalid or excluded path: ${action.path}`
+                            );
+                        }
                         if (action.type === "create_local_dir") {
-                            await this.createLocalDirectory(action.path);
+                            await this.createLocalDirectory(normalizedDir);
                         } else {
-                            await this.client.createDirectory(action.path);
+                            await this.client.createDirectory(normalizedDir);
                         }
                         this.stateStore.upsertRecord({
                             etag: "",
                             isDirectory: true,
                             lastSyncTime: now,
                             localMtime: util.toSecondPrecision(now),
-                            path: action.path,
+                            path: normalizedDir,
                             remoteMtime: util.toSecondPrecision(now),
                             size: 0
                         });
@@ -852,16 +976,28 @@ export class SyncEngine {
         );
         const fileDeleteTasks: Array<() => Promise<void>> = fileDeletions.map(
             (action: SyncAction) => async (): Promise<void> => {
+                const normalizedPath: string = util.normalizeVaultPath(action.path);
                 try {
+                    if (
+                        normalizedPath === "" ||
+                        util.isExcludedPath(normalizedPath)
+                    ) {
+                        throw new Error(
+                            `File deletion refused on invalid or excluded path: ${action.path}`
+                        );
+                    }
                     if (action.type === "delete_local") {
-                        await this.deleteLocalItem(action.path, false);
+                        await this.deleteLocalItem(normalizedPath, false);
                         result.deletedLocal += 1;
                     } else {
-                        await this.client.deleteItem(action.path, false);
+                        await this.client.deleteItem(normalizedPath, false);
                         result.deletedRemote += 1;
                     }
-                    this.stateStore.removeRecord(action.path);
+                    this.stateStore.removeRecord(normalizedPath);
                 } catch (err: unknown) {
+                    if (normalizedPath !== "") {
+                        protectAncestors(normalizedPath);
+                    }
                     const msg: string =
                         err instanceof Error ? err.message : String(err);
                     log.error(`File deletion failed for ${action.path}: ${msg}`);
@@ -880,23 +1016,48 @@ export class SyncEngine {
                 (a.type === "delete_local" || a.type === "delete_remote")
         );
         const deleteDepthLevels: number[] = Array.from(
-            new Set<number>(dirDeletions.map((a: SyncAction) => a.depth))
+            new Set<number>(
+                dirDeletions.map((a: SyncAction) => util.getPathDepth(a.path))
+            )
         ).sort((a: number, b: number) => b - a);
 
         for (const level of deleteDepthLevels) {
             const levelActions: SyncAction[] = dirDeletions.filter(
-                (a: SyncAction) => a.depth === level
+                (a: SyncAction) => util.getPathDepth(a.path) === level
             );
             const tasks: Array<() => Promise<void>> = levelActions.map(
                 (action: SyncAction) => async (): Promise<void> => {
+                    const normalizedDir: string = util.normalizeVaultPath(
+                        action.path
+                    );
                     try {
-                        if (action.type === "delete_local") {
-                            await this.deleteLocalItem(action.path, true);
-                        } else {
-                            await this.client.deleteItem(action.path, true);
+                        if (
+                            normalizedDir === "" ||
+                            util.isExcludedPath(normalizedDir)
+                        ) {
+                            throw new Error(
+                                `Directory deletion refused on invalid or excluded path: ${action.path}`
+                            );
                         }
-                        this.stateStore.removeRecord(action.path);
+                        if (
+                            protectedDeleteDirsLower.has(
+                                normalizedDir.toLowerCase()
+                            )
+                        ) {
+                            throw new Error(
+                                `Directory deletion aborted because child item remains in ${normalizedDir}`
+                            );
+                        }
+                        if (action.type === "delete_local") {
+                            await this.deleteLocalItem(normalizedDir, true);
+                        } else {
+                            await this.client.deleteItem(normalizedDir, true);
+                        }
+                        this.stateStore.removeRecord(normalizedDir);
                     } catch (err: unknown) {
+                        if (normalizedDir !== "") {
+                            protectAncestors(normalizedDir);
+                        }
                         const msg: string =
                             err instanceof Error ? err.message : String(err);
                         log.error(`Directory deletion failed for ${action.path}: ${msg}`);
@@ -977,6 +1138,18 @@ export class SyncEngine {
             throw new Error(`Upload refused on invalid or excluded path: ${path}`);
         }
         const local: LocalItem | undefined = localMap.get(normalizedPath);
+        if (local?.isDirectory === true) {
+            throw new Error(`Upload refused on directory path: ${normalizedPath}`);
+        }
+        if (
+            local !== undefined &&
+            Number.isFinite(local.size) &&
+            local.size > MAX_CHUNKED_FILE_SIZE_BYTES
+        ) {
+            throw new Error(
+                `Upload refused on oversized file (${local.size} bytes exceeds ${MAX_CHUNKED_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+            );
+        }
         const localReadPath: string =
             local !== undefined
                 ? util.normalizeVaultPath(local.path) || normalizedPath
@@ -1006,7 +1179,10 @@ export class SyncEngine {
         const thresholdMB: number =
             Number.isFinite(this.settings.chunkingThresholdMB) &&
             this.settings.chunkingThresholdMB >= 1
-                ? Math.floor(this.settings.chunkingThresholdMB)
+                ? Math.min(
+                      MAX_CHUNKING_THRESHOLD_MB,
+                      Math.floor(this.settings.chunkingThresholdMB)
+                  )
                 : DEFAULT_CHUNKING_THRESHOLD_MB;
         return thresholdMB * BYTES_PER_MB;
     }
@@ -1039,6 +1215,11 @@ export class SyncEngine {
         fileIndex: number,
         totalFiles: number
     ): Promise<RemoteItem> {
+        if (content.byteLength > MAX_CHUNKED_FILE_SIZE_BYTES) {
+            throw new Error(
+                `Upload refused on oversized file (${content.byteLength} bytes exceeds ${MAX_CHUNKED_FILE_SIZE_BYTES} bytes): ${normalizedPath}`
+            );
+        }
         const thresholdBytes: number = this.getChunkingThresholdBytes();
         if (content.byteLength > thresholdBytes) {
             return await this.client.uploadFileChunked(

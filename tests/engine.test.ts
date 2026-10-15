@@ -1449,4 +1449,417 @@ describe("SyncEngine delta calculation and execution", () => {
             warnSpy.mockRestore();
         }
     });
+
+    it("normalizes conflictCopyPath and blocks case-insensitive or self-overwriting conflict copy collisions", async () => {
+        const t1: number = Date.UTC(2026, 9, 14, 19, 0, 0);
+        const writtenLocalPaths: string[] = [];
+        const uploadedRemotePaths: string[] = [];
+        const textFiles: Map<string, string> = new Map<string, string>();
+
+        const adapter: Partial<DataAdapter> = {
+            exists: async (p: string): Promise<boolean> => textFiles.has(p),
+            mkdir: async (): Promise<void> => undefined,
+            read: async (p: string): Promise<string> => textFiles.get(p) ?? "",
+            readBinary: async (): Promise<ArrayBuffer> =>
+                new TextEncoder().encode("local-conflict-data").buffer,
+            stat: async (): Promise<Stat | null> => ({
+                ctime: t1,
+                mtime: t1,
+                size: 19,
+                type: "file"
+            }),
+            write: async (p: string, d: string): Promise<void> => {
+                textFiles.set(p, d);
+            },
+            writeBinary: async (p: string): Promise<void> => {
+                writtenLocalPaths.push(p);
+            }
+        };
+
+        const mockClient: Partial<WebDavClient> = {
+            downloadFile: async (): Promise<ArrayBuffer> =>
+                new TextEncoder().encode("remote-conflict-data").buffer,
+            uploadFile: async (
+                p: string,
+                content: ArrayBuffer,
+                mtime: number
+            ): Promise<RemoteItem> => {
+                uploadedRemotePaths.push(p);
+                return makeRemote(p, mtime, content.byteLength, `etag-${p}`);
+            }
+        };
+
+        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+        await stateStore.load();
+        const engine: SyncEngine = new SyncEngine(
+            { adapter: adapter as DataAdapter } as Vault,
+            mockClient as WebDavClient,
+            stateStore,
+            {
+                appPassword: "pw",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        const localItems: LocalItem[] = [
+            makeLocal("Notes/Doc.md", t1, 19, false),
+            makeLocal("notes/existing.md", t1, 10, false)
+        ];
+        const remoteItems: RemoteItem[] = [
+            makeRemote("Notes/Doc.md", t1 + 1000, 20, "etag-doc", false),
+            makeRemote("notes/existing.md", t1, 10, "etag-existing", false)
+        ];
+
+        const localMap: Map<string, LocalItem> = new Map<string, LocalItem>(
+            localItems.map((item: LocalItem) => [item.path, item])
+        );
+        const remoteMap: Map<string, RemoteItem> = new Map<string, RemoteItem>(
+            remoteItems.map((item: RemoteItem) => [item.path, item])
+        );
+
+        // 1. Direct executeConflict with unnormalized leading-slash path that case-collides with "notes/existing.md"
+        const existingSet: Set<string> = new Set<string>(["notes/existing.md"]);
+        await engine.executeConflict(
+            {
+                conflictCopyPath: "/Notes/Existing.md",
+                depth: 2,
+                isDirectory: false,
+                path: "Notes/Doc.md",
+                type: "conflict"
+            },
+            localMap,
+            remoteMap,
+            existingSet,
+            t1
+        );
+
+        expect(writtenLocalPaths).not.toContain("/Notes/Existing.md");
+        expect(writtenLocalPaths).not.toContain("Notes/Existing.md");
+        expect(writtenLocalPaths).toContain("Notes/Doc.conflict-20261014-190000.md");
+
+        // 2. Direct executeConflict with self-overwriting conflictCopyPath ("notes/doc.md") and empty existingPaths
+        writtenLocalPaths.length = 0;
+        uploadedRemotePaths.length = 0;
+        await engine.executeConflict(
+            {
+                conflictCopyPath: "notes/doc.md",
+                depth: 2,
+                isDirectory: false,
+                path: "Notes/Doc.md",
+                type: "conflict"
+            },
+            localMap,
+            remoteMap,
+            new Set<string>(),
+            t1
+        );
+        expect(uploadedRemotePaths).toEqual(["Notes/Doc.conflict-20261014-190000.md"]);
+
+        // 3. executePlan with unnormalized conflictCopyPath ("/Notes\\CustomConflict.md") and duplicate case-colliding conflictCopyPath
+        writtenLocalPaths.length = 0;
+        uploadedRemotePaths.length = 0;
+        const customPlan: SyncPlan = {
+            actions: [
+                {
+                    conflictCopyPath: "  /Notes\\CustomConflict.md  ",
+                    depth: 2,
+                    isDirectory: false,
+                    path: "Notes/Doc.md",
+                    type: "conflict"
+                },
+                {
+                    conflictCopyPath: "notes/customconflict.md",
+                    depth: 2,
+                    isDirectory: false,
+                    path: "Notes/Doc.md",
+                    type: "conflict"
+                }
+            ],
+            timestamp: t1
+        };
+
+        await engine.executePlan(customPlan, localItems, remoteItems);
+        expect(writtenLocalPaths).not.toContain("  /Notes\\CustomConflict.md  ");
+        expect(uploadedRemotePaths).toContain("Notes/CustomConflict.md");
+        expect(uploadedRemotePaths).toContain("Notes/Doc.conflict-20261014-190000.md");
+        expect(uploadedRemotePaths).not.toContain("notes/customconflict.md");
+    });
+
+    it("enforces pre-flight 1 GB file size limits before readBinary/downloadContent and clamps chunkingThresholdMB", async () => {
+        const t0: number = Date.UTC(2026, 9, 14, 18, 0, 0);
+        const overOneGb: number = 1024 * 1024 * 1024 + 1;
+        let readBinaryCalled: boolean = false;
+        let writeBinaryCalled: boolean = false;
+        let downloadCalled: boolean = false;
+        const chunkedUploadPaths: string[] = [];
+
+        const adapter: Partial<DataAdapter> = {
+            exists: async (): Promise<boolean> => false,
+            mkdir: async (): Promise<void> => undefined,
+            read: async (): Promise<string> => "",
+            readBinary: async (p: string): Promise<ArrayBuffer> => {
+                if (p === "950MB.bin") {
+                    return Object.defineProperty(new ArrayBuffer(0), "byteLength", {
+                        value: 950 * 1024 * 1024
+                    });
+                }
+                readBinaryCalled = true;
+                return Object.defineProperty(new ArrayBuffer(0), "byteLength", {
+                    value: overOneGb
+                });
+            },
+            stat: async (): Promise<Stat | null> => null,
+            write: async (): Promise<void> => undefined,
+            writeBinary: async (): Promise<void> => {
+                writeBinaryCalled = true;
+            }
+        };
+
+        const mockClient: Partial<WebDavClient> = {
+            downloadFileChunked: async (): Promise<ArrayBuffer> => {
+                downloadCalled = true;
+                return new ArrayBuffer(0);
+            },
+            uploadFile: async (): Promise<RemoteItem> => {
+                throw new Error("Should not route 950MB file to unchunked uploadFile");
+            },
+            uploadFileChunked: async (
+                p: string,
+                content: ArrayBuffer,
+                mtime: number
+            ): Promise<RemoteItem> => {
+                chunkedUploadPaths.push(p);
+                return makeRemote(p, mtime, content.byteLength, "etag-chunked");
+            }
+        };
+
+        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+        const engine: SyncEngine = new SyncEngine(
+            { adapter: adapter as DataAdapter } as Vault,
+            mockClient as WebDavClient,
+            stateStore,
+            {
+                appPassword: "pw",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 5000,
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        const oversizedLocalMap: Map<string, LocalItem> = new Map<string, LocalItem>([
+            ["Huge.iso", makeLocal("Huge.iso", t0, overOneGb, false)]
+        ]);
+        const oversizedRemoteMap: Map<string, RemoteItem> = new Map<string, RemoteItem>([
+            ["Huge.iso", makeRemote("Huge.iso", t0 + 1000, overOneGb, "etag-huge", false)]
+        ]);
+
+        await expect(
+            engine.executeUpload("Huge.iso", oversizedLocalMap, t0)
+        ).rejects.toThrow(/oversized/i);
+        expect(readBinaryCalled).toBe(false);
+
+        await expect(
+            engine.executeDownload("Huge.iso", oversizedRemoteMap, t0)
+        ).rejects.toThrow(/oversized/i);
+        expect(downloadCalled).toBe(false);
+        expect(writeBinaryCalled).toBe(false);
+
+        await expect(
+            engine.executeConflict(
+                {
+                    depth: 1,
+                    isDirectory: false,
+                    path: "Huge.iso",
+                    type: "conflict"
+                },
+                oversizedLocalMap,
+                oversizedRemoteMap,
+                new Set<string>(),
+                t0
+            )
+        ).rejects.toThrow(/oversized/i);
+        expect(readBinaryCalled).toBe(false);
+        expect(downloadCalled).toBe(false);
+
+        // Even if localMap reports 0 bytes, post-readBinary guard blocks oversized buffer
+        const spoofedLocalMap: Map<string, LocalItem> = new Map<string, LocalItem>([
+            ["Spoofed.iso", makeLocal("Spoofed.iso", t0, 10, false)]
+        ]);
+        await expect(
+            engine.executeUpload("Spoofed.iso", spoofedLocalMap, t0)
+        ).rejects.toThrow(/oversized/i);
+        expect(readBinaryCalled).toBe(true);
+    });
+
+    it("hardens executePlan against NaN/inverted depth, child deletion failure before parent rmdir, and excluded remote actions", async () => {
+        const errorSpy = vi.spyOn(log, "error").mockImplementation((): void => undefined);
+        const t0: number = Date.UTC(2026, 9, 14, 18, 0, 0);
+        const operationLog: string[] = [];
+        const textFiles: Map<string, string> = new Map<string, string>();
+
+        const adapter: Partial<DataAdapter> = {
+            exists: async (p: string): Promise<boolean> => textFiles.has(p),
+            mkdir: async (p: string): Promise<void> => {
+                operationLog.push(`local:mkdir:${p}`);
+            },
+            read: async (p: string): Promise<string> => textFiles.get(p) ?? "",
+            write: async (p: string, d: string): Promise<void> => {
+                textFiles.set(p, d);
+            }
+        };
+
+        const mockClient: Partial<WebDavClient> = {
+            createDirectory: async (p: string): Promise<void> => {
+                operationLog.push(`remote:mkdir:${p}`);
+            },
+            deleteItem: async (p: string, isDir: boolean): Promise<void> => {
+                if (p === "KeepParentOnFail/Sub/Locked.md") {
+                    throw new Error("423 Locked");
+                }
+                operationLog.push(`remote:delete:${isDir ? "dir" : "file"}:${p}`);
+            }
+        };
+
+        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+        await stateStore.load();
+        const engine: SyncEngine = new SyncEngine(
+            { adapter: adapter as DataAdapter } as Vault,
+            mockClient as WebDavClient,
+            stateStore,
+            {
+                appPassword: "pw",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        try {
+            const malformedPlan: SyncPlan = {
+                actions: [
+                    // 1. Unnormalized noop action should still match localMap/remoteMap and seed state
+                    {
+                        depth: Number.NaN,
+                        isDirectory: false,
+                        path: "  /SeededNoop.md  ",
+                        type: "noop"
+                    },
+                    // 2. NaN and inverted depths on directory creations (child listed first with smaller depth)
+                    {
+                        depth: 1,
+                        isDirectory: true,
+                        path: "ParentDir/ChildDir",
+                        type: "create_remote_dir"
+                    },
+                    {
+                        depth: Number.NaN,
+                        isDirectory: true,
+                        path: "ParentDir",
+                        type: "create_remote_dir"
+                    },
+                    // 3. Inverted depths on directory deletions + child file deletion failure
+                    {
+                        depth: 10,
+                        isDirectory: true,
+                        path: "CleanDelete",
+                        type: "delete_remote"
+                    },
+                    {
+                        depth: Number.NaN,
+                        isDirectory: true,
+                        path: "CleanDelete/Sub",
+                        type: "delete_remote"
+                    },
+                    {
+                        depth: 2,
+                        isDirectory: false,
+                        path: "KeepParentOnFail/Sub/Locked.md",
+                        type: "delete_remote"
+                    },
+                    {
+                        depth: 2,
+                        isDirectory: true,
+                        path: "KeepParentOnFail/Sub",
+                        type: "delete_remote"
+                    },
+                    {
+                        depth: 1,
+                        isDirectory: true,
+                        path: "KeepParentOnFail",
+                        type: "delete_remote"
+                    },
+                    // 4. Excluded or root paths on remote operations must be refused at engine boundary
+                    {
+                        depth: 1,
+                        isDirectory: true,
+                        path: "/",
+                        type: "delete_remote"
+                    },
+                    {
+                        depth: 3,
+                        isDirectory: false,
+                        path: ".obsidian/plugins/vaultdav/data.json",
+                        type: "delete_remote"
+                    }
+                ],
+                timestamp: Number.NaN
+            };
+
+            const result = await engine.executePlan(
+                malformedPlan,
+                [makeLocal("SeededNoop.md", t0, 12, false)],
+                [makeRemote("SeededNoop.md", t0, 12, "etag-seed", false)]
+            );
+
+            expect(result.timestamp).toBe(0);
+            expect(stateStore.getRecord("SeededNoop.md")?.etag).toBe("etag-seed");
+
+            // ParentDir must be created before ParentDir/ChildDir despite NaN/inverted depth
+            const createParentIdx: number = operationLog.indexOf("remote:mkdir:ParentDir");
+            const createChildIdx: number = operationLog.indexOf(
+                "remote:mkdir:ParentDir/ChildDir"
+            );
+            expect(createParentIdx).toBeGreaterThanOrEqual(0);
+            expect(createChildIdx).toBeGreaterThan(createParentIdx);
+
+            // CleanDelete/Sub must be deleted before CleanDelete despite NaN/inverted depth
+            const delSubIdx: number = operationLog.indexOf(
+                "remote:delete:dir:CleanDelete/Sub"
+            );
+            const delParentIdx: number = operationLog.indexOf(
+                "remote:delete:dir:CleanDelete"
+            );
+            expect(delSubIdx).toBeGreaterThanOrEqual(0);
+            expect(delParentIdx).toBeGreaterThan(delSubIdx);
+
+            // KeepParentOnFail and KeepParentOnFail/Sub must NOT be deleted because child Locked.md failed
+            expect(operationLog).not.toContain("remote:delete:dir:KeepParentOnFail/Sub");
+            expect(operationLog).not.toContain("remote:delete:dir:KeepParentOnFail");
+
+            // Root and excluded paths must never reach mockClient.deleteItem
+            expect(operationLog).not.toContain("remote:delete:dir:/");
+            expect(operationLog).not.toContain("remote:delete:dir:");
+            expect(operationLog).not.toContain(
+                "remote:delete:file:.obsidian/plugins/vaultdav/data.json"
+            );
+            expect(result.errors.length).toBeGreaterThanOrEqual(3);
+        } finally {
+            errorSpy.mockRestore();
+        }
+    });
 });
+
