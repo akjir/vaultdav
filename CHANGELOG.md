@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- Group related settings (`Server URL` / `Username` / `App password` / `Remote base directory`, `Sync interval` / `Conflict strategy`, `Test connection`, and `Advanced sync` options) into `SettingGroup` blocks with fallback support for older Obsidian versions.
+
 ## [0.1.0] - 2026-10-15
 
 ### Added

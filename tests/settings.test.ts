@@ -2,13 +2,17 @@ import type { App, PluginManifest } from "obsidian";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import VaultDavPlugin from "../src/main";
 import {
+    createSettingGroup,
     DEFAULT_SETTINGS,
     MAX_CHUNK_SIZE_MB,
     MAX_CHUNKING_THRESHOLD_MB,
     MAX_SYNC_INTERVAL_MINUTES,
     VaultDavSettingTab
 } from "../src/settings";
-import { Setting as MockSetting } from "./obsidian_mock";
+import {
+    Setting as MockSetting,
+    SettingGroup as MockSettingGroup
+} from "./obsidian_mock";
 
 function createTestPlugin(): { app: App; plugin: VaultDavPlugin } {
     const mockApp: App = {
@@ -50,6 +54,7 @@ function getSettingByName(name: string): MockSetting {
 describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
     beforeEach(() => {
         MockSetting.instances.length = 0;
+        MockSettingGroup.instances.length = 0;
     });
 
     it("defines expected DEFAULT_SETTINGS keys, default values, and freezes the object against mutation", () => {
@@ -99,20 +104,50 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         tab.display();
         expect(emptySpy).toHaveBeenCalledTimes(1);
         expect(innerHtmlTouched).toBe(false);
-        expect(tab.containerEl.children.length).toBe(10);
+        expect(tab.containerEl.children.length).toBe(4);
 
         const replaceChildrenSpy = vi.spyOn(tab.containerEl, "replaceChildren");
         (tab.containerEl as Partial<HTMLElement>).empty = undefined;
         tab.display();
         expect(replaceChildrenSpy).toHaveBeenCalledTimes(1);
-        expect(tab.containerEl.children.length).toBe(10);
+        expect(tab.containerEl.children.length).toBe(4);
     });
 
-    it("renders all settings with strict Obsidian Sentence case names and descriptions", () => {
+    it("renders grouped settings with strict Obsidian Sentence case names and descriptions", () => {
         const { app, plugin } = createTestPlugin();
         const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
 
         tab.display();
+
+        expect(MockSettingGroup.instances.length).toBe(4);
+        expect(
+            MockSettingGroup.instances.map((group: MockSettingGroup) => ({
+                heading: group.heading,
+                names: group.settings.map((item: MockSetting): string => item.name)
+            }))
+        ).toEqual([
+            {
+                heading: "",
+                names: [
+                    "Server URL",
+                    "Username",
+                    "App password",
+                    "Remote base directory"
+                ]
+            },
+            {
+                heading: "",
+                names: ["Sync interval", "Conflict strategy"]
+            },
+            {
+                heading: "",
+                names: ["Test connection"]
+            },
+            {
+                heading: "Advanced sync",
+                names: ["Chunking threshold", "Chunk size"]
+            }
+        ]);
 
         const names: string[] = MockSetting.instances.map(
             (item: MockSetting): string => item.name
@@ -125,7 +160,6 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             "Sync interval",
             "Conflict strategy",
             "Test connection",
-            "Advanced sync",
             "Chunking threshold",
             "Chunk size"
         ]);
@@ -152,13 +186,30 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         expect(
             getSettingByName("Test connection").buttonComponent?.buttonEl.textContent
         ).toBe("Test connection");
-        expect(getSettingByName("Advanced sync").isHeading).toBe(true);
         expect(getSettingByName("Chunking threshold").desc).toBe(
             "Minimum file size in MB before switching to Nextcloud chunked uploads."
         );
         expect(getSettingByName("Chunk size").desc).toBe(
             "Target chunk size in MB for chunked uploads and parallel range downloads."
         );
+    });
+
+    it("falls back to flat Setting items when SettingGroup is unavailable", () => {
+        const containerEl: HTMLElement = document.createElement("div");
+        createSettingGroup(containerEl, null)
+            .setHeading("Advanced sync")
+            .addSetting((setting) => {
+                setting.setName("Chunking threshold");
+            })
+            .addSetting((setting) => {
+                setting.setName("Chunk size");
+            });
+
+        expect(MockSetting.instances.length).toBe(3);
+        expect(MockSetting.instances[0]?.name).toBe("Advanced sync");
+        expect(MockSetting.instances[0]?.isHeading).toBe(true);
+        expect(MockSetting.instances[1]?.name).toBe("Chunking threshold");
+        expect(MockSetting.instances[2]?.name).toBe("Chunk size");
     });
 
     it("configures mobile input hygiene and input types/bounds on text controls", () => {

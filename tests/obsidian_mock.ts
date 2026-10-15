@@ -245,6 +245,43 @@ export class Setting {
     }
 }
 
+export class SettingGroup {
+    public static instances: SettingGroup[] = [];
+
+    public groupEl: HTMLElement;
+    public heading: string = "";
+    public listEl: HTMLElement;
+    public settings: Setting[] = [];
+
+    public constructor(containerEl: HTMLElement) {
+        this.groupEl = document.createElement("div");
+        this.groupEl.classList.add("setting-group");
+        this.listEl = document.createElement("div");
+        this.listEl.classList.add("setting-items");
+        this.groupEl.appendChild(this.listEl);
+        containerEl.appendChild(this.groupEl);
+        SettingGroup.instances.push(this);
+    }
+
+    public addClass(...classes: string[]): this {
+        this.groupEl.classList.add(...classes);
+        return this;
+    }
+
+    public addSetting(cb: (setting: Setting) => void): this {
+        const setting: Setting = new Setting(this.listEl);
+        this.settings.push(setting);
+        cb(setting);
+        return this;
+    }
+
+    public setHeading(text: string | DocumentFragment): this {
+        this.heading =
+            typeof text === "string" ? text : (text.textContent ?? "");
+        return this;
+    }
+}
+
 export class TAbstractFile {
     public name: string = "";
     public path: string = "";

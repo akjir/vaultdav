@@ -33,6 +33,7 @@ const MANUAL_HEADING_REGEX: RegExp = /\.createEl\(\s*["']h[1-6]["']/;
 const NON_ALPHA_STRIP_REGEX: RegExp = /^[^A-Za-z]+|[^A-Za-z]+$/g;
 const ONUNLOAD_BLOCK_REGEX: RegExp = /onunload\s*\([^)]*\)[^{]*\{([\s\S]*?)\n    \}/;
 const SET_BUTTON_TEXT_REGEX: RegExp = /\.setButtonText\(\s*["']([^"']+)["']\s*\)/g;
+const SET_HEADING_REGEX: RegExp = /\.setHeading\(\s*["']([^"']+)["']\s*\)/g;
 const SET_NAME_REGEX: RegExp = /\.setName\(\s*["']([^"']+)["']\s*\)/g;
 const TS_IGNORE_REGEX: RegExp = /@ts-ignore\b/;
 const WHITESPACE_SPLIT_REGEX: RegExp = /\s+/;
@@ -184,6 +185,7 @@ describe("Obsidian Plugin Linter static guard (eslint-plugin-obsidianmd)", () =>
             ADD_RIBBON_ICON_REGEX,
             LOG_NOTIFY_REGEX,
             SET_BUTTON_TEXT_REGEX,
+            SET_HEADING_REGEX,
             SET_NAME_REGEX
         ];
         const extractedLiterals: string[] = [];

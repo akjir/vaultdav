@@ -81,7 +81,7 @@ describe("Test environment setup and plugin metadata", () => {
             plugin
         );
         tab.display();
-        expect(tab.containerEl.children.length).toBe(10);
+        expect(tab.containerEl.children.length).toBe(4);
 
         plugin.onunload();
     });
