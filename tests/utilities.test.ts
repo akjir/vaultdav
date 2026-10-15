@@ -372,4 +372,133 @@ describe("utilities and logging", () => {
             "folder/note.conflict-20261014-195131-2.md"
         );
     });
+
+    it("neutralizes red team exploits: cross-user/cross-endpoint href spoofing, invalid remoteBaseDir/username traversal, Windows trailing dot/space smuggling, and out-of-range Date timestamps", () => {
+        // 1. Cross-user and cross-endpoint WebDAV href spoofing must return null
+        expect(
+            util.decodeWebDavHref(
+                "/remote.php/dav/files/eve/shared/remote.php/dav/files/alice/Obsidian%20Vault/pwned.md",
+                "alice",
+                "Obsidian Vault"
+            )
+        ).toBeNull();
+        expect(
+            util.decodeWebDavHref(
+                "/remote.php/dav/uploads/alice/remote.php/dav/files/alice/Obsidian%20Vault/pwned.md",
+                "alice",
+                "Obsidian Vault"
+            )
+        ).toBeNull();
+        expect(
+            util.decodeWebDavHref(
+                "file:///remote.php/dav/files/alice/Obsidian%20Vault/pwned.md",
+                "alice",
+                "Obsidian Vault"
+            )
+        ).toBeNull();
+        expect(
+            util.decodeWebDavHref(
+                "http://cloud.example.com/remote.php/dav/files/alice/Obsidian%20Vault/pwned.md",
+                "alice",
+                "Obsidian Vault"
+            )
+        ).toBeNull();
+        expect(
+            util.decodeWebDavHref(
+                "//evil.example.com/remote.php/dav/files/alice/Obsidian%20Vault/pwned.md",
+                "alice",
+                "Obsidian Vault"
+            )
+        ).toBeNull();
+        expect(
+            util.decodeWebDavHref(
+                "/remote.php/dav/files/alice/Obsidian%20Vault/note.md?download=1",
+                "alice",
+                "Obsidian Vault"
+            )
+        ).toBeNull();
+
+        // 2. Traversal or malformed remoteBaseDir must not silently fall back to user root
+        for (const badBase of [".", "..", "../secret", "Vault/\0", "__proto__"]) {
+            expect(
+                util.decodeWebDavHref(
+                    "/remote.php/dav/files/alice/SecretPhoto.jpg",
+                    "alice",
+                    badBase
+                )
+            ).toBeNull();
+            expect(() =>
+                util.buildNextcloudWebDavBaseUrl(
+                    "https://cloud.example.com",
+                    "alice",
+                    badBase
+                )
+            ).toThrow(/remoteBaseDir/i);
+        }
+
+        // 3. Username traversal, slashes, control chars, and prototype keys must be rejected; NFD username must match NFC href
+        for (const badUser of [".", "..", "alice/bob", "alice\\bob", "alice\0", "__proto__"]) {
+            expect(() =>
+                util.buildNextcloudWebDavBaseUrl(
+                    "https://cloud.example.com",
+                    badUser,
+                    "Vault"
+                )
+            ).toThrow(/username/i);
+            expect(
+                util.decodeWebDavHref(
+                    "/remote.php/dav/files/alice/Vault/Note.md",
+                    badUser,
+                    "Vault"
+                )
+            ).toBeNull();
+        }
+        expect(
+            util.decodeWebDavHref(
+                "/remote.php/dav/files/m%C3%BCller/Vault/Note.md",
+                "mu\u0308ller",
+                "Vault"
+            )
+        ).toBe("Note.md");
+
+        // 4. Windows trailing dot / space segment smuggling & plugin exclusion bypass
+        for (const smuggledPath of [
+            "Notes/.. /secret.md",
+            "Notes/ .../secret.md",
+            ".obsidian/plugins/vaultdav./main.js",
+            ".obsidian/plugins/vaultdav./data.json",
+            ".obsidian/plugins/vaultdav /data.json",
+            ".obsidian/plugins/other/data.json.",
+            ".git./config"
+        ]) {
+            expect(util.normalizeVaultPath(smuggledPath)).toBe("");
+            expect(util.isExcludedPath(smuggledPath)).toBe(true);
+        }
+        expect(
+            util.decodeWebDavHref(
+                "/remote.php/dav/files/alice/Vault/.obsidian/plugins/vaultdav./main.js",
+                "alice",
+                "Vault"
+            )
+        ).toBeNull();
+        expect(
+            util.decodeWebDavHref(
+                "/remote.php/dav/files/alice/Vault/Notes/..%20/secret.md",
+                "alice",
+                "Vault"
+            )
+        ).toBeNull();
+
+        // 5. Out-of-range finite timestamps (> 8.64e15) and empty/invalid paths in getConflictPath
+        expect(util.getConflictPath("folder/note.md", 9e15)).toBe(
+            "folder/note.conflict-19700101-000000.md"
+        );
+        expect(util.getConflictPath("folder/note.md", Number.MAX_VALUE)).toBe(
+            "folder/note.conflict-19700101-000000.md"
+        );
+        expect(() => util.getConflictPath("", 1000)).toThrow(/Conflict path/i);
+        expect(() => util.getConflictPath("../secret.md", 1000)).toThrow(
+            /Conflict path/i
+        );
+    });
 });

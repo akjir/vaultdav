@@ -65,7 +65,7 @@ export class WebDavClient {
         this.baseUrl = util.buildNextcloudWebDavBaseUrl(
             frozenSettings.url,
             frozenSettings.username,
-            frozenSettings.remoteBaseDir
+            util.normalizeVaultPath(frozenSettings.remoteBaseDir)
         );
     }
 
