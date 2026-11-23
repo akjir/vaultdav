@@ -25,10 +25,10 @@ Every proposal file must use this exact structure:
 State the problem and the required outcome in 2-4 sentences.
 
 ## 2. Technical Design
-List exact interface changes, data structures, WebDAV protocol interactions, or sync state transitions.
+List exact interface changes, data structures, WebDAV protocol interactions, or sync state transitions. Explicitly account for Obsidian plugin constraints when applicable (`minAppVersion` / `requireApiVersion` guards, `Vault#configDir` paths, `ui/sentence-case`, and `isDesktopOnly: false` mobile/iOS compatibility).
 
 ## 3. Verification Plan
-List the unit tests and edge cases required in `tests/` to verify the change.
+List the unit tests and edge cases required in `tests/` to verify the change (including `tests/obsidian_linter.test.ts` rules for new UI, config-path, or Obsidian API usage).
 
 ## 4. Implementation Steps
 1. Ordered, atomic tasks for autonomous execution.

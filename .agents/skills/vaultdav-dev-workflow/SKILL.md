@@ -13,14 +13,14 @@ Execute this closed-loop workflow for all code changes in `src/` and `tests/`.
 
 ## 2. Test-Driven Development (TDD) Loop
 Execute changes autonomously in this strict sequence until all checks pass with zero regressions:
-1. **Write or Update Tests First:** Add unit tests in `tests/` covering happy paths, error status codes (`401`, `403`, `404`, `409`, `423`, `507`), XML edge cases, sync conflict states, path boundary/traversal safety (`.`, `..`, prefix collisions), and `NaN`/non-finite numeric inputs.
+1. **Write or Update Tests First:** Add unit tests in `tests/` covering happy paths, error status codes (`401`, `403`, `404`, `409`, `423`, `507`), XML edge cases, sync conflict states, custom `Vault#configDir` paths, path boundary/traversal safety (`.`, `..`, prefix collisions), and `NaN`/non-finite numeric inputs. Update `tests/obsidian_linter.test.ts` if new UI or Obsidian API patterns are introduced.
 2. **Implement Minimal Modular Code:** Edit files in `src/`. Ensure:
    - Zero external dependencies (import only from `"obsidian"` or relative `./` and `../` modules; never add npm packages).
    - 4-space indentation, alphabetical function/method sorting, explicit variable initialization, and zero `any` types.
    - **Zero Hot-Path Allocations:** Define static `Set`, `Map`, and `RegExp` instances at module top-level (`UPPER_SNAKE_CASE`), never inside functions called per-file or per-request.
    - **Strict Path Boundary & Traversal Safety:** Always verify `/` or end-of-string boundaries when stripping URL/path prefixes. Reject any path containing `.` or `..` segments.
    - **Defensive Numeric Guards:** Validate numeric inputs (`timestamp`, `mtime`, `size`, `concurrency`) with `Number.isFinite()` before arithmetic or `Date` construction.
-   - **Obsidian Linter Compliance (`eslint-plugin-obsidianmd`):** Verify all changes against `no-inner-html`, `ui/sentence-case`, command naming (`no-plugin-id-in-command-id`, `no-plugin-name-in-command-name`, `no-default-hotkeys`), settings headings, and lifecycle registration (`registerInterval`, `registerEvent`, no `detachLeavesOfType` in `onunload`).
+   - **Obsidian Linter Compliance (`eslint-plugin-obsidianmd`):** Enforce all rules in `AGENTS.md`: `validate-manifest`, `hardcoded-config-path` (derive config paths from `Vault#configDir`, never hardcode `.obsidian`), `no-unsupported-api` (guard APIs newer than `minAppVersion` behind `requireApiVersion("X.Y.Z")`), `no-inner-html`, `no-console` (allow only `warn`, `error`, `debug`), `no-control-regex` (use `util.hasControlChars()`), `no-constant-condition` (no `while (true)`), `regex-lookbehind`, `platform`, `ui/sentence-case` (all labels, descriptions, buttons, placeholders, dropdown options, headings, commands, tooltips, and notices), command naming (`no-plugin-id-in-command-id`, `no-plugin-name-in-command-name`, `no-default-hotkeys`), settings headings, and lifecycle registration (`registerInterval`, `registerEvent`, no `detachLeavesOfType` in `onunload`).
 3. **Run Closed-Loop Verification:**
    - Run `npm run typecheck` (must exit with 0 errors).
    - Run `npm test` (all unit, zero-dependency, and `tests/obsidian_linter.test.ts` checks must pass).
