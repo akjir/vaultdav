@@ -16,6 +16,10 @@ describe("Test environment setup and plugin metadata", () => {
         const devDependencyKeys: string[] = Object.keys(packageJson.devDependencies).sort();
 
         expect(packageJson.name).toBe("vaultdav");
+        expect(packageJson.author).toBe(manifestJson.author);
+        expect(packageJson.description).toBe(manifestJson.description);
+        expect(packageJson.license).toBe("GPL-3.0");
+        expect(packageJson.repository.url).toBe("https://github.com/akjir/vaultdav.git");
         expect(manifestJson.id).toBe("vaultdav");
         expect(manifestJson.author).toBe("Stefan Stark");
         expect(manifestJson.authorUrl).toBe("https://github.com/akjir");
@@ -24,6 +28,7 @@ describe("Test environment setup and plugin metadata", () => {
         expect(manifestJson.version).toBe(packageJson.version);
         expect(packageLockJson.version).toBe(packageJson.version);
         expect(packageLockJson.packages[""].version).toBe(packageJson.version);
+        expect(packageLockJson.packages[""].license).toBe(packageJson.license);
         expect(versionsRecord[manifestJson.version]).toBe(manifestJson.minAppVersion);
         expect("dependencies" in record).toBe(false);
         expect("optionalDependencies" in record).toBe(false);

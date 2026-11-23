@@ -1,0 +1,33 @@
+name: Feature request
+description: Propose a new capability or improvement for VaultDAV.
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        VaultDAV supports bidirectional Nextcloud WebDAV synchronization on Desktop and Mobile with zero external runtime dependencies.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: Describe the workflow limitation or problem you want to solve.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe how you expect this feature to work.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe any workarounds or alternative designs you evaluated.
+    validations:
+      required: false

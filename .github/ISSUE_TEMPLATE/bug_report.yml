@@ -1,0 +1,93 @@
+name: Bug report
+description: Report a synchronization, WebDAV, or UI defect in VaultDAV.
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Provide details so maintainers can reproduce the issue. Do not include your Nextcloud app password or private server URLs.
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Desktop (Linux)
+        - Desktop (macOS)
+        - Desktop (Windows)
+        - Android
+        - iOS
+    validations:
+      required: true
+
+  - type: input
+    id: vaultdav_version
+    attributes:
+      label: VaultDAV version
+      placeholder: "1.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: obsidian_version
+    attributes:
+      label: Obsidian version
+      placeholder: "1.8.0"
+    validations:
+      required: true
+
+  - type: input
+    id: nextcloud_version
+    attributes:
+      label: Nextcloud version
+      placeholder: "30.0.0"
+    validations:
+      required: false
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Problem description
+      description: Describe what happened.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the exact steps required to reproduce the behavior.
+      placeholder: |
+        1. Configure VaultDAV with ...
+        2. Run Synchronize now
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: Describe what you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Console logs
+      description: Paste relevant Obsidian developer console output after redacting any personal server domains, usernames, or credentials.
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Confirmation
+      options:
+        - label: I removed all credentials, app passwords, and sensitive server paths from this report.
+          required: true
+        - label: I tested with the latest VaultDAV release.
+          required: false

@@ -2,6 +2,21 @@
 
 Synchronize Obsidian vaults bidirectionally with Nextcloud via WebDAV.
 
+## Installation
+
+### Manual Installation
+
+1. Download `main.js` and `manifest.json` from the latest [GitHub Release](https://github.com/akjir/vaultdav/releases/latest).
+2. Create the folder `<vault>/<config-dir>/plugins/vaultdav/` (where `<config-dir>` is your Obsidian configuration folder).
+3. Copy `main.js` and `manifest.json` into that folder.
+4. Reload Obsidian and enable **VaultDAV** under **Settings > Community plugins**.
+
+### Beta Installation (BRAT)
+
+1. Install the [BRAT](https://github.com/TfTHacker/obsidian42-brat) community plugin.
+2. Add `akjir/vaultdav` in BRAT settings.
+3. Enable **VaultDAV** under **Settings > Community plugins**.
+
 ## Nextcloud Setup
 
 1. Open Nextcloud and go to **Settings > Security > Devices & sessions**.
@@ -35,7 +50,7 @@ Synchronize Obsidian vaults bidirectionally with Nextcloud via WebDAV.
 - Transfers files as binary payloads (`ArrayBuffer`) over Obsidian `requestUrl`, using Nextcloud OC-Chunked uploads (`MKCOL` / `PUT` / `MOVE`) for files exceeding `chunkingThresholdMB` and parallel HTTP `Range` downloads (`Uint8Array.set()`) for remote files larger than 5 MB.
 - Displays real-time transfer and chunk progress in the Obsidian status bar during synchronization.
 - Tracks local and remote modification times and ETags to detect creations, modifications, and deletions (tombstones).
-- Excludes the local sync state file (`<config-dir>/plugins/vaultdav/sync-state.json`), plugin credentials (`<config-dir>/plugins/vaultdav/data.json`), `<config-dir>/workspace*.json`, and `.trash/` (respecting custom `Vault#configDir` names) to prevent sync loops.
+- Excludes the local sync state file (`<config-dir>/plugins/vaultdav/sync-state.json`), plugin credentials (`<config-dir>/plugins/vaultdav/data.json`), `<config-dir>/workspace*.json`, `.trash/`, `.git/`, `.svn/`, `node_modules/`, and OS metadata files (`.DS_Store`, `Thumbs.db`, `desktop.ini`), respecting custom `Vault#configDir` names to prevent sync loops.
 
 ## Compatibility & Privacy
 
@@ -56,3 +71,7 @@ npm run dev
 ## Acknowledgments
 
 VaultDAV's synchronization algorithm and WebDAV quirk handling are inspired by [remotely-save](https://github.com/remotely-save/remotely-save).
+
+## License
+
+VaultDAV is licensed under the GNU General Public License v3.0. See [LICENSE](LICENSE) for full terms.

@@ -1,7 +1,24 @@
 {
     "name": "vaultdav",
-    "version": "0.1.0",
+    "version": "1.0.0",
     "description": "Synchronize your vault bidirectionally with Nextcloud via WebDAV.",
+    "author": "Stefan Stark",
+    "license": "GPL-3.0",
+    "homepage": "https://github.com/akjir/vaultdav#readme",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/akjir/vaultdav.git"
+    },
+    "bugs": {
+        "url": "https://github.com/akjir/vaultdav/issues"
+    },
+    "keywords": [
+        "obsidian",
+        "obsidian-plugin",
+        "nextcloud",
+        "webdav",
+        "sync"
+    ],
     "main": "main.js",
     "scripts": {
         "build": "node esbuild.config.mjs production",

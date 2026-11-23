@@ -5,6 +5,9 @@ node_modules/
 main.js
 main.js.map
 data.json
+sync-state.json
+coverage/
+*.log
 
 # OS-specific artifacts
 .DS_Store
