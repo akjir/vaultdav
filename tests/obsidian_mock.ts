@@ -109,7 +109,19 @@ export class PluginSettingTab {
         // Mock implementation.
     }
 
+    public getControlValue(_key: string): unknown {
+        return undefined;
+    }
+
+    public getSettingDefinitions(): unknown[] {
+        return [];
+    }
+
     public hide(): void {
+        // Mock implementation.
+    }
+
+    public setControlValue(_key: string, _value: unknown): void | Promise<void> {
         // Mock implementation.
     }
 }

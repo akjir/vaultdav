@@ -1,5 +1,13 @@
 import * as obsidian from "obsidian";
-import type { App, PluginManifest } from "obsidian";
+import type {
+    App,
+    PluginManifest,
+    SettingDefinitionControl,
+    SettingDefinitionGroup,
+    SettingDefinitionItem,
+    SettingDefinitionRender,
+    SettingGroup as ObsidianSettingGroup
+} from "obsidian";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import VaultDavPlugin from "../src/main";
 import {
@@ -535,5 +543,288 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         ).rejects.toThrow("Network error");
         expect(buttonComp?.disabled).toBe(false);
         expect(buttonComp?.buttonEl.textContent).toBe("Test connection");
+    });
+
+    it("returns declarative SettingDefinitionItem groups matching display() for Obsidian 1.13+ settings search", () => {
+        const { app, plugin } = createTestPlugin();
+        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
+
+        const definitions: SettingDefinitionItem[] = tab.getSettingDefinitions();
+        expect(definitions.length).toBe(4);
+
+        const groups: SettingDefinitionGroup[] = definitions as SettingDefinitionGroup[];
+        expect(
+            groups.map((group: SettingDefinitionGroup) => ({
+                heading: group.heading ?? "",
+                names: (group.items ?? []).map((item) => item.name),
+                type: group.type
+            }))
+        ).toEqual([
+            {
+                heading: "",
+                names: [
+                    "Server URL",
+                    "Username",
+                    "App password",
+                    "Remote base directory"
+                ],
+                type: "group"
+            },
+            {
+                heading: "",
+                names: ["Sync interval", "Conflict strategy"],
+                type: "group"
+            },
+            {
+                heading: "",
+                names: ["Test connection"],
+                type: "group"
+            },
+            {
+                heading: "Advanced sync",
+                names: ["Chunking threshold", "Chunk size"],
+                type: "group"
+            }
+        ]);
+
+        const connectionItems = groups[0]?.items ?? [];
+        expect(connectionItems[0]).toEqual({
+            control: {
+                defaultValue: "",
+                key: "url",
+                placeholder: "https://cloud.example.com",
+                type: "text"
+            },
+            desc: "Nextcloud base URL or WebDAV endpoint (https://<domain>).",
+            name: "Server URL"
+        });
+        expect(connectionItems[1]).toEqual({
+            control: {
+                defaultValue: "",
+                key: "username",
+                placeholder: "Enter username",
+                type: "text"
+            },
+            desc: "Nextcloud account username.",
+            name: "Username"
+        });
+        expect(connectionItems[2]).toEqual({
+            control: {
+                defaultValue: "",
+                key: "appPasswordSecret",
+                type: "secret"
+            },
+            desc: "Select or create a secret for your Nextcloud app password.",
+            name: "App password"
+        });
+        expect(connectionItems[3]).toEqual({
+            control: {
+                defaultValue: "",
+                key: "remoteBaseDir",
+                placeholder: "MyVault",
+                type: "text"
+            },
+            desc: "Target remote folder path inside the Nextcloud user files root.",
+            name: "Remote base directory"
+        });
+
+        const syncItems = groups[1]?.items ?? [];
+        expect(syncItems[0]).toEqual({
+            control: {
+                defaultValue: 0,
+                key: "syncInterval",
+                max: MAX_SYNC_INTERVAL_MINUTES,
+                min: 0,
+                placeholder: "0",
+                step: 1,
+                type: "number"
+            },
+            desc: "Automatic synchronization interval in minutes (0 to disable).",
+            name: "Sync interval"
+        });
+        expect(syncItems[1]).toEqual({
+            control: {
+                defaultValue: "keep_both",
+                key: "conflictStrategy",
+                options: {
+                    keep_both: "Keep both (create conflict copy)",
+                    newest_wins: "Newest wins"
+                },
+                type: "dropdown"
+            },
+            desc: "Resolution mode for concurrent edits (keep_both or newest_wins).",
+            name: "Conflict strategy"
+        });
+
+        const advancedItems = groups[3]?.items ?? [];
+        expect(advancedItems[0]).toEqual({
+            control: {
+                defaultValue: 90,
+                key: "chunkingThresholdMB",
+                max: MAX_CHUNKING_THRESHOLD_MB,
+                min: 1,
+                placeholder: "90",
+                step: 1,
+                type: "number"
+            },
+            desc: "Minimum file size in MB before switching to Nextcloud chunked uploads.",
+            name: "Chunking threshold"
+        });
+        expect(advancedItems[1]).toEqual({
+            control: {
+                defaultValue: 10,
+                key: "chunkSizeMB",
+                max: MAX_CHUNK_SIZE_MB,
+                min: 1,
+                placeholder: "10",
+                step: 1,
+                type: "number"
+            },
+            desc: "Target chunk size in MB for chunked uploads and parallel range downloads.",
+            name: "Chunk size"
+        });
+    });
+
+    it("falls back to SecretComponent render callback for App password on Obsidian 1.13.0-1.13.1 and renders Test connection declaratively", async () => {
+        const { app, plugin } = createTestPlugin();
+        plugin.settings.appPasswordSecret = "vaultdav-app-password";
+        const saveSpy = vi.spyOn(plugin, "saveSettings").mockResolvedValue(undefined);
+        const versionSpy = vi
+            .spyOn(obsidian, "requireApiVersion")
+            .mockImplementation((version: string): boolean => version !== "1.13.2");
+
+        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
+        const groups: SettingDefinitionGroup[] =
+            tab.getSettingDefinitions() as SettingDefinitionGroup[];
+
+        const appPasswordItem: SettingDefinitionRender | undefined = groups[0]
+            ?.items?.[2] as SettingDefinitionRender | undefined;
+        expect(appPasswordItem?.name).toBe("App password");
+        expect(typeof appPasswordItem?.render).toBe("function");
+        expect(
+            (appPasswordItem as unknown as SettingDefinitionControl).control
+        ).toBeUndefined();
+
+        const containerEl: HTMLElement = document.createElement("div");
+        const mockGroup: ObsidianSettingGroup = new MockSettingGroup(
+            containerEl
+        ) as unknown as ObsidianSettingGroup;
+        const appPasswordSetting: MockSetting = new MockSetting(containerEl);
+        appPasswordItem?.render(
+            appPasswordSetting as unknown as obsidian.Setting,
+            mockGroup
+        );
+        expect(appPasswordSetting.secretComponent).not.toBeNull();
+        expect(appPasswordSetting.secretComponent?.value).toBe(
+            "vaultdav-app-password"
+        );
+        await appPasswordSetting.secretComponent?.onChangeHandler?.(
+            "  vaultdav-next-secret  "
+        );
+        expect(plugin.settings.appPasswordSecret).toBe("vaultdav-next-secret");
+        expect(saveSpy).toHaveBeenCalledTimes(1);
+
+        versionSpy.mockRestore();
+
+        let resolveTest: (value: boolean) => void = (): void => undefined;
+        vi.spyOn(plugin, "testConnection").mockImplementation(
+            (): Promise<boolean> =>
+                new Promise<boolean>((resolve: (value: boolean) => void) => {
+                    resolveTest = resolve;
+                })
+        );
+        const testItem: SettingDefinitionRender | undefined = groups[2]
+            ?.items?.[0] as SettingDefinitionRender | undefined;
+        expect(testItem?.name).toBe("Test connection");
+        expect(testItem?.desc).toBe(
+            "Verify Nextcloud WebDAV credentials and remote directory access."
+        );
+        const testSetting: MockSetting = new MockSetting(containerEl);
+        testItem?.render(testSetting as unknown as obsidian.Setting, mockGroup);
+        const buttonComp = testSetting.buttonComponent;
+        expect(buttonComp).not.toBeNull();
+        expect(buttonComp?.buttonEl.textContent).toBe("Test connection");
+
+        const clickPromise: Promise<unknown> = Promise.resolve(
+            testSetting.buttonOnClick?.()
+        );
+        expect(buttonComp?.disabled).toBe(true);
+        expect(buttonComp?.buttonEl.textContent).toBe("Testing...");
+        resolveTest(true);
+        await clickPromise;
+        expect(buttonComp?.disabled).toBe(false);
+        expect(buttonComp?.buttonEl.textContent).toBe("Test connection");
+    });
+
+    it("reads and sanitizes all setting values through getControlValue() and setControlValue()", async () => {
+        const { app, plugin } = createTestPlugin("custom-config");
+        const saveSpy = vi.spyOn(plugin, "saveSettings").mockResolvedValue(undefined);
+        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
+
+        expect(tab.getControlValue("url")).toBe("");
+        expect(tab.getControlValue("username")).toBe("");
+        expect(tab.getControlValue("appPasswordSecret")).toBe("");
+        expect(tab.getControlValue("remoteBaseDir")).toBe("");
+        expect(tab.getControlValue("syncInterval")).toBe(0);
+        expect(tab.getControlValue("conflictStrategy")).toBe("keep_both");
+        expect(tab.getControlValue("chunkingThresholdMB")).toBe(90);
+        expect(tab.getControlValue("chunkSizeMB")).toBe(10);
+        expect(tab.getControlValue("unknown")).toBeUndefined();
+        expect(tab.getControlValue("__proto__")).toBeUndefined();
+        expect(tab.getControlValue("constructor")).toBeUndefined();
+
+        await tab.setControlValue(
+            "url",
+            "  https://alice:secret@cloud.example.com/remote.php/dav  "
+        );
+        expect(tab.getControlValue("url")).toBe(
+            "https://cloud.example.com/remote.php/dav"
+        );
+
+        await tab.setControlValue("username", "  alice  ");
+        expect(tab.getControlValue("username")).toBe("alice");
+        await tab.setControlValue("username", "alice:bad");
+        expect(tab.getControlValue("username")).toBe("");
+
+        await tab.setControlValue("appPasswordSecret", "  vaultdav-secret-1  ");
+        expect(tab.getControlValue("appPasswordSecret")).toBe("vaultdav-secret-1");
+        await tab.setControlValue("appPasswordSecret", "INVALID_SECRET");
+        expect(tab.getControlValue("appPasswordSecret")).toBe("");
+
+        await tab.setControlValue("remoteBaseDir", "  /Notes//Sub/  ");
+        expect(tab.getControlValue("remoteBaseDir")).toBe("Notes/Sub");
+        await tab.setControlValue("remoteBaseDir", "custom-config/plugins/vaultdav");
+        expect(tab.getControlValue("remoteBaseDir")).toBe("");
+
+        await tab.setControlValue("syncInterval", 15.9);
+        expect(tab.getControlValue("syncInterval")).toBe(15);
+        await tab.setControlValue("syncInterval", 99999999);
+        expect(tab.getControlValue("syncInterval")).toBe(MAX_SYNC_INTERVAL_MINUTES);
+        await tab.setControlValue("syncInterval", Number.NaN);
+        expect(tab.getControlValue("syncInterval")).toBe(0);
+
+        await tab.setControlValue("conflictStrategy", "newest_wins");
+        expect(tab.getControlValue("conflictStrategy")).toBe("newest_wins");
+        await tab.setControlValue("conflictStrategy", "invalid");
+        expect(tab.getControlValue("conflictStrategy")).toBe("keep_both");
+
+        await tab.setControlValue("chunkingThresholdMB", 150.4);
+        expect(tab.getControlValue("chunkingThresholdMB")).toBe(150);
+        await tab.setControlValue("chunkingThresholdMB", 9999);
+        expect(tab.getControlValue("chunkingThresholdMB")).toBe(
+            MAX_CHUNKING_THRESHOLD_MB
+        );
+        await tab.setControlValue("chunkingThresholdMB", 0);
+        expect(tab.getControlValue("chunkingThresholdMB")).toBe(90);
+
+        await tab.setControlValue("chunkSizeMB", 20.8);
+        expect(tab.getControlValue("chunkSizeMB")).toBe(20);
+        await tab.setControlValue("chunkSizeMB", -4);
+        expect(tab.getControlValue("chunkSizeMB")).toBe(10);
+
+        const saveCountBeforeUnknown: number = saveSpy.mock.calls.length;
+        await tab.setControlValue("unknown", "ignored");
+        await tab.setControlValue("__proto__", "polluted");
+        expect(saveSpy.mock.calls.length).toBe(saveCountBeforeUnknown);
     });
 });

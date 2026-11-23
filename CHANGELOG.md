@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- Implement dual declarative settings support (`getSettingDefinitions()`, `getControlValue()`, and `setControlValue()`) in `VaultDavSettingTab` for Obsidian 1.13+ settings search while preserving the `display()` fallback for Obsidian 1.11.4 to 1.12.x.
+
+### Changed
+- Enforce zero `eslint-plugin-obsidianmd` warnings (`fatal === 0`, `errors === 0`, `warnings === 0`) in `.github/workflows/release.yml` and the `/release` workflow.
+
 ## [1.1.0] - 2026-11-24
 
 ### Added

@@ -64,6 +64,83 @@ jobs:
       - name: Run test suite
         run: npm test
 
+      - name: Run Obsidian ESLint scanner (zero warnings)
+        run: |
+          set -euo pipefail
+          TMP_REPO="$(mktemp -d "${RUNNER_TEMP:-/tmp}/vaultdav-repo-XXXXXX")"
+          TMP_TOOLS="$(mktemp -d "${RUNNER_TEMP:-/tmp}/vaultdav-eslint-XXXXXX")"
+          trap 'rm -rf "$TMP_REPO" "$TMP_TOOLS"' EXIT
+
+          tar --exclude='./.git' --exclude='./node_modules/.cache' -cf - . | tar -xf - -C "$TMP_REPO"
+          npm --prefix "$TMP_TOOLS" install --no-save --no-audit --no-fund \
+            eslint@9 \
+            typescript@5.9 \
+            typescript-eslint \
+            eslint-plugin-obsidianmd@latest
+
+          cat <<'EOF' > "$TMP_TOOLS/run-scan.mjs"
+          import path from "node:path";
+          import { ESLint } from "eslint";
+          import obsidianmd from "eslint-plugin-obsidianmd";
+
+          const tmpRepo = process.argv[2];
+          const eslint = new ESLint({
+            cwd: tmpRepo,
+            overrideConfigFile: true,
+            overrideConfig: [
+              {
+                ignores: [
+                  "node_modules/**",
+                  "dist/**",
+                  "build/**",
+                  "main.js",
+                  "esbuild.config.mjs",
+                  "**/tests/**",
+                  "**/*.test.*"
+                ]
+              },
+              ...obsidianmd.configs.recommended,
+              {
+                languageOptions: {
+                  parserOptions: {
+                    projectService: true,
+                    tsconfigRootDir: tmpRepo
+                  }
+                }
+              }
+            ]
+          });
+
+          const results = await eslint.lintFiles([
+            "src",
+            "vitest.config.ts",
+            "manifest.json",
+            "package.json",
+            "LICENSE"
+          ]);
+
+          let fatal = 0;
+          let errors = 0;
+          let warnings = 0;
+          for (const result of results) {
+            fatal += result.fatalErrorCount;
+            errors += result.errorCount;
+            warnings += result.warningCount;
+            for (const msg of result.messages) {
+              const rel = path.relative(tmpRepo, result.filePath);
+              const level = msg.fatal ? "fatal" : msg.severity === 2 ? "error" : "warn";
+              console.log(`${rel}:${msg.line}:${msg.column} [${level}] ${msg.ruleId ?? "parse"}: ${msg.message}`);
+            }
+          }
+
+          console.log(`Obsidian ESLint scan summary: files=${results.length}, fatal=${fatal}, errors=${errors}, warnings=${warnings}`);
+          if (results.length === 0 || fatal > 0 || errors > 0 || warnings > 0) {
+            process.exit(1);
+          }
+          EOF
+
+          node "$TMP_TOOLS/run-scan.mjs" "$TMP_REPO"
+
       - name: Build production bundle
         run: npm run build
 

@@ -15,7 +15,7 @@ Execute this end-to-end workflow autonomously whenever the user invokes `/releas
    - Remote tags: `git ls-remote --tags origin "refs/tags/X.Y.Z" "refs/tags/vX.Y.Z"` must return empty.
    - GitHub Releases: `gh release view X.Y.Z` and `gh release view vX.Y.Z` must report not found.
    Abort immediately on any conflict.
-4. **Repository, Workflow, & Documentation Check:** Verify that required root files exist (`README.md`, `LICENSE`, `manifest.json`, `versions.json`), `.github/workflows/release.yml` includes `actions/attest-build-provenance` and `gh release create` with `main.js` and `manifest.json`, `README.md` and `AGENTS.md` match `src/` (per `update-documentation`), and implemented proposals in `.agents/proposals/` have `- **Status:** Implemented`.
+4. **Repository, Workflow, & Documentation Check:** Verify that required root files exist (`README.md`, `LICENSE`, `manifest.json`, `versions.json`), `.github/workflows/release.yml` includes the zero-warning `eslint-plugin-obsidianmd` scan, `actions/attest-build-provenance`, and `gh release create` with `main.js` and `manifest.json`, `README.md` and `AGENTS.md` match `src/` (per `update-documentation`), and implemented proposals in `.agents/proposals/` have `- **Status:** Implemented`.
 
 ## 2. Pre-Release Verification Gate
 Run the full verification suite before modifying metadata:
@@ -27,7 +27,7 @@ Run the full verification suite before modifying metadata:
    - Copy the repository (excluding `.git` and `node_modules/.cache`) to `$TMP_REPO`.
    - Install `eslint@9`, `typescript@5.9`, `typescript-eslint`, and `eslint-plugin-obsidianmd@latest` in `$TMP_TOOLS`.
    - Run ESLint with `obsidianmd.configs.recommended` and `languageOptions.parserOptions = { projectService: true, tsconfigRootDir: TMP_REPO }`, ignoring `node_modules/**`, `dist/**`, `build/**`, `main.js`, `esbuild.config.mjs`, `**/tests/**`, and `**/*.test.*` (keeping `src/**`, `vitest.config.ts`, `manifest.json`, `package.json`, and `LICENSE` in scope).
-   - Require `fatal === 0` and `errors === 0` (advisory `warn` diagnostics such as `obsidianmd/settings-tab/prefer-setting-definitions` are non-blocking).
+   - Require `fatal === 0`, `errors === 0`, and `warnings === 0` (zero warnings allowed; abort immediately on any warning or error).
    - Remove `$TMP_REPO` and `$TMP_TOOLS` on exit.
 If any check fails, abort the release immediately and report the exact failure.
 

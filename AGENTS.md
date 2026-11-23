@@ -17,7 +17,7 @@
 
 ## Architecture & Naming
 - `src/main.ts`: Plugin lifecycle (`onload`, `onunload`), commands, ribbon icon, status bar progress (`ProgressReporter`), auto-sync interval registration.
-- `src/settings.ts`: `VaultDavSettingTab` and settings persistence (`url`, `username`, `appPasswordSecret` via `SecretComponent`, `remoteBaseDir`, `syncInterval`, `conflictStrategy`, `chunkingThresholdMB`, `chunkSizeMB`).
+- `src/settings.ts`: `VaultDavSettingTab` (dual declarative `getSettingDefinitions()` for Obsidian `>=1.13.0` and `display()` fallback for `1.11.4`–`1.12.x`) and settings persistence (`url`, `username`, `appPasswordSecret` via `SecretComponent` / declarative `secret` control, `remoteBaseDir`, `syncInterval`, `conflictStrategy`, `chunkingThresholdMB`, `chunkSizeMB`).
 - `src/types.ts`: Strict TypeScript interfaces and type definitions (`VaultDavSettings`, `WebDavClientConfig`, `ProgressReporter`, `RemoteItem`, `SyncStateRecord`, `SyncAction`, `SyncPlan`).
 - `src/log.ts`: `log.*` logging utilities (includes `log.debugEnabled`), `formatTransferProgress`, and user notifications via Obsidian `Notice`.
 - `src/utilities.ts`: `util.*` helper functions (path normalization via Obsidian `normalizePath`, Base64 encoding, concurrency queue).
@@ -44,7 +44,7 @@
 - **`no-inner-html`:** Never use `innerHTML`, `outerHTML`, or `insertAdjacentHTML`. Always use Obsidian's `containerEl.empty()`, `createEl()`, `createDiv()`, or `Setting`.
 - **`no-console`, `no-control-regex`, `no-constant-condition`, `regex-lookbehind`, `platform`:** Prohibit `console.log`/`console.info` (allow only `warn`, `error`, `debug`), control-character regex literals, `while (true)`, regex lookbehinds, and `navigator.platform`/`navigator.userAgent` in `src/`.
 - **`ui/sentence-case`:** Use strict Sentence case for all UI strings (`Setting.setName`, `Setting.setDesc`, `setButtonText`, `setPlaceholder`, `addOption`, command `name`, ribbon tooltip, `Notice`). Capitalize only the first word and proper nouns/acronyms (`Nextcloud`, `WebDAV`, `HTTP`, `URL`, `MB`). Never use Title Case (write `"App password"`, `"Remote base directory"`, `"Sync interval"`, `"Conflict strategy"`, `"Test connection"`).
-- **`settings-tab/no-manual-html-headings` & `no-problematic-settings-headings`:** Never create `<h1..h6>` elements manually in `PluginSettingTab`. If headings are needed, use `new Setting(containerEl).setName("...").setHeading()` and never include `"VaultDAV"`, `"general"`, `"options"`, or `"settings"` in the heading text.
+- **`settings-tab/*`:** Implement dual support (`getSettingDefinitions()` for Obsidian `>=1.13.0` and `display()` fallback while `minAppVersion < 1.13.0`) to satisfy `prefer-setting-definitions` and `require-display`. Never create `<h1..h6>` elements manually in `PluginSettingTab`. If headings are needed, use `new Setting(containerEl).setName("...").setHeading()` and never include `"VaultDAV"`, `"general"`, `"options"`, or `"settings"` in the heading text.
 - **`commands/no-plugin-id-in-command-id` & `no-plugin-name-in-command-name` & `no-default-hotkeys`:** Never prefix command `id` with `vaultdav`, never include `VaultDAV` in command `name`, and never define default `hotkeys`.
 - **`detach-leaves` & Lifecycle Hygiene:** Never call `detachLeavesOfType` in `onunload()`. Always wrap intervals in `this.registerInterval(window.setInterval(...))` and events in `this.registerEvent(...)`.
 

@@ -4,6 +4,8 @@ import {
     requireApiVersion,
     SecretComponent,
     Setting,
+    type SettingDefinition,
+    type SettingDefinitionItem,
     SettingGroup
 } from "obsidian";
 import type VaultDavPlugin from "./main";
@@ -68,6 +70,17 @@ export function createSettingGroup(
 
 export function hasEmbeddedUrlCredentials(value: string): boolean {
     return URL_USERINFO_REGEX.test(value.trim());
+}
+
+function parseNumericInput(value: unknown): number {
+    if (typeof value === "number") {
+        return value;
+    }
+    if (typeof value === "string") {
+        const trimmed: string = value.trim();
+        return trimmed === "" ? Number.NaN : Number(trimmed);
+    }
+    return Number.NaN;
 }
 
 export function sanitizeAppPassword(value: string): string {
@@ -162,6 +175,44 @@ export class VaultDavSettingTab extends PluginSettingTab {
         this.pluginInstance = plugin;
     }
 
+    private attachAppPasswordControl(setting: Setting): void {
+        if (
+            requireApiVersion("1.11.4") &&
+            typeof SecretComponent === "function" &&
+            typeof setting.addComponent === "function"
+        ) {
+            setting.addComponent((el: HTMLElement): SecretComponent =>
+                new SecretComponent(this.app, el)
+                    .setValue(this.pluginInstance.settings.appPasswordSecret)
+                    .onChange(async (value: string | null): Promise<void> => {
+                        await this.setControlValue("appPasswordSecret", value);
+                    })
+            );
+        } else {
+            setting.setDesc(
+                "Obsidian 1.11.4 or newer is required for secure password storage."
+            );
+        }
+    }
+
+    private attachTestConnectionButton(setting: Setting): void {
+        setting.addButton((button) =>
+            button
+                .setButtonText("Test connection")
+                .setCta()
+                .onClick(async (): Promise<void> => {
+                    button.setDisabled(true);
+                    button.setButtonText("Testing...");
+                    try {
+                        await this.pluginInstance.testConnection();
+                    } finally {
+                        button.setDisabled(false);
+                        button.setButtonText("Test connection");
+                    }
+                })
+        );
+    }
+
     public display(): void {
         const { containerEl } = this;
         if (typeof containerEl.empty === "function") {
@@ -184,9 +235,7 @@ export class VaultDavSettingTab extends PluginSettingTab {
                             .setPlaceholder("https://cloud.example.com")
                             .setValue(this.pluginInstance.settings.url)
                             .onChange(async (value: string): Promise<void> => {
-                                this.pluginInstance.settings.url =
-                                    sanitizeServerUrl(value);
-                                await this.pluginInstance.saveSettings();
+                                await this.setControlValue("url", value);
                             });
                     });
             })
@@ -201,9 +250,7 @@ export class VaultDavSettingTab extends PluginSettingTab {
                             .setPlaceholder("Enter username")
                             .setValue(this.pluginInstance.settings.username)
                             .onChange(async (value: string): Promise<void> => {
-                                this.pluginInstance.settings.username =
-                                    sanitizeUsername(value);
-                                await this.pluginInstance.saveSettings();
+                                await this.setControlValue("username", value);
                             });
                     });
             })
@@ -213,29 +260,7 @@ export class VaultDavSettingTab extends PluginSettingTab {
                     .setDesc(
                         "Select or create a secret for your Nextcloud app password."
                     );
-                if (
-                    requireApiVersion("1.11.4") &&
-                    typeof SecretComponent === "function" &&
-                    typeof setting.addComponent === "function"
-                ) {
-                    setting.addComponent((el: HTMLElement): SecretComponent =>
-                        new SecretComponent(this.app, el)
-                            .setValue(
-                                this.pluginInstance.settings.appPasswordSecret
-                            )
-                            .onChange(
-                                async (value: string | null): Promise<void> => {
-                                    this.pluginInstance.settings.appPasswordSecret =
-                                        sanitizeSecretId(value);
-                                    await this.pluginInstance.saveSettings();
-                                }
-                            )
-                    );
-                } else {
-                    setting.setDesc(
-                        "Obsidian 1.11.4 or newer is required for secure password storage."
-                    );
-                }
+                this.attachAppPasswordControl(setting);
             })
             .addSetting((setting: Setting): void => {
                 setting
@@ -252,12 +277,10 @@ export class VaultDavSettingTab extends PluginSettingTab {
                                 this.pluginInstance.settings.remoteBaseDir
                             )
                             .onChange(async (value: string): Promise<void> => {
-                                this.pluginInstance.settings.remoteBaseDir =
-                                    sanitizeRemoteBaseDir(
-                                        value,
-                                        this.app.vault.configDir
-                                    );
-                                await this.pluginInstance.saveSettings();
+                                await this.setControlValue(
+                                    "remoteBaseDir",
+                                    value
+                                );
                             });
                     });
             });
@@ -281,19 +304,10 @@ export class VaultDavSettingTab extends PluginSettingTab {
                                 )
                             )
                             .onChange(async (value: string): Promise<void> => {
-                                const trimmed: string = value.trim();
-                                const parsed: number =
-                                    trimmed === ""
-                                        ? Number.NaN
-                                        : Number(trimmed);
-                                this.pluginInstance.settings.syncInterval =
-                                    !Number.isFinite(parsed) || parsed < 0
-                                        ? 0
-                                        : Math.min(
-                                              MAX_SYNC_INTERVAL_MINUTES,
-                                              Math.floor(parsed)
-                                          );
-                                await this.pluginInstance.saveSettings();
+                                await this.setControlValue(
+                                    "syncInterval",
+                                    value
+                                );
                             });
                     });
             })
@@ -314,13 +328,10 @@ export class VaultDavSettingTab extends PluginSettingTab {
                                 this.pluginInstance.settings.conflictStrategy
                             )
                             .onChange(async (value: string): Promise<void> => {
-                                const strategy: ConflictStrategy =
-                                    value === "newest_wins"
-                                        ? "newest_wins"
-                                        : "keep_both";
-                                this.pluginInstance.settings.conflictStrategy =
-                                    strategy;
-                                await this.pluginInstance.saveSettings();
+                                await this.setControlValue(
+                                    "conflictStrategy",
+                                    value
+                                );
                             })
                     );
             });
@@ -331,22 +342,8 @@ export class VaultDavSettingTab extends PluginSettingTab {
                     .setName("Test connection")
                     .setDesc(
                         "Verify Nextcloud WebDAV credentials and remote directory access."
-                    )
-                    .addButton((button) =>
-                        button
-                            .setButtonText("Test connection")
-                            .setCta()
-                            .onClick(async (): Promise<void> => {
-                                button.setDisabled(true);
-                                button.setButtonText("Testing...");
-                                try {
-                                    await this.pluginInstance.testConnection();
-                                } finally {
-                                    button.setDisabled(false);
-                                    button.setButtonText("Test connection");
-                                }
-                            })
                     );
+                this.attachTestConnectionButton(setting);
             }
         );
 
@@ -373,19 +370,10 @@ export class VaultDavSettingTab extends PluginSettingTab {
                                 )
                             )
                             .onChange(async (value: string): Promise<void> => {
-                                const trimmed: string = value.trim();
-                                const parsed: number =
-                                    trimmed === ""
-                                        ? Number.NaN
-                                        : Number(trimmed);
-                                this.pluginInstance.settings.chunkingThresholdMB =
-                                    !Number.isFinite(parsed) || parsed < 1
-                                        ? DEFAULT_SETTINGS.chunkingThresholdMB
-                                        : Math.min(
-                                              MAX_CHUNKING_THRESHOLD_MB,
-                                              Math.floor(parsed)
-                                          );
-                                await this.pluginInstance.saveSettings();
+                                await this.setControlValue(
+                                    "chunkingThresholdMB",
+                                    value
+                                );
                             });
                     });
             })
@@ -405,21 +393,220 @@ export class VaultDavSettingTab extends PluginSettingTab {
                                 String(this.pluginInstance.settings.chunkSizeMB)
                             )
                             .onChange(async (value: string): Promise<void> => {
-                                const trimmed: string = value.trim();
-                                const parsed: number =
-                                    trimmed === ""
-                                        ? Number.NaN
-                                        : Number(trimmed);
-                                this.pluginInstance.settings.chunkSizeMB =
-                                    !Number.isFinite(parsed) || parsed < 1
-                                        ? DEFAULT_SETTINGS.chunkSizeMB
-                                        : Math.min(
-                                              MAX_CHUNK_SIZE_MB,
-                                              Math.floor(parsed)
-                                          );
-                                await this.pluginInstance.saveSettings();
+                                await this.setControlValue(
+                                    "chunkSizeMB",
+                                    value
+                                );
                             });
                     });
             });
+    }
+
+    public getControlValue(key: string): unknown {
+        switch (key) {
+            case "appPasswordSecret":
+                return this.pluginInstance.settings.appPasswordSecret;
+            case "chunkSizeMB":
+                return this.pluginInstance.settings.chunkSizeMB;
+            case "chunkingThresholdMB":
+                return this.pluginInstance.settings.chunkingThresholdMB;
+            case "conflictStrategy":
+                return this.pluginInstance.settings.conflictStrategy;
+            case "remoteBaseDir":
+                return this.pluginInstance.settings.remoteBaseDir;
+            case "syncInterval":
+                return this.pluginInstance.settings.syncInterval;
+            case "url":
+                return this.pluginInstance.settings.url;
+            case "username":
+                return this.pluginInstance.settings.username;
+            default:
+                return undefined;
+        }
+    }
+
+    public getSettingDefinitions(): SettingDefinitionItem[] {
+        const appPasswordDefinition: SettingDefinition<keyof VaultDavSettings> =
+            requireApiVersion("1.13.2")
+                ? {
+                      control: {
+                          defaultValue: DEFAULT_SETTINGS.appPasswordSecret,
+                          key: "appPasswordSecret",
+                          type: "secret"
+                      },
+                      desc: "Select or create a secret for your Nextcloud app password.",
+                      name: "App password"
+                  }
+                : {
+                      desc: "Select or create a secret for your Nextcloud app password.",
+                      name: "App password",
+                      render: (setting: Setting): void => {
+                          this.attachAppPasswordControl(setting);
+                      }
+                  };
+
+        const definitions: SettingDefinitionItem<keyof VaultDavSettings>[] = [
+            {
+                items: [
+                    {
+                        control: {
+                            defaultValue: DEFAULT_SETTINGS.url,
+                            key: "url",
+                            placeholder: "https://cloud.example.com",
+                            type: "text"
+                        },
+                        desc: "Nextcloud base URL or WebDAV endpoint (https://<domain>).",
+                        name: "Server URL"
+                    },
+                    {
+                        control: {
+                            defaultValue: DEFAULT_SETTINGS.username,
+                            key: "username",
+                            placeholder: "Enter username",
+                            type: "text"
+                        },
+                        desc: "Nextcloud account username.",
+                        name: "Username"
+                    },
+                    appPasswordDefinition,
+                    {
+                        control: {
+                            defaultValue: DEFAULT_SETTINGS.remoteBaseDir,
+                            key: "remoteBaseDir",
+                            placeholder: this.app.vault.getName(),
+                            type: "text"
+                        },
+                        desc: "Target remote folder path inside the Nextcloud user files root.",
+                        name: "Remote base directory"
+                    }
+                ],
+                type: "group"
+            },
+            {
+                items: [
+                    {
+                        control: {
+                            defaultValue: DEFAULT_SETTINGS.syncInterval,
+                            key: "syncInterval",
+                            max: MAX_SYNC_INTERVAL_MINUTES,
+                            min: 0,
+                            placeholder: "0",
+                            step: 1,
+                            type: "number"
+                        },
+                        desc: "Automatic synchronization interval in minutes (0 to disable).",
+                        name: "Sync interval"
+                    },
+                    {
+                        control: {
+                            defaultValue: DEFAULT_SETTINGS.conflictStrategy,
+                            key: "conflictStrategy",
+                            options: {
+                                keep_both: "Keep both (create conflict copy)",
+                                newest_wins: "Newest wins"
+                            },
+                            type: "dropdown"
+                        },
+                        desc: "Resolution mode for concurrent edits (keep_both or newest_wins).",
+                        name: "Conflict strategy"
+                    }
+                ],
+                type: "group"
+            },
+            {
+                items: [
+                    {
+                        desc: "Verify Nextcloud WebDAV credentials and remote directory access.",
+                        name: "Test connection",
+                        render: (setting: Setting): void => {
+                            this.attachTestConnectionButton(setting);
+                        }
+                    }
+                ],
+                type: "group"
+            },
+            {
+                heading: "Advanced sync",
+                items: [
+                    {
+                        control: {
+                            defaultValue: DEFAULT_SETTINGS.chunkingThresholdMB,
+                            key: "chunkingThresholdMB",
+                            max: MAX_CHUNKING_THRESHOLD_MB,
+                            min: 1,
+                            placeholder: "90",
+                            step: 1,
+                            type: "number"
+                        },
+                        desc: "Minimum file size in MB before switching to Nextcloud chunked uploads.",
+                        name: "Chunking threshold"
+                    },
+                    {
+                        control: {
+                            defaultValue: DEFAULT_SETTINGS.chunkSizeMB,
+                            key: "chunkSizeMB",
+                            max: MAX_CHUNK_SIZE_MB,
+                            min: 1,
+                            placeholder: "10",
+                            step: 1,
+                            type: "number"
+                        },
+                        desc: "Target chunk size in MB for chunked uploads and parallel range downloads.",
+                        name: "Chunk size"
+                    }
+                ],
+                type: "group"
+            }
+        ];
+
+        return definitions;
+    }
+
+    public async setControlValue(key: string, value: unknown): Promise<void> {
+        switch (key) {
+            case "appPasswordSecret":
+                this.pluginInstance.settings.appPasswordSecret =
+                    sanitizeSecretId(value);
+                break;
+            case "chunkSizeMB":
+                this.pluginInstance.settings.chunkSizeMB = sanitizeChunkSizeMB(
+                    parseNumericInput(value)
+                );
+                break;
+            case "chunkingThresholdMB":
+                this.pluginInstance.settings.chunkingThresholdMB =
+                    sanitizeChunkingThresholdMB(parseNumericInput(value));
+                break;
+            case "conflictStrategy": {
+                const strategy: ConflictStrategy =
+                    value === "newest_wins" ? "newest_wins" : "keep_both";
+                this.pluginInstance.settings.conflictStrategy = strategy;
+                break;
+            }
+            case "remoteBaseDir":
+                this.pluginInstance.settings.remoteBaseDir =
+                    sanitizeRemoteBaseDir(
+                        typeof value === "string" ? value : "",
+                        this.app.vault.configDir
+                    );
+                break;
+            case "syncInterval":
+                this.pluginInstance.settings.syncInterval =
+                    sanitizeSyncInterval(parseNumericInput(value));
+                break;
+            case "url":
+                this.pluginInstance.settings.url = sanitizeServerUrl(
+                    typeof value === "string" ? value : ""
+                );
+                break;
+            case "username":
+                this.pluginInstance.settings.username = sanitizeUsername(
+                    typeof value === "string" ? value : ""
+                );
+                break;
+            default:
+                return;
+        }
+        await this.pluginInstance.saveSettings();
     }
 }

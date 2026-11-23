@@ -294,6 +294,13 @@ describe("Obsidian Plugin Linter static guard (eslint-plugin-obsidianmd)", () =>
         expect(manifestJson.minAppVersion).toBe("1.11.4");
         expect(settingsContent).toContain('requireApiVersion("1.11.0")');
         expect(settingsContent).toContain('requireApiVersion("1.11.4")');
+        expect(settingsContent).toContain('requireApiVersion("1.13.2")');
+        expect(settingsContent).toContain("public display(): void");
+        expect(settingsContent).toContain(
+            "public getSettingDefinitions(): SettingDefinitionItem[]"
+        );
+        expect(settingsContent).not.toContain("super.getSettingDefinitions");
+        expect(settingsContent).not.toContain("this.display()");
         expect(settingsContent).toContain("new SecretComponent(this.app");
         expect(settingsContent).not.toMatch(/inputEl\.type\s*=\s*["']password["']/);
         expect(settingsContent).not.toMatch(/=\s*SettingGroup\b/);
