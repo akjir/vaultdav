@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "[0-9]*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Validate release tag and version metadata
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const tag = process.env.RELEASE_TAG || "";
+            if (!/^\d+\.\d+\.\d+$/.test(tag)) {
+                throw new Error(`Release tag "${tag}" must match strict SemVer (X.Y.Z) without a leading "v".`);
+            }
+            const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const lock = JSON.parse(fs.readFileSync("package-lock.json", "utf8"));
+            const versions = JSON.parse(fs.readFileSync("versions.json", "utf8"));
+            if (manifest.version !== tag) {
+                throw new Error(`manifest.json version (${manifest.version}) does not match tag (${tag}).`);
+            }
+            if (pkg.version !== tag) {
+                throw new Error(`package.json version (${pkg.version}) does not match tag (${tag}).`);
+            }
+            if (lock.version !== tag || lock.packages?.[""]?.version !== tag) {
+                throw new Error(`package-lock.json version does not match tag (${tag}).`);
+            }
+            if (versions[tag] !== manifest.minAppVersion) {
+                throw new Error(`versions.json[${tag}] (${versions[tag]}) does not match manifest.minAppVersion (${manifest.minAppVersion}).`);
+            }
+            console.log(`Validated metadata for release ${tag} (minAppVersion: ${manifest.minAppVersion}).`);
+          '
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run TypeScript typecheck
+        run: npm run typecheck
+
+      - name: Run test suite
+        run: npm test
+
+      - name: Build production bundle
+        run: npm run build
+
+      - name: Verify required release assets
+        run: |
+          test -s main.js
+          test -s manifest.json
+          test -s versions.json
+          test -s README.md
+          test -s LICENSE
+
+      - name: Extract changelog notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const tag = process.env.RELEASE_TAG || "";
+            const escapedTag = tag.replace(/\./g, "\\.");
+            const changelog = fs.readFileSync("CHANGELOG.md", "utf8");
+            const headingRegex = new RegExp(`^## \\[${escapedTag}\\][^\\n]*\\n`, "m");
+            const match = headingRegex.exec(changelog);
+            if (match === null) {
+                process.exit(0);
+            }
+            const rest = changelog.slice(match.index + match[0].length);
+            const nextHeading = rest.search(/^## \[/m);
+            const section = (nextHeading === -1 ? rest : rest.slice(0, nextHeading)).trim();
+            if (section !== "") {
+                fs.writeFileSync("release-notes.md", `${section}\n`, "utf8");
+            }
+          '
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [ -s release-notes.md ]; then
+            gh release create "$RELEASE_TAG" main.js manifest.json \
+              --title "$RELEASE_TAG" \
+              --notes-file release-notes.md
+          else
+            gh release create "$RELEASE_TAG" main.js manifest.json \
+              --title "$RELEASE_TAG" \
+              --generate-notes
+          fi

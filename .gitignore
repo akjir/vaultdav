@@ -6,6 +6,7 @@ main.js
 main.js.map
 data.json
 sync-state.json
+release-notes.md
 coverage/
 *.log
 

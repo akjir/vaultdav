@@ -41,4 +41,4 @@ Ensure all version-bearing files are set to `"X.Y.Z"` (formatted with 4 spaces):
    `git commit -m "Release X.Y.Z"`
 3. Create an annotated git tag without a `v` prefix:
    `git tag -a X.Y.Z -m "Release X.Y.Z"`
-4. Verify the commit and tag (`git status --short`, `git log -n 1 --oneline`, `git tag -l -n1 X.Y.Z`) and report the release summary to the user, reminding them to push `main` and tag `X.Y.Z` (exact match to `manifest.json` `"version"`) and attach the compiled `main.js` and `manifest.json` as binary GitHub Release assets (`styles.css` is not required).
+4. Verify the commit and tag (`git status --short`, `git log -n 1 --oneline`, `git tag -l -n1 X.Y.Z`) and report the release summary to the user, reminding them to push `main` and tag `X.Y.Z` (exact match to `manifest.json` `"version"`). Pushing tag `X.Y.Z` triggers `.github/workflows/release.yml` to verify, build, and publish the GitHub Release with `main.js` and `manifest.json` attached (`styles.css` is not required).
