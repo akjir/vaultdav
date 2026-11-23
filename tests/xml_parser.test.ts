@@ -446,7 +446,16 @@ describe("webdav xml_parser", () => {
     </d:response>
 </d:multistatus>`;
 
-        for (const badPath of [".", "..", "../secret", "Notes/../../secret", "bad\0path"]) {
+        for (const badPath of [
+            ".",
+            "..",
+            "../secret",
+            "Notes/../../secret",
+            "bad\0path",
+            "\n",
+            "\r/",
+            "\t"
+        ]) {
             expect(() =>
                 parseMultiStatus(validRootXml, "alice", "Vault", badPath)
             ).toThrow("Invalid WebDAV queried directory path");

@@ -1,12 +1,7 @@
 import type { DataAdapter } from "obsidian";
 import { log } from "../log";
 import type { SyncStateData, SyncStateRecord } from "../types";
-import {
-    MAX_FILE_SIZE_BYTES,
-    PLUGIN_DATA_FILE_PATH,
-    SYNC_STATE_FILE_PATH,
-    util
-} from "../utilities";
+import { MAX_FILE_SIZE_BYTES, util } from "../utilities";
 
 const CURRENT_STATE_VERSION: number = 1;
 const MAX_SAFE_TIMESTAMP_MS: number = 8_640_000_000_000_000;
@@ -37,14 +32,16 @@ function createRecordMap(): Record<string, SyncStateRecord> {
     return Object.create(null) as Record<string, SyncStateRecord>;
 }
 
-function resolveStateFilePath(stateFilePath: string): string {
+function resolveStateFilePath(
+    stateFilePath: string,
+    configDir: string
+): string {
     const normalized: string = util.normalizeVaultPath(stateFilePath);
     const lower: string = normalized.toLowerCase();
     if (
         normalized === "" ||
-        lower === PLUGIN_DATA_FILE_PATH ||
         lower.endsWith("/data.json") ||
-        !util.isExcludedPath(normalized)
+        !util.isExcludedPath(normalized, configDir)
     ) {
         throw new Error(`Invalid sync state file path: ${stateFilePath}`);
     }
@@ -92,23 +89,29 @@ function stripNullPadding(raw: string): string {
 
 export class SyncStateStore {
     private readonly adapter: DataAdapter;
+    private readonly configDir: string;
     private ensureParentDirPromise: Promise<void> | null = null;
     private isParentDirEnsured: boolean = false;
+    private lowerKeyMap: Map<string, string> = new Map<string, string>();
     private records: Record<string, SyncStateRecord>;
     private savePromise: Promise<void> = Promise.resolve();
     private readonly stateFilePath: string;
 
     public constructor(
         adapter: DataAdapter,
-        stateFilePath: string = SYNC_STATE_FILE_PATH
+        stateFilePath: string,
+        configDir: string = ""
     ) {
         this.adapter = adapter;
-        this.stateFilePath = resolveStateFilePath(stateFilePath);
+        this.configDir =
+            configDir !== "" ? util.normalizeVaultPath(configDir) : "";
+        this.stateFilePath = resolveStateFilePath(stateFilePath, this.configDir);
         this.records = createRecordMap();
     }
 
     public async clear(): Promise<void> {
         this.records = createRecordMap();
+        this.lowerKeyMap.clear();
         await this.save();
     }
 
@@ -150,7 +153,7 @@ export class SyncStateStore {
 
     public getRecord(path: string): SyncStateRecord | undefined {
         const normalized: string = util.normalizeVaultPath(path);
-        if (normalized === "" || util.isExcludedPath(normalized)) {
+        if (normalized === "" || util.isExcludedPath(normalized, this.configDir)) {
             return undefined;
         }
         if (Object.prototype.hasOwnProperty.call(this.records, normalized)) {
@@ -158,13 +161,13 @@ export class SyncStateStore {
                 this.records[normalized];
             return direct !== undefined ? cloneRecord(direct) : undefined;
         }
-        const lower: string = normalized.toLowerCase();
-        for (const existingKey of Object.keys(this.records)) {
-            if (existingKey.toLowerCase() === lower) {
-                const matched: SyncStateRecord | undefined =
-                    this.records[existingKey];
-                return matched !== undefined ? cloneRecord(matched) : undefined;
-            }
+        const matchedKey: string | undefined = this.lowerKeyMap.get(
+            normalized.toLowerCase()
+        );
+        if (matchedKey !== undefined) {
+            const matched: SyncStateRecord | undefined =
+                this.records[matchedKey];
+            return matched !== undefined ? cloneRecord(matched) : undefined;
         }
         return undefined;
     }
@@ -174,6 +177,7 @@ export class SyncStateStore {
         const exists: boolean = await this.adapter.exists(this.stateFilePath);
         if (!exists) {
             this.records = createRecordMap();
+            this.lowerKeyMap.clear();
             return {
                 records: {},
                 version: CURRENT_STATE_VERSION
@@ -193,6 +197,7 @@ export class SyncStateStore {
                 "Sync state file exceeds maximum allowed size; resetting state."
             );
             this.records = createRecordMap();
+            this.lowerKeyMap.clear();
             return {
                 records: {},
                 version: CURRENT_STATE_VERSION
@@ -233,7 +238,7 @@ export class SyncStateStore {
                             val as Partial<SyncStateRecord>;
                         if (
                             normalizedKey !== "" &&
-                            !util.isExcludedPath(normalizedKey)
+                            !util.isExcludedPath(normalizedKey, this.configDir)
                         ) {
                             const lowerKey: string =
                                 normalizedKey.toLowerCase();
@@ -269,6 +274,7 @@ export class SyncStateStore {
                     }
                 }
                 this.records = validated;
+                this.lowerKeyMap = lowerKeyMap;
                 return {
                     records: cloneRecordMap(this.records),
                     version: CURRENT_STATE_VERSION
@@ -279,6 +285,7 @@ export class SyncStateStore {
         }
 
         this.records = createRecordMap();
+        this.lowerKeyMap.clear();
         return {
             records: {},
             version: CURRENT_STATE_VERSION
@@ -294,10 +301,10 @@ export class SyncStateStore {
             delete this.records[normalized];
         }
         const lower: string = normalized.toLowerCase();
-        for (const existingKey of Object.keys(this.records)) {
-            if (existingKey.toLowerCase() === lower) {
-                delete this.records[existingKey];
-            }
+        const existingKey: string | undefined = this.lowerKeyMap.get(lower);
+        if (existingKey !== undefined) {
+            delete this.records[existingKey];
+            this.lowerKeyMap.delete(lower);
         }
     }
 
@@ -305,7 +312,7 @@ export class SyncStateStore {
         const writeTask = async (): Promise<void> => {
             await this.ensureParentDirectory();
             const payload: SyncStateData = {
-                records: cloneRecordMap(this.records),
+                records: this.records,
                 version: CURRENT_STATE_VERSION
             };
             // Use unformatted JSON to save space and I/O time on mobile
@@ -329,18 +336,15 @@ export class SyncStateStore {
             return;
         }
         const normalized: string = util.normalizeVaultPath(record.path);
-        if (normalized === "" || util.isExcludedPath(normalized)) {
+        if (normalized === "" || util.isExcludedPath(normalized, this.configDir)) {
             return;
         }
         const lower: string = normalized.toLowerCase();
-        for (const existingKey of Object.keys(this.records)) {
-            if (
-                existingKey !== normalized &&
-                existingKey.toLowerCase() === lower
-            ) {
-                delete this.records[existingKey];
-            }
+        const existingKey: string | undefined = this.lowerKeyMap.get(lower);
+        if (existingKey !== undefined && existingKey !== normalized) {
+            delete this.records[existingKey];
         }
+        this.lowerKeyMap.set(lower, normalized);
         this.records[normalized] = {
             etag: util.normalizeEtag(
                 typeof record.etag === "string" ? record.etag : ""

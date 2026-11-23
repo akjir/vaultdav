@@ -311,6 +311,10 @@ export function normalizePath(path: string): string {
     return trimmed === "" ? "/" : trimmed;
 }
 
+export function requireApiVersion(_version: string): boolean {
+    return true;
+}
+
 export function requestUrl(_request: RequestUrlParam | string): RequestUrlResponsePromise {
     const rejected: Promise<RequestUrlResponse> = Promise.reject(
         new Error("requestUrl must be mocked in unit tests")

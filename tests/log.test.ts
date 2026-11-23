@@ -28,8 +28,8 @@ describe("log", () => {
         );
     });
 
-    it("forwards info, warn, and error messages and extra arguments with the [VaultDAV] prefix", () => {
-        const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    it("forwards info (via console.debug), warn, and error messages and extra arguments with the [VaultDAV] prefix", () => {
+        const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => undefined);
         const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
         const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
         const errObj: Error = new Error("failure");
@@ -38,8 +38,8 @@ describe("log", () => {
         log.warn("lock detected", 423);
         log.error("sync failed", errObj);
 
-        expect(infoSpy).toHaveBeenCalledTimes(1);
-        expect(infoSpy).toHaveBeenCalledWith("[VaultDAV] sync started", "phase-1");
+        expect(debugSpy).toHaveBeenCalledTimes(1);
+        expect(debugSpy).toHaveBeenCalledWith("[VaultDAV] sync started", "phase-1");
 
         expect(warnSpy).toHaveBeenCalledTimes(1);
         expect(warnSpy).toHaveBeenCalledWith("[VaultDAV] lock detected", 423);
@@ -105,6 +105,14 @@ describe("log", () => {
         );
         expect(noticeSpy).toHaveBeenCalledWith(
             "VaultDAV: Connection failed for https://[REDACTED]@cloud.example.com (Basic [REDACTED])",
+            4000
+        );
+
+        log.notify(
+            "Lowercase basic dG9rZW4= and UPPER BASIC dG9rZW4y with https://alice@domain.com:p@ss@cloud.example.com/dav and https://cloud.example.com?email=user@example.org#tag@frag"
+        );
+        expect(noticeSpy).toHaveBeenLastCalledWith(
+            "VaultDAV: Lowercase Basic [REDACTED] and UPPER Basic [REDACTED] with https://[REDACTED]@cloud.example.com/dav and https://cloud.example.com?email=user@example.org#tag@frag",
             4000
         );
     });

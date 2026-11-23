@@ -1,7 +1,7 @@
 {
     "name": "vaultdav",
     "version": "0.1.0",
-    "description": "Synchronize Obsidian vaults bidirectionally with Nextcloud via WebDAV.",
+    "description": "Synchronize your vault bidirectionally with Nextcloud via WebDAV.",
     "main": "main.js",
     "scripts": {
         "build": "node esbuild.config.mjs production",

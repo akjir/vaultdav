@@ -144,11 +144,6 @@ function hasCollectionResourceType(
     return false;
 }
 
-function isExplicitRootPath(path: string): boolean {
-    const trimmed: string = path.trim();
-    return trimmed === "" || trimmed === "/";
-}
-
 export function parseMultiStatus(
     xmlText: string,
     username: string,
@@ -157,11 +152,11 @@ export function parseMultiStatus(
 ): RemoteItem[] {
     const doc: Document = parseXmlDocument(xmlText);
     const normalizedBase: string = util.normalizeVaultPath(remoteBaseDir);
-    if (normalizedBase === "" && !isExplicitRootPath(remoteBaseDir)) {
+    if (normalizedBase === "" && !util.isExplicitRootPath(remoteBaseDir)) {
         throw new Error("Invalid WebDAV remote base directory path");
     }
     const normalizedQueriedDir: string = util.normalizeVaultPath(queriedDirPath);
-    if (normalizedQueriedDir === "" && !isExplicitRootPath(queriedDirPath)) {
+    if (normalizedQueriedDir === "" && !util.isExplicitRootPath(queriedDirPath)) {
         throw new Error("Invalid WebDAV queried directory path");
     }
     const lowerQueriedDir: string = normalizedQueriedDir.toLowerCase();
@@ -221,7 +216,7 @@ export function parseResponseElement(
     remoteBaseDir: string
 ): RemoteItem | null {
     const normalizedBase: string = util.normalizeVaultPath(remoteBaseDir);
-    if (normalizedBase === "" && !isExplicitRootPath(remoteBaseDir)) {
+    if (normalizedBase === "" && !util.isExplicitRootPath(remoteBaseDir)) {
         return null;
     }
 
@@ -302,11 +297,11 @@ export function parseSingleStat(
 ): RemoteItem | null {
     const doc: Document = parseXmlDocument(xmlText);
     const normalizedBase: string = util.normalizeVaultPath(remoteBaseDir);
-    if (normalizedBase === "" && !isExplicitRootPath(remoteBaseDir)) {
+    if (normalizedBase === "" && !util.isExplicitRootPath(remoteBaseDir)) {
         return null;
     }
     const normalizedTarget: string = util.normalizeVaultPath(targetPath);
-    if (normalizedTarget === "" && !isExplicitRootPath(targetPath)) {
+    if (normalizedTarget === "" && !util.isExplicitRootPath(targetPath)) {
         return null;
     }
     const lowerTarget: string = normalizedTarget.toLowerCase();

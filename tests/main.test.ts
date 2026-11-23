@@ -20,7 +20,10 @@ function createConfiguredSettings(
     };
 }
 
-function createTestPlugin(vaultName: string = "MyVault"): {
+function createTestPlugin(
+    vaultName: string = "MyVault",
+    configDir: string = ".obsidian"
+): {
     app: App;
     plugin: VaultDavPlugin;
 } {
@@ -32,6 +35,7 @@ function createTestPlugin(vaultName: string = "MyVault"): {
                 read: async (): Promise<string> => "{}",
                 write: async (): Promise<void> => undefined
             },
+            configDir,
             getName: (): string => vaultName
         }
     } as unknown as App;
@@ -440,5 +444,116 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         expect(notifySpy).toHaveBeenLastCalledWith(
             "Sync failed: unexpected string error"
         );
+    });
+
+    it("clamps and sanitizes loaded settings, guards 32-bit auto-sync timer overflow, handles undefined statusBarItem on mobile, and serializes saveSettings()", async () => {
+        vi.useFakeTimers();
+        const { plugin } = createTestPlugin();
+
+        vi.spyOn(plugin, "loadData").mockResolvedValueOnce({
+            appPassword: "bad\r\npassword",
+            chunkSizeMB: 1e305,
+            chunkingThresholdMB: 5000,
+            conflictStrategy: "keep_both",
+            remoteBaseDir: ".obsidian/plugins/vaultdav",
+            syncInterval: 99999999,
+            url: "https://alice@domain.com:secret@cloud.example.com/remote.php/dav",
+            username: "alice:injected"
+        });
+        await plugin.loadSettings();
+
+        expect(plugin.settings.appPassword).toBe("");
+        expect(plugin.settings.chunkSizeMB).toBe(512);
+        expect(plugin.settings.chunkingThresholdMB).toBe(512);
+        expect(plugin.settings.remoteBaseDir).toBe("");
+        expect(plugin.settings.syncInterval).toBe(10080);
+        expect(plugin.settings.url).toBe("https://cloud.example.com/remote.php/dav");
+        expect(plugin.settings.username).toBe("");
+
+        // Direct mutation of syncInterval above 32-bit timer max must still clamp in configureAutoSync()
+        const setIntervalSpy = vi.spyOn(window, "setInterval");
+        plugin.settings.syncInterval = 99999999;
+        plugin.configureAutoSync();
+        expect(setIntervalSpy).toHaveBeenLastCalledWith(
+            expect.any(Function),
+            10080 * 60 * 1000
+        );
+        plugin.onunload();
+
+        // Mobile addStatusBarItem returning undefined must not throw in reportProgress()
+        vi.spyOn(plugin, "addStatusBarItem").mockReturnValueOnce(
+            undefined as unknown as HTMLElement
+        );
+        vi.spyOn(plugin, "loadData").mockResolvedValueOnce({});
+        await plugin.onload();
+        expect(() => plugin.reportProgress("Uploading note.md (file 1/1)")).not.toThrow();
+        plugin.onunload();
+
+        // Concurrent saveSettings() calls must serialize sequentially without overlapping writes
+        let activeSaves: number = 0;
+        let maxActiveSaves: number = 0;
+        const savedUrls: string[] = [];
+        vi.spyOn(plugin, "saveData").mockImplementation(
+            async (data: unknown): Promise<void> => {
+                activeSaves += 1;
+                if (activeSaves > maxActiveSaves) {
+                    maxActiveSaves = activeSaves;
+                }
+                const record: VaultDavSettings = data as VaultDavSettings;
+                await Promise.resolve();
+                savedUrls.push(record.url);
+                activeSaves -= 1;
+            }
+        );
+
+        plugin.settings.url = "https://first.example.com";
+        const p1: Promise<void> = plugin.saveSettings();
+        plugin.settings.url = "https://second.example.com";
+        const p2: Promise<void> = plugin.saveSettings();
+        await Promise.all([p1, p2]);
+
+        expect(maxActiveSaves).toBe(1);
+        expect(savedUrls).toEqual([
+            "https://first.example.com",
+            "https://second.example.com"
+        ]);
+    });
+
+    it("does not schedule a leaked auto-sync timer when onunload() runs during an in-flight saveSettings() or onload()", async () => {
+        vi.useFakeTimers();
+        const { plugin } = createTestPlugin();
+        const setIntervalSpy = vi.spyOn(window, "setInterval");
+
+        // 1. Unload while saveSettings() is awaiting saveData()
+        let resolveSave!: () => void;
+        vi.spyOn(plugin, "saveData").mockImplementationOnce(
+            (): Promise<void> =>
+                new Promise<void>((resolve) => {
+                    resolveSave = resolve;
+                })
+        );
+        plugin.settings.syncInterval = 5;
+        const savePromise: Promise<void> = plugin.saveSettings();
+        await Promise.resolve();
+        plugin.onunload();
+        resolveSave();
+        await savePromise;
+
+        expect(setIntervalSpy).not.toHaveBeenCalled();
+
+        // 2. Unload while onload() is awaiting loadSettings()
+        let resolveLoad!: (value: unknown) => void;
+        vi.spyOn(plugin, "loadData").mockImplementationOnce(
+            (): Promise<unknown> =>
+                new Promise<unknown>((resolve) => {
+                    resolveLoad = resolve;
+                })
+        );
+        const loadPromise: Promise<void> = plugin.onload();
+        plugin.onunload();
+        resolveLoad({ syncInterval: 10 });
+        await loadPromise;
+
+        expect(setIntervalSpy).not.toHaveBeenCalled();
     });
 });

@@ -1,3 +1,4 @@
+import * as obsidian from "obsidian";
 import type { App, PluginManifest } from "obsidian";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import VaultDavPlugin from "../src/main";
@@ -14,7 +15,9 @@ import {
     SettingGroup as MockSettingGroup
 } from "./obsidian_mock";
 
-function createTestPlugin(): { app: App; plugin: VaultDavPlugin } {
+function createTestPlugin(
+    configDir: string = ".obsidian"
+): { app: App; plugin: VaultDavPlugin } {
     const mockApp: App = {
         vault: {
             adapter: {
@@ -23,6 +26,7 @@ function createTestPlugin(): { app: App; plugin: VaultDavPlugin } {
                 read: async (): Promise<string> => "{}",
                 write: async (): Promise<void> => undefined
             },
+            configDir,
             getName: (): string => "MyVault"
         }
     } as unknown as App;
@@ -168,8 +172,11 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             "Nextcloud base URL or WebDAV endpoint (https://<domain>)."
         );
         expect(getSettingByName("Username").desc).toBe("Nextcloud account username.");
+        expect(getSettingByName("Username").textComponent?.inputEl.placeholder).toBe(
+            "Enter username"
+        );
         expect(getSettingByName("App password").desc).toBe(
-            "Nextcloud app password for HTTP Basic authentication."
+            "Nextcloud app password for HTTP basic authentication."
         );
         expect(getSettingByName("Remote base directory").desc).toBe(
             "Target remote folder path inside the Nextcloud user files root."
@@ -194,7 +201,7 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         );
     });
 
-    it("falls back to flat Setting items when SettingGroup is unavailable", () => {
+    it("falls back to flat Setting items when SettingGroup is unavailable or requireApiVersion('1.11.0') is false", () => {
         const containerEl: HTMLElement = document.createElement("div");
         createSettingGroup(containerEl, null)
             .setHeading("Advanced sync")
@@ -210,6 +217,23 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         expect(MockSetting.instances[0]?.isHeading).toBe(true);
         expect(MockSetting.instances[1]?.name).toBe("Chunking threshold");
         expect(MockSetting.instances[2]?.name).toBe("Chunk size");
+
+        MockSetting.instances.length = 0;
+        MockSettingGroup.instances.length = 0;
+        const versionSpy = vi
+            .spyOn(obsidian, "requireApiVersion")
+            .mockReturnValueOnce(false);
+        const oldContainerEl: HTMLElement = document.createElement("div");
+        createSettingGroup(oldContainerEl)
+            .setHeading("Advanced sync")
+            .addSetting((setting) => {
+                setting.setName("Chunk size");
+            });
+        expect(versionSpy).toHaveBeenCalledWith("1.11.0");
+        expect(MockSettingGroup.instances.length).toBe(0);
+        expect(MockSetting.instances.length).toBe(2);
+        expect(MockSetting.instances[0]?.isHeading).toBe(true);
+        versionSpy.mockRestore();
     });
 
     it("configures mobile input hygiene and input types/bounds on text controls", () => {
@@ -335,6 +359,7 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         );
 
         await getSettingByName("Chunking threshold").textOnChange?.("999999");
+        expect(MAX_CHUNKING_THRESHOLD_MB).toBe(512);
         expect(plugin.settings.chunkingThresholdMB).toBe(MAX_CHUNKING_THRESHOLD_MB);
 
         await getSettingByName("Chunk size").textOnChange?.("999999");
@@ -344,6 +369,22 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             ".obsidian/plugins/vaultdav"
         );
         expect(plugin.settings.remoteBaseDir).toBe("");
+
+        const { app: customApp, plugin: customPlugin } =
+            createTestPlugin("custom-config");
+        vi.spyOn(customPlugin, "saveSettings").mockResolvedValue(undefined);
+        MockSetting.instances.length = 0;
+        const customTab: VaultDavSettingTab = new VaultDavSettingTab(
+            customApp,
+            customPlugin
+        );
+        customTab.display();
+        await getSettingByName("Remote base directory").textOnChange?.(
+            "custom-config/plugins/vaultdav"
+        );
+        expect(customPlugin.settings.remoteBaseDir).toBe("");
+        MockSetting.instances.length = 0;
+        tab.display();
 
         await getSettingByName("Remote base directory").textOnChange?.(".trash");
         expect(plugin.settings.remoteBaseDir).toBe("");
@@ -356,6 +397,20 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         );
         expect(plugin.settings.url).toBe(
             "https://cloud.example.com/remote.php/dav"
+        );
+
+        await getSettingByName("Server URL").textOnChange?.(
+            "  https://alice@domain.com:p@ss@cloud.example.com/remote.php/dav  "
+        );
+        expect(plugin.settings.url).toBe(
+            "https://cloud.example.com/remote.php/dav"
+        );
+
+        await getSettingByName("Server URL").textOnChange?.(
+            "https://cloud.example.com?email=user@example.org"
+        );
+        expect(plugin.settings.url).toBe(
+            "https://cloud.example.com?email=user@example.org"
         );
 
         await getSettingByName("Server URL").textOnChange?.(

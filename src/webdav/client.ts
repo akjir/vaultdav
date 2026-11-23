@@ -8,14 +8,18 @@ export const MAX_CHUNKED_FILE_SIZE_BYTES: number = 1024 * 1024 * 1024;
 export const MAX_FILE_SIZE_BYTES: number = util.MAX_FILE_SIZE_BYTES;
 
 const BYTES_PER_MB: number = 1024 * 1024;
+const CHUNK_ASSEMBLY_TIMEOUT_MS: number = 300000;
 const CHUNK_DOWNLOAD_CONCURRENCY: number = 4;
 const CHUNK_INDEX_PAD_LENGTH: number = 16;
 const CHUNK_UPLOAD_TIMEOUT_MS: number = 60000;
+const CONTENT_RANGE_REGEX: RegExp = /^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i;
 const DEFAULT_CHUNK_SIZE_MB: number = 10;
 const DEFAULT_CHUNKING_THRESHOLD_MB: number = 90;
 const DEFAULT_MAX_RETRIES: number = 3;
 const DEFAULT_RETRY_BASE_MS: number = 500;
 const FILES_DAV_MARKER: string = "/remote.php/dav/files/";
+const MAX_CHUNK_SIZE_MB: number = 512;
+const MAX_CHUNKING_THRESHOLD_MB: number = 512;
 const OCTET_STREAM_CONTENT_TYPE: string = "application/octet-stream";
 const RETRYABLE_STATUS_CODES: ReadonlySet<number> = new Set<number>([
     423,
@@ -31,6 +35,7 @@ const XML_CONTENT_TYPE: string = "application/xml; charset=utf-8";
 export class WebDavClient {
     private readonly authHeader: string;
     private readonly baseUrl: string;
+    private readonly configDir: string;
     private readonly retryBaseMs: number;
     private readonly settings: Readonly<VaultDavSettings>;
     private readonly uploadsRootUrl: string;
@@ -38,12 +43,15 @@ export class WebDavClient {
 
     public constructor(
         settings: VaultDavSettings,
-        retryBaseMs: number = DEFAULT_RETRY_BASE_MS
+        retryBaseMs: number = DEFAULT_RETRY_BASE_MS,
+        configDir: string = ""
     ) {
         const frozenSettings: Readonly<VaultDavSettings> = Object.freeze({
             ...settings
         });
         this.settings = frozenSettings;
+        this.configDir =
+            configDir !== "" ? util.normalizeVaultPath(configDir) : "";
         this.authHeader = util.encodeBasicAuth(
             frozenSettings.username,
             frozenSettings.appPassword
@@ -76,7 +84,7 @@ export class WebDavClient {
         if (normalizedBase === "") {
             throw new Error("WebDAV remoteBaseDir must not be empty");
         }
-        if (util.isExcludedPath(normalizedBase)) {
+        if (util.isExcludedPath(normalizedBase, this.configDir)) {
             throw new Error(
                 `WebDAV remoteBaseDir refused on excluded path: ${normalizedBase}`
             );
@@ -144,6 +152,39 @@ export class WebDavClient {
             false,
             "DELETE"
         );
+        if (isDirectory) {
+            const listResp: RequestUrlResponse = await this.requestWithRetry(
+                {
+                    body: buildPropfindBody(),
+                    contentType: XML_CONTENT_TYPE,
+                    depth: "1",
+                    method: "PROPFIND",
+                    path: normalizedPath
+                },
+                true
+            );
+            if (listResp.status === 404) {
+                return;
+            }
+            if (listResp.status !== 207 && listResp.status !== 200) {
+                throw this.formatStatusError(
+                    "PROPFIND",
+                    normalizedPath,
+                    listResp.status
+                );
+            }
+            const children: RemoteItem[] = parseMultiStatus(
+                listResp.text,
+                this.settings.username,
+                this.settings.remoteBaseDir,
+                normalizedPath
+            );
+            if (children.length > 0) {
+                throw new Error(
+                    `ENOTEMPTY: Remote directory not empty: ${normalizedPath}`
+                );
+            }
+        }
         const response: RequestUrlResponse = await this.requestWithRetry(
             {
                 method: "DELETE",
@@ -188,7 +229,8 @@ export class WebDavClient {
     public async downloadFileChunked(
         path: string,
         totalSize: number,
-        onProgress?: (completedChunks: number, totalChunks: number) => void
+        onProgress?: (completedChunks: number, totalChunks: number) => void,
+        expectedEtag?: string
     ): Promise<ArrayBuffer> {
         const normalizedPath: string = this.resolveScopedPath(path, false, "GET");
         if (!Number.isFinite(totalSize) || totalSize < 0) {
@@ -206,19 +248,34 @@ export class WebDavClient {
 
         const chunkSizeBytes: number = this.getChunkSizeBytes();
         const totalChunks: number = Math.ceil(safeTotalSize / chunkSizeBytes);
-        const assembled: Uint8Array<ArrayBuffer> = new Uint8Array(safeTotalSize);
-        let completedChunks: number = 0;
+        const state: {
+            assembled: Uint8Array<ArrayBuffer> | null;
+            completedChunks: number;
+            directResult: ArrayBuffer | null;
+            failed: boolean;
+            fullBodyReceived: boolean;
+            observedEtag: string;
+        } = {
+            assembled: null,
+            completedChunks: 0,
+            directResult: null,
+            failed: false,
+            fullBodyReceived: false,
+            observedEtag: util.normalizeEtag(expectedEtag)
+        };
 
-        const tasks: Array<() => Promise<void>> = [];
-        for (let i: number = 0; i < totalChunks; i += 1) {
-            const start: number = i * chunkSizeBytes;
+        const downloadChunk = async (chunkIndex: number): Promise<void> => {
+            if (state.failed || state.fullBodyReceived) {
+                return;
+            }
+            const start: number = chunkIndex * chunkSizeBytes;
             const end: number = Math.min(
                 start + chunkSizeBytes - 1,
                 safeTotalSize - 1
             );
             const expectedLength: number = end - start + 1;
 
-            tasks.push(async (): Promise<void> => {
+            try {
                 const response: RequestUrlResponse = await this.requestWithRetry(
                     {
                         headers: {
@@ -229,6 +286,9 @@ export class WebDavClient {
                     },
                     false
                 );
+                if (state.failed || state.fullBodyReceived) {
+                    return;
+                }
                 if (response.status !== 206 && response.status !== 200) {
                     throw this.formatStatusError(
                         "GET",
@@ -236,29 +296,108 @@ export class WebDavClient {
                         response.status
                     );
                 }
-                const chunkBytes: Uint8Array = new Uint8Array(response.arrayBuffer);
-                if (response.status === 206) {
-                    if (chunkBytes.byteLength !== expectedLength) {
+                const responseEtag: string = this.extractHeaderEtag(
+                    response.headers
+                );
+                if (responseEtag !== "") {
+                    if (
+                        state.observedEtag !== "" &&
+                        responseEtag !== state.observedEtag
+                    ) {
                         throw new Error(
-                            `WebDAV GET ${normalizedPath} returned unexpected chunk length (${chunkBytes.byteLength} bytes, expected ${expectedLength} bytes)`
+                            `WebDAV GET ${normalizedPath} ETag changed during chunked download (expected ${state.observedEtag}, got ${responseEtag})`
                         );
                     }
-                    assembled.set(chunkBytes, start);
-                } else {
-                    if (chunkBytes.byteLength !== safeTotalSize) {
-                        throw new Error(
-                            `WebDAV GET ${normalizedPath} returned unexpected full body length (${chunkBytes.byteLength} bytes, expected ${safeTotalSize} bytes)`
-                        );
-                    }
-                    assembled.set(chunkBytes.subarray(start, end + 1), start);
+                    state.observedEtag = responseEtag;
                 }
-                completedChunks += 1;
-                onProgress?.(completedChunks, totalChunks);
-            });
-        }
 
-        await util.runConcurrent(tasks, CHUNK_DOWNLOAD_CONCURRENCY);
-        return assembled.buffer;
+                const rawBuffer: ArrayBuffer = response.arrayBuffer;
+                if (response.status === 206) {
+                    const contentRange: string = this.extractHeaderValue(
+                        response.headers,
+                        "content-range"
+                    );
+                    if (contentRange !== "") {
+                        const rangeMatch: RegExpExecArray | null =
+                            CONTENT_RANGE_REGEX.exec(contentRange);
+                        const rangeStart: number =
+                            rangeMatch !== null ? Number(rangeMatch[1]) : -1;
+                        const rangeEnd: number =
+                            rangeMatch !== null ? Number(rangeMatch[2]) : -1;
+                        const rawRangeTotal: string =
+                            rangeMatch !== null ? (rangeMatch[3] ?? "") : "";
+                        const rangeTotalMatches: boolean =
+                            rawRangeTotal === "*" ||
+                            Number(rawRangeTotal) === safeTotalSize;
+                        if (
+                            rangeMatch === null ||
+                            rangeStart !== start ||
+                            rangeEnd !== end ||
+                            !rangeTotalMatches
+                        ) {
+                            throw new Error(
+                                `WebDAV GET ${normalizedPath} returned mismatched Content-Range: ${contentRange}`
+                            );
+                        }
+                    }
+                    if (rawBuffer.byteLength !== expectedLength) {
+                        throw new Error(
+                            `WebDAV GET ${normalizedPath} returned unexpected chunk length (${rawBuffer.byteLength} bytes, expected ${expectedLength} bytes)`
+                        );
+                    }
+                    if (
+                        chunkIndex === 0 &&
+                        totalChunks === 1 &&
+                        start === 0 &&
+                        state.assembled === null
+                    ) {
+                        state.directResult = rawBuffer;
+                        state.completedChunks = 1;
+                        onProgress?.(state.completedChunks, totalChunks);
+                        return;
+                    }
+                    if (state.assembled === null) {
+                        state.assembled = new Uint8Array(safeTotalSize);
+                    }
+                    state.assembled.set(new Uint8Array(rawBuffer), start);
+                    state.completedChunks += 1;
+                    onProgress?.(state.completedChunks, totalChunks);
+                } else {
+                    if (rawBuffer.byteLength !== safeTotalSize) {
+                        throw new Error(
+                            `WebDAV GET ${normalizedPath} returned unexpected full body length (${rawBuffer.byteLength} bytes, expected ${safeTotalSize} bytes)`
+                        );
+                    }
+                    if (state.assembled === null) {
+                        state.directResult = rawBuffer;
+                    } else {
+                        state.assembled.set(new Uint8Array(rawBuffer), 0);
+                    }
+                    state.fullBodyReceived = true;
+                    state.completedChunks = totalChunks;
+                    onProgress?.(state.completedChunks, totalChunks);
+                }
+            } catch (err: unknown) {
+                state.failed = true;
+                throw err;
+            }
+        };
+
+        await downloadChunk(0);
+        if (state.directResult !== null) {
+            return state.directResult;
+        }
+        if (!state.fullBodyReceived && totalChunks > 1) {
+            const remainingTasks: Array<() => Promise<void>> = [];
+            for (let i: number = 1; i < totalChunks; i += 1) {
+                const index: number = i;
+                remainingTasks.push(async (): Promise<void> => {
+                    await downloadChunk(index);
+                });
+            }
+            await util.runConcurrent(remainingTasks, CHUNK_DOWNLOAD_CONCURRENCY);
+        }
+        return state.assembled !== null ? state.assembled.buffer : new ArrayBuffer(0);
     }
 
     public async ensureRemoteBaseDir(): Promise<void> {
@@ -369,6 +508,21 @@ export class WebDavClient {
         return "";
     }
 
+    private extractHeaderValue(
+        headers: Record<string, string> | null | undefined,
+        lowerName: string
+    ): string {
+        if (headers === null || headers === undefined) {
+            return "";
+        }
+        for (const [key, value] of Object.entries(headers)) {
+            if (key.toLowerCase() === lowerName) {
+                return value.trim();
+            }
+        }
+        return "";
+    }
+
     public formatStatusError(method: string, path: string, status: number): Error {
         const displayPath: string = path === "" ? "/" : path;
         if (status === 401) {
@@ -426,15 +580,20 @@ export class WebDavClient {
     private getChunkSizeBytes(): number {
         const mb: number = this.settings.chunkSizeMB;
         if (Number.isFinite(mb) && mb > 0) {
-            return Math.max(1, Math.floor(mb * BYTES_PER_MB));
+            const clampedMb: number = Math.min(mb, MAX_CHUNK_SIZE_MB);
+            return Math.max(1, Math.floor(clampedMb * BYTES_PER_MB));
         }
         return DEFAULT_CHUNK_SIZE_MB * BYTES_PER_MB;
     }
 
     private getChunkingThresholdBytes(): number {
         const mb: number = this.settings.chunkingThresholdMB;
-        if (Number.isFinite(mb) && mb > 0) {
-            return Math.max(1, Math.floor(mb * BYTES_PER_MB));
+        if (Number.isFinite(mb) && mb >= 1) {
+            const clampedMb: number = Math.min(
+                MAX_CHUNKING_THRESHOLD_MB,
+                Math.floor(mb)
+            );
+            return clampedMb * BYTES_PER_MB;
         }
         return DEFAULT_CHUNKING_THRESHOLD_MB * BYTES_PER_MB;
     }
@@ -497,8 +656,7 @@ export class WebDavClient {
             url
         };
 
-        let attempt: number = 0;
-        while (true) {
+        for (let attempt: number = 0; attempt <= DEFAULT_MAX_RETRIES; attempt += 1) {
             let response: RequestUrlResponse | null = null;
             try {
                 response = await this.executeRequest(
@@ -511,19 +669,25 @@ export class WebDavClient {
                 const isMockError: boolean =
                     err instanceof Error &&
                     err.message.includes("requestUrl must be mocked");
-                if (!isMockError && attempt < DEFAULT_MAX_RETRIES) {
+                const isTimeoutError: boolean =
+                    err instanceof Error &&
+                    err.message.includes("timed out after");
+                const allowRetry: boolean =
+                    !isMockError &&
+                    (!isTimeoutError || options.retryOnTimeout !== false);
+                if (allowRetry && attempt < DEFAULT_MAX_RETRIES) {
                     const waitMs: number = this.retryBaseMs * Math.pow(2, attempt);
                     log.debug(
                         `Retrying ${options.method} ${options.path} after request error (${waitMs}ms)`
                     );
                     await util.delay(waitMs);
-                    attempt += 1;
                     continue;
                 }
                 throw err;
             }
             if (
                 RETRYABLE_STATUS_CODES.has(response.status) &&
+                !(response.status === 504 && options.retryOnTimeout === false) &&
                 attempt < DEFAULT_MAX_RETRIES
             ) {
                 const waitMs: number = this.retryBaseMs * Math.pow(2, attempt);
@@ -531,11 +695,13 @@ export class WebDavClient {
                     `Retrying ${options.method} ${options.path} after HTTP ${response.status} (${waitMs}ms)`
                 );
                 await util.delay(waitMs);
-                attempt += 1;
                 continue;
             }
             return response;
         }
+        throw new Error(
+            `WebDAV ${options.method} ${options.path} exhausted retry attempts`
+        );
     }
 
     private resolveScopedPath(
@@ -544,8 +710,7 @@ export class WebDavClient {
         method: string
     ): string {
         this.assertValidRemoteBaseDir();
-        const trimmed: string = path.trim();
-        const isExplicitRoot: boolean = trimmed === "" || trimmed === "/";
+        const isExplicitRoot: boolean = util.isExplicitRootPath(path);
         const normalizedPath: string = util.normalizeVaultPath(path);
         if (normalizedPath === "") {
             if (allowRoot && isExplicitRoot) {
@@ -553,7 +718,7 @@ export class WebDavClient {
             }
             throw new Error(`WebDAV ${method} refused on empty root path`);
         }
-        if (util.isExcludedPath(normalizedPath)) {
+        if (util.isExcludedPath(normalizedPath, this.configDir)) {
             throw new Error(
                 `WebDAV ${method} refused on excluded path: ${normalizedPath}`
             );
@@ -769,7 +934,8 @@ export class WebDavClient {
                     },
                     method: "MOVE",
                     path: normalizedPath,
-                    timeoutMs: CHUNK_UPLOAD_TIMEOUT_MS
+                    retryOnTimeout: false,
+                    timeoutMs: CHUNK_ASSEMBLY_TIMEOUT_MS
                 },
                 false,
                 assembleUrl
@@ -786,7 +952,15 @@ export class WebDavClient {
                 );
             }
         } catch (err: unknown) {
-            await this.cleanupTransferDir(transferDirUrl, normalizedPath);
+            const isMoveTimeout: boolean =
+                (moveResp === null &&
+                    err instanceof Error &&
+                    err.message.includes("WebDAV MOVE") &&
+                    err.message.includes("timed out after")) ||
+                moveResp?.status === 504;
+            if (!isMoveTimeout) {
+                await this.cleanupTransferDir(transferDirUrl, normalizedPath);
+            }
             throw err;
         }
 
@@ -853,7 +1027,7 @@ export class WebDavClient {
                     const depth: number = util.getPathDepth(item.path);
                     if (
                         item.path === "" ||
-                        util.isExcludedPath(item.path) ||
+                        util.isExcludedPath(item.path, this.configDir) ||
                         depth > util.MAX_WALK_DEPTH
                     ) {
                         continue;

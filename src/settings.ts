@@ -1,4 +1,10 @@
-import { type App, PluginSettingTab, Setting, SettingGroup } from "obsidian";
+import {
+    type App,
+    PluginSettingTab,
+    requireApiVersion,
+    Setting,
+    SettingGroup
+} from "obsidian";
 import type VaultDavPlugin from "./main";
 import type { ConflictStrategy, VaultDavSettings } from "./types";
 import { util } from "./utilities";
@@ -7,6 +13,10 @@ export interface SettingGroupBuilder {
     addSetting: (cb: (setting: Setting) => void) => SettingGroupBuilder;
     setHeading: (text: string) => SettingGroupBuilder;
 }
+
+export type SettingGroupConstructor = new (
+    containerEl: HTMLElement
+) => SettingGroupBuilder;
 
 export const DEFAULT_SETTINGS: Readonly<VaultDavSettings> =
     Object.freeze<VaultDavSettings>({
@@ -20,18 +30,24 @@ export const DEFAULT_SETTINGS: Readonly<VaultDavSettings> =
         username: ""
     });
 export const MAX_CHUNK_SIZE_MB: number = 512;
-export const MAX_CHUNKING_THRESHOLD_MB: number = 1024;
+export const MAX_CHUNKING_THRESHOLD_MB: number = 512;
 export const MAX_SYNC_INTERVAL_MINUTES: number = 10080;
 
-const CONTROL_CHAR_REGEX: RegExp = /[\x00-\x1f\x7f]/;
-const URL_USERINFO_REGEX: RegExp = /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/\s@]+@/i;
+const URL_USERINFO_REGEX: RegExp = /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/\s?#]+@/i;
 
 export function createSettingGroup(
     containerEl: HTMLElement,
-    groupConstructor: typeof SettingGroup | null | undefined = SettingGroup
+    groupConstructor?: SettingGroupConstructor | null
 ): SettingGroupBuilder {
-    if (typeof groupConstructor === "function") {
-        return new groupConstructor(containerEl);
+    if (groupConstructor !== undefined) {
+        if (typeof groupConstructor === "function") {
+            return new groupConstructor(containerEl);
+        }
+    } else if (
+        requireApiVersion("1.11.0") &&
+        typeof SettingGroup === "function"
+    ) {
+        return new SettingGroup(containerEl);
     }
     const fallbackGroup: SettingGroupBuilder = {
         addSetting: (cb: (setting: Setting) => void): SettingGroupBuilder => {
@@ -46,29 +62,62 @@ export function createSettingGroup(
     return fallbackGroup;
 }
 
-function sanitizeAppPassword(value: string): string {
-    if (CONTROL_CHAR_REGEX.test(value)) {
+export function sanitizeAppPassword(value: string): string {
+    if (util.hasControlChars(value)) {
         return "";
     }
     return value.trim();
 }
 
-function sanitizeRemoteBaseDir(value: string): string {
+export function sanitizeChunkSizeMB(value: unknown): number {
+    if (
+        typeof value === "number" &&
+        Number.isFinite(value) &&
+        value >= 1
+    ) {
+        return Math.min(MAX_CHUNK_SIZE_MB, Math.floor(value));
+    }
+    return DEFAULT_SETTINGS.chunkSizeMB;
+}
+
+export function sanitizeChunkingThresholdMB(value: unknown): number {
+    if (
+        typeof value === "number" &&
+        Number.isFinite(value) &&
+        value >= 1
+    ) {
+        return Math.min(MAX_CHUNKING_THRESHOLD_MB, Math.floor(value));
+    }
+    return DEFAULT_SETTINGS.chunkingThresholdMB;
+}
+
+export function sanitizeRemoteBaseDir(value: string, configDir: string): string {
     const normalized: string = util.normalizeVaultPath(value);
-    return normalized !== "" && util.isExcludedPath(normalized)
+    return normalized !== "" && util.isExcludedPath(normalized, configDir)
         ? ""
         : normalized;
 }
 
-function sanitizeServerUrl(value: string): string {
-    if (CONTROL_CHAR_REGEX.test(value)) {
+export function sanitizeServerUrl(value: string): string {
+    if (util.hasControlChars(value)) {
         return "";
     }
     return value.trim().replace(URL_USERINFO_REGEX, "$1");
 }
 
-function sanitizeUsername(value: string): string {
-    if (CONTROL_CHAR_REGEX.test(value)) {
+export function sanitizeSyncInterval(value: unknown): number {
+    if (
+        typeof value === "number" &&
+        Number.isFinite(value) &&
+        value >= 0
+    ) {
+        return Math.min(MAX_SYNC_INTERVAL_MINUTES, Math.floor(value));
+    }
+    return DEFAULT_SETTINGS.syncInterval;
+}
+
+export function sanitizeUsername(value: string): string {
+    if (util.hasControlChars(value)) {
         return "";
     }
     const trimmed: string = value.normalize("NFC").trim();
@@ -126,7 +175,7 @@ export class VaultDavSettingTab extends PluginSettingTab {
                         text.inputEl.autocapitalize = "none";
                         text.inputEl.spellcheck = false;
                         return text
-                            .setPlaceholder("username")
+                            .setPlaceholder("Enter username")
                             .setValue(this.pluginInstance.settings.username)
                             .onChange(async (value: string): Promise<void> => {
                                 this.pluginInstance.settings.username =
@@ -139,7 +188,7 @@ export class VaultDavSettingTab extends PluginSettingTab {
                 setting
                     .setName("App password")
                     .setDesc(
-                        "Nextcloud app password for HTTP Basic authentication."
+                        "Nextcloud app password for HTTP basic authentication."
                     )
                     .addText((text) => {
                         text.inputEl.type = "password";
@@ -171,7 +220,10 @@ export class VaultDavSettingTab extends PluginSettingTab {
                             )
                             .onChange(async (value: string): Promise<void> => {
                                 this.pluginInstance.settings.remoteBaseDir =
-                                    sanitizeRemoteBaseDir(value);
+                                    sanitizeRemoteBaseDir(
+                                        value,
+                                        this.app.vault.configDir
+                                    );
                                 await this.pluginInstance.saveSettings();
                             });
                     });

@@ -5,7 +5,23 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Changed
-- Group related settings (`Server URL` / `Username` / `App password` / `Remote base directory`, `Sync interval` / `Conflict strategy`, `Test connection`, and `Advanced sync` options) into `SettingGroup` blocks with fallback support for older Obsidian versions.
+- Group related settings (`Server URL` / `Username` / `App password` / `Remote base directory`, `Sync interval` / `Conflict strategy`, `Test connection`, and `Advanced sync` options) into `SettingGroup` blocks gated by `requireApiVersion("1.11.0")` with fallback support for older Obsidian versions.
+- Derive sync state paths and config directory exclusions dynamically from `Vault#configDir` instead of hardcoding `.obsidian`.
+- Add required `author` and `authorUrl` fields to `manifest.json`, align `description` with Obsidian Community Directory guidelines, and document iOS TLS and privacy requirements in `README.md`.
+- Enforce strict Sentence case on remaining settings descriptions and placeholders (`HTTP basic authentication`, `Enter username`) and route `log.info` through `console.debug` for `no-console` compliance.
+- Optimize mobile memory and large-vault sync performance by allocating chunked download buffers lazily (zero-copy HTTP `200`/single-chunk fast path), eliminating `O(C * N)` conflict path scans and redundant path normalization in `buildSyncPlan()`/`executePlan()`, running `adapter.stat()` concurrently in `walkLocal()`, and avoiding full record-map cloning during `SyncStateStore.save()`.
+
+### Fixed
+- Replace control-character regex literals (`no-control-regex`) and `while (true)` loops (`no-constant-condition`) with `charCodeAt` checks and bounded loops.
+- Update the `/release` skill to tag releases as `X.Y.Z` without a `v` prefix for Obsidian Community Plugin compatibility.
+- Refresh sync state records on equal-metadata `noop` branches (`F5`) so subsequent deletions and edits do not resurrect files or trigger false conflicts.
+- Verify remote directories are empty via `PROPFIND Depth: 1` before issuing recursive WebDAV `DELETE`.
+- Resolve remote path and parent directory casing on uploads, conflict copies, remote directory creations, and remote deletions to prevent `409 Conflict` errors and duplicate files on case-sensitive Nextcloud servers.
+- Clamp and sanitize persisted settings in `loadSettings()`, `configureAutoSync()`, and `WebDavClient` (cap `chunkingThresholdMB` at `512` MB, guard `chunkSizeMB` multiplication against `Infinity`, reject `:` in usernames), serialize `saveSettings()` writes, and guard mobile `addStatusBarItem()` against `undefined`.
+- Validate response `ETag` and `Content-Range` headers during chunked downloads, short-circuit HTTP `200` fallback after the first request, increase chunk assembly `MOVE` timeout without retrying client-timed-out assemblies, and reject control-character whitespace in WebDAV root-path checks.
+- Support `/remote.php/dav` and `/remote.php/webdav` server URL inputs, redact case-insensitive `Basic` tokens and `@`-containing userinfo without corrupting query strings, omit invalid `mtime: 0`/`ctime` write options, index `SyncStateStore` lookups in `O(1)`, and handle Linux Unicode NFD paths during local vault traversal.
+- Canonicalize remote child paths under existing local folder casing and resolve local NFD write paths in `executeDownload()`, `executeConflict()`, and `createLocalDirectory()` to prevent duplicate folders and subsequent remote deletions on case-sensitive or NFD Linux filesystems.
+- Abort queued workers immediately on failure in `util.runConcurrent()`, suppress late chunked-download progress callbacks after failure or `200 OK` fallback, treat HTTP `504 Gateway Timeout` on chunk assembly `MOVE` identically to client-side timeouts, and prevent leaked auto-sync timers when `onunload()` runs during in-flight `saveSettings()` or `onload()`.
 
 ## [0.1.0] - 2026-10-15
 

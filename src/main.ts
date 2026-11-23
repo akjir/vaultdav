@@ -1,6 +1,17 @@
 import { Plugin } from "obsidian";
 import { log, redactSensitiveText } from "./log";
-import { DEFAULT_SETTINGS, VaultDavSettingTab } from "./settings";
+import {
+    DEFAULT_SETTINGS,
+    MAX_SYNC_INTERVAL_MINUTES,
+    VaultDavSettingTab,
+    sanitizeAppPassword,
+    sanitizeChunkSizeMB,
+    sanitizeChunkingThresholdMB,
+    sanitizeRemoteBaseDir,
+    sanitizeServerUrl,
+    sanitizeSyncInterval,
+    sanitizeUsername
+} from "./settings";
 import { SyncEngine } from "./sync/engine";
 import { SyncStateStore } from "./sync/state";
 import type {
@@ -15,16 +26,24 @@ import { WebDavClient } from "./webdav/client";
 export default class VaultDavPlugin extends Plugin implements ProgressReporter {
     private activeSyncInterval: number = 0;
     public isSyncing: boolean = false;
+    private isUnloaded: boolean = false;
+    private saveSettingsPromise: Promise<void> = Promise.resolve();
     public settings: VaultDavSettings = { ...DEFAULT_SETTINGS };
     private stateStore: SyncStateStore | null = null;
     private statusBarItem: HTMLElement | null = null;
     private syncIntervalId: number | null = null;
 
     public configureAutoSync(): void {
+        if (this.isUnloaded) {
+            return;
+        }
         const targetMinutes: number =
             Number.isFinite(this.settings.syncInterval) &&
             this.settings.syncInterval > 0
-                ? Math.floor(this.settings.syncInterval)
+                ? Math.min(
+                      MAX_SYNC_INTERVAL_MINUTES,
+                      Math.floor(this.settings.syncInterval)
+                  )
                 : 0;
         if (
             targetMinutes === this.activeSyncInterval &&
@@ -47,11 +66,14 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
     }
 
     private getResolvedSettings(): VaultDavSettings {
-        const normalizedRemoteBaseDir: string = util.normalizeVaultPath(
-            this.settings.remoteBaseDir
+        const configDir: string = this.app.vault.configDir;
+        const normalizedRemoteBaseDir: string = sanitizeRemoteBaseDir(
+            this.settings.remoteBaseDir,
+            configDir
         );
-        const normalizedVaultName: string = util.normalizeVaultPath(
-            this.app.vault.getName()
+        const normalizedVaultName: string = sanitizeRemoteBaseDir(
+            this.app.vault.getName(),
+            configDir
         );
         const fallbackBaseDir: string =
             normalizedRemoteBaseDir !== ""
@@ -79,23 +101,16 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
             typeof loaded === "object" && loaded !== null
                 ? (loaded as Record<string, unknown>)
                 : {};
+        const configDir: string = this.app.vault.configDir;
 
         const appPassword: string =
             typeof record.appPassword === "string"
-                ? record.appPassword.trim()
+                ? sanitizeAppPassword(record.appPassword)
                 : DEFAULT_SETTINGS.appPassword;
-        const chunkSizeMB: number =
-            typeof record.chunkSizeMB === "number" &&
-            Number.isFinite(record.chunkSizeMB) &&
-            record.chunkSizeMB >= 1
-                ? Math.floor(record.chunkSizeMB)
-                : DEFAULT_SETTINGS.chunkSizeMB;
-        const chunkingThresholdMB: number =
-            typeof record.chunkingThresholdMB === "number" &&
-            Number.isFinite(record.chunkingThresholdMB) &&
-            record.chunkingThresholdMB >= 1
-                ? Math.floor(record.chunkingThresholdMB)
-                : DEFAULT_SETTINGS.chunkingThresholdMB;
+        const chunkSizeMB: number = sanitizeChunkSizeMB(record.chunkSizeMB);
+        const chunkingThresholdMB: number = sanitizeChunkingThresholdMB(
+            record.chunkingThresholdMB
+        );
         const conflictStrategy: ConflictStrategy =
             record.conflictStrategy === "newest_wins" ||
             record.conflictStrategy === "keep_both"
@@ -103,21 +118,16 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
                 : DEFAULT_SETTINGS.conflictStrategy;
         const remoteBaseDir: string =
             typeof record.remoteBaseDir === "string"
-                ? util.normalizeVaultPath(record.remoteBaseDir)
+                ? sanitizeRemoteBaseDir(record.remoteBaseDir, configDir)
                 : DEFAULT_SETTINGS.remoteBaseDir;
-        const syncInterval: number =
-            typeof record.syncInterval === "number" &&
-            Number.isFinite(record.syncInterval) &&
-            record.syncInterval >= 0
-                ? Math.floor(record.syncInterval)
-                : DEFAULT_SETTINGS.syncInterval;
+        const syncInterval: number = sanitizeSyncInterval(record.syncInterval);
         const url: string =
             typeof record.url === "string"
-                ? record.url.trim()
+                ? sanitizeServerUrl(record.url)
                 : DEFAULT_SETTINGS.url;
         const username: string =
             typeof record.username === "string"
-                ? record.username.trim()
+                ? sanitizeUsername(record.username)
                 : DEFAULT_SETTINGS.username;
 
         this.settings = {
@@ -133,9 +143,18 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
     }
 
     public async onload(): Promise<void> {
+        this.isUnloaded = false;
         await this.loadSettings();
-        this.stateStore = new SyncStateStore(this.app.vault.adapter);
-        this.statusBarItem = this.addStatusBarItem();
+        if (this.isUnloaded) {
+            return;
+        }
+        const configDir: string = this.app.vault.configDir;
+        this.stateStore = new SyncStateStore(
+            this.app.vault.adapter,
+            util.getSyncStateFilePath(configDir),
+            configDir
+        );
+        this.statusBarItem = this.addStatusBarItem() ?? null;
 
         this.addRibbonIcon("refresh-cw", "Synchronize with Nextcloud", () => {
             void this.triggerSync();
@@ -162,6 +181,7 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
     }
 
     public onunload(): void {
+        this.isUnloaded = true;
         if (this.syncIntervalId !== null) {
             window.clearInterval(this.syncIntervalId);
             this.syncIntervalId = null;
@@ -172,7 +192,7 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
     }
 
     public reportProgress(message: string): void {
-        if (this.statusBarItem === null) {
+        if (this.statusBarItem === null || this.statusBarItem === undefined) {
             return;
         }
         const safeText: string =
@@ -184,9 +204,18 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
         }
     }
 
-    public async saveSettings(): Promise<void> {
-        await this.saveData(this.settings);
-        this.configureAutoSync();
+    public saveSettings(): Promise<void> {
+        const snapshot: VaultDavSettings = { ...this.settings };
+        const writeTask = async (): Promise<void> => {
+            await this.saveData(snapshot);
+            this.configureAutoSync();
+        };
+        const nextPromise: Promise<void> = this.saveSettingsPromise.then(
+            writeTask,
+            writeTask
+        );
+        this.saveSettingsPromise = nextPromise.catch(() => undefined);
+        return nextPromise;
     }
 
     public async testConnection(): Promise<boolean> {
@@ -196,7 +225,11 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
         }
         try {
             const resolvedSettings: VaultDavSettings = this.getResolvedSettings();
-            const client: WebDavClient = new WebDavClient(resolvedSettings);
+            const client: WebDavClient = new WebDavClient(
+                resolvedSettings,
+                undefined,
+                this.app.vault.configDir
+            );
             const ok: boolean = await client.checkConnection();
             if (ok) {
                 log.notify("Connection to Nextcloud WebDAV succeeded.");
@@ -225,9 +258,19 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
         this.isSyncing = true;
         try {
             const resolvedSettings: VaultDavSettings = this.getResolvedSettings();
+            const configDir: string = this.app.vault.configDir;
             const store: SyncStateStore =
-                this.stateStore ?? new SyncStateStore(this.app.vault.adapter);
-            const client: WebDavClient = new WebDavClient(resolvedSettings);
+                this.stateStore ??
+                new SyncStateStore(
+                    this.app.vault.adapter,
+                    util.getSyncStateFilePath(configDir),
+                    configDir
+                );
+            const client: WebDavClient = new WebDavClient(
+                resolvedSettings,
+                undefined,
+                configDir
+            );
             const engine: SyncEngine = new SyncEngine(
                 this.app.vault,
                 client,

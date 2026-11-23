@@ -1090,8 +1090,17 @@ describe("WebDavClient", () => {
         const mutableSettings: VaultDavSettings = { ...DEFAULT_TEST_SETTINGS };
         const client: WebDavClient = new WebDavClient(mutableSettings, 1);
 
-        // Traversal paths must throw in listDirectory and statRemote instead of normalizing to ""
-        for (const badPath of [".", "..", "../secret", "Notes/../../secret", "a\0b"]) {
+        // Traversal and control-char paths must throw in listDirectory and statRemote instead of normalizing to ""
+        for (const badPath of [
+            ".",
+            "..",
+            "../secret",
+            "Notes/../../secret",
+            "a\0b",
+            "\n",
+            "\r/",
+            "\t"
+        ]) {
             await expect(client.listDirectory(badPath)).rejects.toThrow(
                 /refused on empty root path/
             );
@@ -1144,6 +1153,387 @@ describe("WebDavClient", () => {
             );
         }
         expect(requestSpy).not.toHaveBeenCalled();
+    });
+
+    it("verifies remote directory emptiness before recursive WebDAV DELETE and returns cleanly on 404", async () => {
+        const client: WebDavClient = new WebDavClient(DEFAULT_TEST_SETTINGS, 1);
+
+        const nonEmptyXml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/SubVault/Project/</d:href>
+        <d:propstat>
+            <d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/SubVault/Project/.git/</d:href>
+        <d:propstat>
+            <d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+
+        const nonEmptyMethods: string[] = [];
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (req: RequestUrlParam | string): RequestUrlResponsePromise => {
+                const param: RequestUrlParam =
+                    typeof req === "string" ? { url: req } : req;
+                nonEmptyMethods.push(param.method ?? "GET");
+                return createMockResponse(207, nonEmptyXml);
+            }
+        );
+
+        await expect(client.deleteItem("Project", true)).rejects.toThrow(/ENOTEMPTY/);
+        expect(nonEmptyMethods).toEqual(["PROPFIND"]);
+
+        const emptyXml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/SubVault/EmptyDir/</d:href>
+        <d:propstat>
+            <d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+        const emptyMethods: string[] = [];
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (req: RequestUrlParam | string): RequestUrlResponsePromise => {
+                const param: RequestUrlParam =
+                    typeof req === "string" ? { url: req } : req;
+                emptyMethods.push(param.method ?? "GET");
+                if (param.method === "PROPFIND") {
+                    return createMockResponse(207, emptyXml);
+                }
+                return createMockResponse(204);
+            }
+        );
+
+        await client.deleteItem("EmptyDir", true);
+        expect(emptyMethods).toEqual(["PROPFIND", "DELETE"]);
+
+        const goneMethods: string[] = [];
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (req: RequestUrlParam | string): RequestUrlResponsePromise => {
+                const param: RequestUrlParam =
+                    typeof req === "string" ? { url: req } : req;
+                goneMethods.push(param.method ?? "GET");
+                return createMockResponse(404);
+            }
+        );
+
+        await client.deleteItem("AlreadyGone", true);
+        expect(goneMethods).toEqual(["PROPFIND"]);
+    });
+
+    it("enforces ETag and Content-Range integrity, single-request HTTP 200 short-circuit, clamped chunk bounds, custom configDir, and non-retried MOVE timeout", async () => {
+        // 1. Single-request HTTP 200 short-circuit when server ignores Range
+        const fullPayload: Uint8Array<ArrayBuffer> = new Uint8Array([
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+        ]);
+        let http200Requests: number = 0;
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (): RequestUrlResponsePromise => {
+                http200Requests += 1;
+                return createMockResponse(
+                    200,
+                    "",
+                    { ETag: '"same-etag"' },
+                    fullPayload.buffer
+                );
+            }
+        );
+
+        const smallChunkClient: WebDavClient = new WebDavClient(
+            {
+                ...DEFAULT_TEST_SETTINGS,
+                chunkSizeMB: 4 / (1024 * 1024)
+            },
+            1
+        );
+        const downloaded200: ArrayBuffer =
+            await smallChunkClient.downloadFileChunked(
+                "Notes/NoRange.bin",
+                fullPayload.byteLength,
+                undefined,
+                "same-etag"
+            );
+        expect(new Uint8Array(downloaded200)).toEqual(fullPayload);
+        expect(http200Requests).toBe(1);
+
+        // 2. Mid-download ETag drift must reject to prevent torn reads
+        let driftCall: number = 0;
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (req: RequestUrlParam | string): RequestUrlResponsePromise => {
+                driftCall += 1;
+                const param: RequestUrlParam =
+                    typeof req === "string" ? { url: req } : req;
+                const range: string = param.headers?.["Range"] ?? "";
+                const match: RegExpExecArray | null =
+                    /^bytes=(\d+)-(\d+)$/.exec(range);
+                const start: number = Number(match?.[1] ?? 0);
+                const end: number = Number(match?.[2] ?? 0);
+                return createMockResponse(
+                    206,
+                    "",
+                    {
+                        "Content-Range": `bytes ${start}-${end}/10`,
+                        ETag: driftCall === 1 ? '"v1"' : '"v2"'
+                    },
+                    fullPayload.buffer.slice(start, end + 1)
+                );
+            }
+        );
+        await expect(
+            smallChunkClient.downloadFileChunked(
+                "Notes/Drifting.bin",
+                10,
+                undefined,
+                "v1"
+            )
+        ).rejects.toThrow(/ETag changed/i);
+
+        // 3. Mismatched Content-Range header must reject
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (): RequestUrlResponsePromise =>
+                createMockResponse(
+                    206,
+                    "",
+                    {
+                        "Content-Range": "bytes 4-7/10",
+                        ETag: '"v1"'
+                    },
+                    fullPayload.buffer.slice(0, 4)
+                )
+        );
+        await expect(
+            smallChunkClient.downloadFileChunked(
+                "Notes/BadRange.bin",
+                10,
+                undefined,
+                "v1"
+            )
+        ).rejects.toThrow(/Content-Range/i);
+
+        // 4. Extreme chunkSizeMB (1e305) must clamp instead of overflowing to Infinity (0 chunks / zero-fill)
+        let extremeRequests: number = 0;
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (): RequestUrlResponsePromise => {
+                extremeRequests += 1;
+                return createMockResponse(
+                    206,
+                    "",
+                    { "Content-Range": "bytes 0-9/10" },
+                    fullPayload.buffer
+                );
+            }
+        );
+        const extremeClient: WebDavClient = new WebDavClient(
+            {
+                ...DEFAULT_TEST_SETTINGS,
+                chunkSizeMB: 1e305,
+                chunkingThresholdMB: 0.5
+            },
+            1
+        );
+        const extremeDownloaded: ArrayBuffer =
+            await extremeClient.downloadFileChunked("Notes/Extreme.bin", 10);
+        expect(extremeRequests).toBe(1);
+        expect(new Uint8Array(extremeDownloaded)).toEqual(fullPayload);
+
+        // Fractional chunkingThresholdMB (< 1) falls back to 90 MB (matching SyncEngine) instead of rejecting 1 MB files
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (): RequestUrlResponsePromise =>
+                createMockResponse(201, "", { ETag: '"ok-etag"' })
+        );
+        const oneMbBuffer: ArrayBuffer = new ArrayBuffer(1024 * 1024);
+        const uploadedOneMb: RemoteItem = await extremeClient.uploadFile(
+            "Notes/OneMb.bin",
+            oneMbBuffer,
+            1728928291000
+        );
+        expect(uploadedOneMb.etag).toBe("ok-etag");
+
+        // 5. Custom configDir is refused by client guards
+        const customConfigClient: WebDavClient = new WebDavClient(
+            DEFAULT_TEST_SETTINGS,
+            1,
+            ".obsidian-mobile"
+        );
+        await expect(
+            customConfigClient.uploadFile(
+                ".obsidian-mobile/plugins/vaultdav/data.json",
+                new ArrayBuffer(4),
+                1728928291000
+            )
+        ).rejects.toThrow(/refused on excluded path/);
+
+        // 6. Client timeout on MOVE /.file must not retry MOVE multiple times
+        let moveCalls: number = 0;
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (req: RequestUrlParam | string): RequestUrlResponsePromise => {
+                const param: RequestUrlParam =
+                    typeof req === "string" ? { url: req } : req;
+                if (param.method === "MKCOL" || param.method === "PUT") {
+                    return createMockResponse(201);
+                }
+                if (param.method === "MOVE") {
+                    moveCalls += 1;
+                    const errPromise: Promise<RequestUrlResponse> =
+                        Promise.reject(
+                            new Error(
+                                "WebDAV MOVE Notes/Slow.bin timed out after 300000ms"
+                            )
+                        );
+                    const rejectedAb: Promise<ArrayBuffer> = Promise.reject(
+                        new Error("timeout")
+                    );
+                    const rejectedJson: Promise<unknown> = Promise.reject(
+                        new Error("timeout")
+                    );
+                    const rejectedText: Promise<string> = Promise.reject(
+                        new Error("timeout")
+                    );
+                    void rejectedAb.catch(() => undefined);
+                    void rejectedJson.catch(() => undefined);
+                    void rejectedText.catch(() => undefined);
+                    return Object.assign(errPromise, {
+                        arrayBuffer: rejectedAb,
+                        json: rejectedJson,
+                        text: rejectedText
+                    });
+                }
+                return createMockResponse(204);
+            }
+        );
+        await expect(
+            smallChunkClient.uploadFileChunked(
+                "Notes/Slow.bin",
+                new Uint8Array([1, 2, 3, 4]).buffer,
+                1728928291000
+            )
+        ).rejects.toThrow(/timed out/i);
+        expect(moveCalls).toBe(1);
+    });
+
+    it("avoids retrying or deleting staging dir on HTTP 504 MOVE assembly timeout, returns HTTP 200 chunked download directly without copying, and aborts remaining chunks on failure", async () => {
+        const smallChunkClient: WebDavClient = new WebDavClient(
+            {
+                ...DEFAULT_TEST_SETTINGS,
+                chunkSizeMB: 4 / (1024 * 1024)
+            },
+            0
+        );
+
+        // 1. HTTP 504 on MOVE /.file must neither retry MOVE nor DELETE the active staging dir
+        const move504Methods: string[] = [];
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (req: RequestUrlParam | string): RequestUrlResponsePromise => {
+                const param: RequestUrlParam =
+                    typeof req === "string" ? { url: req } : req;
+                const method: string = param.method ?? "GET";
+                move504Methods.push(method);
+                if (method === "MKCOL" || method === "PUT") {
+                    return createMockResponse(201);
+                }
+                if (method === "MOVE") {
+                    return createMockResponse(504, "Gateway Timeout");
+                }
+                return createMockResponse(204);
+            }
+        );
+
+        await expect(
+            smallChunkClient.uploadFileChunked(
+                "Notes/GatewayTimeout.bin",
+                new Uint8Array([1, 2, 3, 4, 5, 6]).buffer,
+                1728928291000
+            )
+        ).rejects.toThrow(/504 Gateway Timeout/);
+        expect(move504Methods).toEqual(["MKCOL", "PUT", "PUT", "MOVE"]);
+
+        // 2. HTTP 200 fallback on chunk 0 returns the exact response ArrayBuffer directly without extra full-file copy
+        const fullPayload: ArrayBuffer = new Uint8Array([
+            10, 20, 30, 40, 50, 60, 70, 80
+        ]).buffer;
+        vi.spyOn(obsidian, "requestUrl").mockImplementationOnce(
+            (): RequestUrlResponsePromise =>
+                createMockResponse(200, "", { ETag: '"direct-200"' }, fullPayload)
+        );
+        const directDownloaded: ArrayBuffer =
+            await smallChunkClient.downloadFileChunked(
+                "Notes/Direct200.bin",
+                fullPayload.byteLength
+            );
+        expect(directDownloaded).toBe(fullPayload);
+
+        // 3. Failure in chunk 1 aborts remaining queued chunks (chunks 5..9) and suppresses late onProgress callbacks
+        const requestedRanges: string[] = [];
+        const progressEvents: Array<[number, number]> = [];
+        let rejectSettled: boolean = false;
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (req: RequestUrlParam | string): RequestUrlResponsePromise => {
+                const param: RequestUrlParam =
+                    typeof req === "string" ? { url: req } : req;
+                const range: string = param.headers?.Range ?? "";
+                requestedRanges.push(range);
+                if (range === "bytes=0-3") {
+                    return createMockResponse(
+                        206,
+                        "",
+                        { "Content-Range": "bytes 0-3/40", ETag: '"etag-10"' },
+                        new Uint8Array([0, 1, 2, 3]).buffer
+                    );
+                }
+                if (range === "bytes=4-7") {
+                    return createMockResponse(
+                        206,
+                        "",
+                        { "Content-Range": "bytes 4-7/40", ETag: '"etag-changed"' },
+                        new Uint8Array([4, 5, 6, 7]).buffer
+                    );
+                }
+                const delayedResp: Promise<RequestUrlResponse> = new Promise(
+                    (resolve) => {
+                        setTimeout(() => {
+                            resolve({
+                                arrayBuffer: new Uint8Array([8, 9, 10, 11]).buffer,
+                                headers: { ETag: '"etag-10"' },
+                                json: {},
+                                status: 206,
+                                text: ""
+                            });
+                        }, 15);
+                    }
+                );
+                return Object.assign(delayedResp, {
+                    arrayBuffer: delayedResp.then((r) => r.arrayBuffer),
+                    json: delayedResp.then((r) => r.json),
+                    text: delayedResp.then((r) => r.text)
+                });
+            }
+        );
+
+        await expect(
+            smallChunkClient.downloadFileChunked(
+                "Notes/AbortMidDownload.bin",
+                40,
+                (done: number, total: number): void => {
+                    progressEvents.push([done, total]);
+                    expect(rejectSettled).toBe(false);
+                },
+                '"etag-10"'
+            )
+        ).rejects.toThrow(/ETag changed/i);
+        rejectSettled = true;
+        await new Promise<void>((resolve) => setTimeout(resolve, 40));
+
+        // Chunk 0 + up to 4 parallel workers (chunks 1..4) = at most 5 requests out of 10 chunks
+        expect(requestedRanges.length).toBeLessThanOrEqual(5);
+        expect(progressEvents).toEqual([[1, 10]]);
     });
 });
 

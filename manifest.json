@@ -3,6 +3,8 @@
     "name": "VaultDAV",
     "version": "0.1.0",
     "minAppVersion": "1.5.0",
-    "description": "Synchronize Obsidian vaults bidirectionally with Nextcloud via WebDAV.",
+    "description": "Synchronize your vault bidirectionally with Nextcloud via WebDAV.",
+    "author": "Stefan Stark",
+    "authorUrl": "https://github.com/akjir",
     "isDesktopOnly": false
 }

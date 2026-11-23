@@ -17,6 +17,8 @@ describe("Test environment setup and plugin metadata", () => {
 
         expect(packageJson.name).toBe("vaultdav");
         expect(manifestJson.id).toBe("vaultdav");
+        expect(manifestJson.author).toBe("Stefan Stark");
+        expect(manifestJson.authorUrl).toBe("https://github.com/akjir");
         expect(manifestJson.isDesktopOnly).toBe(false);
         expect(SEMVER_REGEX.test(packageJson.version)).toBe(true);
         expect(manifestJson.version).toBe(packageJson.version);
@@ -54,6 +56,7 @@ describe("Test environment setup and plugin metadata", () => {
                     read: async (): Promise<string> => "{}",
                     write: async (): Promise<void> => undefined
                 },
+                configDir: ".obsidian",
                 getName: (): string => "MyVault"
             } as unknown as App["vault"]
         };

@@ -14,10 +14,15 @@ import type {
     RemoteItem,
     SyncAction,
     SyncPlan,
+    SyncResult,
     SyncStateRecord,
     VaultDavSettings
 } from "../src/types";
+import { util } from "../src/utilities";
 import type { WebDavClient } from "../src/webdav/client";
+
+const TEST_CONFIG_DIR: string = ".obsidian";
+const TEST_STATE_PATH: string = util.getSyncStateFilePath(TEST_CONFIG_DIR);
 
 function makeLocal(
     path: string,
@@ -320,7 +325,7 @@ describe("SyncEngine delta calculation and execution", () => {
         };
 
         const vault: Vault = { adapter: adapter as DataAdapter } as Vault;
-        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR);
         await stateStore.load();
 
         const localItems: LocalItem[] = [
@@ -473,7 +478,7 @@ describe("SyncEngine delta calculation and execution", () => {
         };
 
         const vault: Vault = { adapter: adapter as DataAdapter } as Vault;
-        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR);
         const engine: SyncEngine = new SyncEngine(
             vault,
             mockClient as WebDavClient,
@@ -539,7 +544,7 @@ describe("SyncEngine delta calculation and execution", () => {
         const engine: SyncEngine = new SyncEngine(
             { adapter: adapter as DataAdapter } as Vault,
             {} as WebDavClient,
-            new SyncStateStore(adapter as DataAdapter),
+            new SyncStateStore(adapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR),
             {
                 appPassword: "pw",
                 chunkSizeMB: 10,
@@ -596,7 +601,7 @@ describe("SyncEngine delta calculation and execution", () => {
             ): Promise<RemoteItem> => makeRemote(p, mtime, content.byteLength, `etag-${p}`)
         };
 
-        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR);
         await stateStore.load();
         const saveSpy = vi.spyOn(stateStore, "save");
 
@@ -690,7 +695,7 @@ describe("SyncEngine delta calculation and execution", () => {
             ]
         };
 
-        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR);
         stateStore.upsertRecord(
             makeState("RestrictedDir/secret.md", 1000, 1000, 42, "etag-secret", false)
         );
@@ -752,7 +757,7 @@ describe("SyncEngine delta calculation and execution", () => {
         const cyclicEngine: SyncEngine = new SyncEngine(
             { adapter: cyclicAdapter as DataAdapter } as Vault,
             {} as WebDavClient,
-            new SyncStateStore(cyclicAdapter as DataAdapter),
+            new SyncStateStore(cyclicAdapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR),
             {
                 appPassword: "pw",
                 chunkSizeMB: 10,
@@ -798,7 +803,7 @@ describe("SyncEngine delta calculation and execution", () => {
         const deepEngine: SyncEngine = new SyncEngine(
             { adapter: deepAdapter as DataAdapter } as Vault,
             {} as WebDavClient,
-            new SyncStateStore(deepAdapter as DataAdapter),
+            new SyncStateStore(deepAdapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR),
             {
                 appPassword: "pw",
                 chunkSizeMB: 10,
@@ -832,7 +837,7 @@ describe("SyncEngine delta calculation and execution", () => {
         const engine: SyncEngine = new SyncEngine(
             { adapter: adapter as DataAdapter } as Vault,
             {} as WebDavClient,
-            new SyncStateStore(adapter as DataAdapter),
+            new SyncStateStore(adapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR),
             {
                 appPassword: "pw",
                 chunkSizeMB: 10,
@@ -882,7 +887,7 @@ describe("SyncEngine delta calculation and execution", () => {
         const trashEngine: SyncEngine = new SyncEngine(
             { adapter: trashAdapter as DataAdapter } as Vault,
             {} as WebDavClient,
-            new SyncStateStore(trashAdapter as DataAdapter),
+            new SyncStateStore(trashAdapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR),
             {
                 appPassword: "pw",
                 chunkSizeMB: 10,
@@ -1002,7 +1007,7 @@ describe("SyncEngine delta calculation and execution", () => {
             }
         };
 
-        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR);
         await stateStore.load();
         const engine: SyncEngine = new SyncEngine(
             { adapter: adapter as DataAdapter } as Vault,
@@ -1136,7 +1141,7 @@ describe("SyncEngine delta calculation and execution", () => {
             }
         };
 
-        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR);
         await stateStore.load();
 
         const localItems: LocalItem[] = [
@@ -1223,7 +1228,7 @@ describe("SyncEngine delta calculation and execution", () => {
             }
         };
 
-        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR);
         await stateStore.load();
 
         const engine: SyncEngine = new SyncEngine(
@@ -1412,7 +1417,7 @@ describe("SyncEngine delta calculation and execution", () => {
                 }
             };
 
-            const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+            const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR);
             await stateStore.load();
             for (const rec of Object.values(stateRecords)) {
                 stateStore.upsertRecord(rec);
@@ -1439,6 +1444,8 @@ describe("SyncEngine delta calculation and execution", () => {
             expect(result.uploaded).toBe(2);
             expect(result.downloaded).toBe(1);
             expect(downloadedRemotePaths).toEqual(["Notes/CaseCollide.md"]);
+            expect(uploadedRemotePaths).toContain("Notes/Modified-Local.md");
+            expect(uploadedRemotePaths).toContain("Notes/LocalDup.md");
 
             // State store must not contain duplicate case variants for modified-local.md
             const allStateKeys: string[] = Object.keys(stateStore.getAll()).filter(
@@ -1489,7 +1496,7 @@ describe("SyncEngine delta calculation and execution", () => {
             }
         };
 
-        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR);
         await stateStore.load();
         const engine: SyncEngine = new SyncEngine(
             { adapter: adapter as DataAdapter } as Vault,
@@ -1639,7 +1646,7 @@ describe("SyncEngine delta calculation and execution", () => {
             }
         };
 
-        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR);
         const engine: SyncEngine = new SyncEngine(
             { adapter: adapter as DataAdapter } as Vault,
             mockClient as WebDavClient,
@@ -1699,6 +1706,13 @@ describe("SyncEngine delta calculation and execution", () => {
             engine.executeUpload("Spoofed.iso", spoofedLocalMap, t0)
         ).rejects.toThrow(/oversized/i);
         expect(readBinaryCalled).toBe(true);
+
+        // Oversized chunkingThresholdMB (5000) must clamp to 512 MB so 950MB.bin routes to uploadFileChunked
+        const largeLocalMap: Map<string, LocalItem> = new Map<string, LocalItem>([
+            ["950MB.bin", makeLocal("950MB.bin", t0, 950 * 1024 * 1024, false)]
+        ]);
+        await engine.executeUpload("950MB.bin", largeLocalMap, t0);
+        expect(chunkedUploadPaths).toEqual(["950MB.bin"]);
     });
 
     it("hardens executePlan against NaN/inverted depth, child deletion failure before parent rmdir, and excluded remote actions", async () => {
@@ -1730,7 +1744,7 @@ describe("SyncEngine delta calculation and execution", () => {
             }
         };
 
-        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter);
+        const stateStore: SyncStateStore = new SyncStateStore(adapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR);
         await stateStore.load();
         const engine: SyncEngine = new SyncEngine(
             { adapter: adapter as DataAdapter } as Vault,
@@ -1860,6 +1874,649 @@ describe("SyncEngine delta calculation and execution", () => {
         } finally {
             errorSpy.mockRestore();
         }
+    });
+
+    it("refreshes sync state on F5 equal-metadata noop so subsequent deletions do not resurrect files or trigger false conflicts", async () => {
+        const t0: number = Date.UTC(2026, 9, 14, 18, 0, 0);
+        const t1: number = Date.UTC(2026, 9, 14, 19, 0, 0);
+        const textFiles: Map<string, string> = new Map<string, string>();
+        const adapter: Partial<DataAdapter> = {
+            exists: async (p: string): Promise<boolean> => textFiles.has(p),
+            mkdir: async (): Promise<void> => undefined,
+            read: async (p: string): Promise<string> => textFiles.get(p) ?? "",
+            write: async (p: string, d: string): Promise<void> => {
+                textFiles.set(p, d);
+            }
+        };
+        const stateStore: SyncStateStore = new SyncStateStore(
+            adapter as DataAdapter,
+            TEST_STATE_PATH,
+            TEST_CONFIG_DIR
+        );
+        stateStore.upsertRecord(makeState("Shared.md", t0, t0, 10, "etag-v1", false));
+
+        const engine: SyncEngine = new SyncEngine(
+            { adapter: adapter as DataAdapter, configDir: TEST_CONFIG_DIR } as Vault,
+            {} as WebDavClient,
+            stateStore,
+            {
+                appPassword: "pw",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        const localV2: LocalItem[] = [makeLocal("Shared.md", t1, 20, false)];
+        const remoteV2: RemoteItem[] = [makeRemote("Shared.md", t1, 20, "etag-v2", false)];
+
+        const planF5: SyncPlan = buildSyncPlan(localV2, remoteV2, stateStore.getAll(), t1);
+        expect(planF5.actions).toEqual([
+            { depth: 1, isDirectory: false, path: "Shared.md", type: "noop" }
+        ]);
+        await engine.executePlan(planF5, localV2, remoteV2);
+
+        expect(stateStore.getRecord("Shared.md")).toEqual({
+            etag: "etag-v2",
+            isDirectory: false,
+            lastSyncTime: t1,
+            localMtime: t1,
+            path: "Shared.md",
+            remoteMtime: t1,
+            size: 20
+        });
+
+        // Next sync after deleting Shared.md locally must emit delete_remote, not download (resurrection)
+        const planAfterLocalDelete: SyncPlan = buildSyncPlan(
+            [],
+            remoteV2,
+            stateStore.getAll(),
+            t1 + 5000
+        );
+        expect(planAfterLocalDelete.actions).toEqual([
+            { depth: 1, isDirectory: false, path: "Shared.md", type: "delete_remote" }
+        ]);
+    });
+
+    it("omits mtime: 0 and invalid ctime in writeBinary options, passes expectedEtag to downloadFileChunked, and handles Linux NFD local paths", async () => {
+        const t1: number = Date.UTC(2026, 9, 14, 19, 0, 0);
+        const writeCalls: Array<{
+            options: { ctime?: number; mtime?: number } | undefined;
+            path: string;
+        }> = [];
+        const capturedChunkedEtags: Array<string | undefined> = [];
+        const textFiles: Map<string, string> = new Map<string, string>();
+        const sixMb: number = 6 * 1024 * 1024;
+
+        const nfdFolder: string = "Mu\u0308ller";
+        const nfdFile: string = "Mu\u0308ller/No\u0308te.md";
+        const nfcFile: string = "M\u00fcller/N\u00f6te.md";
+        const deletedRawPaths: string[] = [];
+
+        const adapter: Partial<DataAdapter> = {
+            exists: async (p: string): Promise<boolean> =>
+                textFiles.has(p) || p === nfdFolder || p === nfdFile,
+            list: async (dir: string): Promise<ListedFiles> => {
+                if (dir === "") {
+                    return { files: [], folders: [nfdFolder] };
+                }
+                if (dir === nfdFolder) {
+                    return { files: [nfdFile], folders: [] };
+                }
+                throw new Error(`ENOENT: ${dir}`);
+            },
+            mkdir: async (): Promise<void> => undefined,
+            read: async (p: string): Promise<string> => textFiles.get(p) ?? "",
+            readBinary: async (p: string): Promise<ArrayBuffer> => {
+                if (p === nfdFile) {
+                    return new Uint8Array([1, 2, 3]).buffer;
+                }
+                throw new Error(`ENOENT: ${p}`);
+            },
+            stat: async (p: string): Promise<Stat | null> => {
+                if (p === nfdFolder) {
+                    return { ctime: t1, mtime: t1, size: 0, type: "folder" };
+                }
+                if (p === nfdFile) {
+                    return { ctime: t1, mtime: t1, size: 3, type: "file" };
+                }
+                if (p === "ZeroMtime.md") {
+                    return { ctime: t1, mtime: t1, size: 4, type: "file" };
+                }
+                return null;
+            },
+            trashLocal: async (p: string): Promise<void> => {
+                deletedRawPaths.push(p);
+            },
+            write: async (p: string, d: string): Promise<void> => {
+                textFiles.set(p, d);
+            },
+            writeBinary: async (
+                p: string,
+                _data: ArrayBuffer,
+                options?: { ctime?: number; mtime?: number }
+            ): Promise<void> => {
+                writeCalls.push({ options, path: p });
+            }
+        };
+
+        const uploadedNfdTargets: string[] = [];
+        const mockClient: Partial<WebDavClient> = {
+            downloadFile: async (): Promise<ArrayBuffer> =>
+                new Uint8Array([1, 2, 3, 4]).buffer,
+            downloadFileChunked: async (
+                _p: string,
+                _size: number,
+                _onProgress?: (done: number, total: number) => void,
+                expectedEtag?: string
+            ): Promise<ArrayBuffer> => {
+                capturedChunkedEtags.push(expectedEtag);
+                return Object.defineProperty(new ArrayBuffer(0), "byteLength", {
+                    value: sixMb
+                });
+            },
+            uploadFile: async (
+                p: string,
+                content: ArrayBuffer,
+                mtime: number
+            ): Promise<RemoteItem> => {
+                uploadedNfdTargets.push(p);
+                return makeRemote(p, mtime, content.byteLength, "etag-nfd");
+            }
+        };
+
+        const stateStore: SyncStateStore = new SyncStateStore(
+            adapter as DataAdapter,
+            TEST_STATE_PATH,
+            TEST_CONFIG_DIR
+        );
+        const engine: SyncEngine = new SyncEngine(
+            { adapter: adapter as DataAdapter, configDir: TEST_CONFIG_DIR } as Vault,
+            mockClient as WebDavClient,
+            stateStore,
+            {
+                appPassword: "pw",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        // 1. Download with remote mtime === 0 must not pass mtime: 0 to writeBinary
+        const zeroMtimeRemoteMap: Map<string, RemoteItem> = new Map<
+            string,
+            RemoteItem
+        >([
+            ["ZeroMtime.md", makeRemote("ZeroMtime.md", 0, 4, "etag-zero", false)],
+            ["BigChunked.bin", makeRemote("BigChunked.bin", t1, sixMb, "etag-big", false)]
+        ]);
+        await engine.executeDownload("ZeroMtime.md", zeroMtimeRemoteMap, t1);
+        expect(writeCalls[0]).toEqual({ options: undefined, path: "ZeroMtime.md" });
+        expect(stateStore.getRecord("ZeroMtime.md")?.localMtime).toBe(t1);
+        expect(stateStore.getRecord("ZeroMtime.md")?.remoteMtime).toBe(0);
+
+        // 2. Chunked download passes expectedEtag to WebDavClient.downloadFileChunked
+        await engine.executeDownload("BigChunked.bin", zeroMtimeRemoteMap, t1);
+        expect(capturedChunkedEtags).toEqual(["etag-big"]);
+
+        // 3. Linux NFD folder & file walkLocal + upload + deleteLocalItem
+        const walked: LocalItem[] = await engine.walkLocal();
+        expect(walked.map((i: LocalItem) => i.path)).toEqual([
+            "M\u00fcller",
+            nfcFile
+        ]);
+
+        const nfdLocalMap: Map<string, LocalItem> = new Map<string, LocalItem>(
+            walked.map((i: LocalItem) => [i.path, i])
+        );
+        await engine.executeUpload(nfcFile, nfdLocalMap, t1);
+        expect(uploadedNfdTargets).toEqual([nfcFile]);
+
+        await engine.deleteLocalItem(nfcFile, false, nfdLocalMap.get(nfcFile)?.fsPath);
+        expect(deletedRawPaths).toEqual([nfdFile]);
+    });
+
+    it("canonicalizes remote child paths under existing local folder casing on case-sensitive filesystems without creating duplicate folders or deleting remote files on sync 2", async () => {
+        const t1: number = Date.UTC(2026, 9, 14, 19, 0, 0);
+        const localFolders: Set<string> = new Set<string>(["Notes"]);
+        const localFiles: Map<string, { content: Uint8Array; mtime: number }> =
+            new Map<string, { content: Uint8Array; mtime: number }>([
+                ["Notes/a.md", { content: new Uint8Array([65]), mtime: t1 }]
+            ]);
+        const textFiles: Map<string, string> = new Map<string, string>();
+
+        const remoteFolders: Set<string> = new Set<string>(["notes", "notes/sub"]);
+        const remoteFiles: Map<
+            string,
+            { content: Uint8Array; etag: string; mtime: number }
+        > = new Map<string, { content: Uint8Array; etag: string; mtime: number }>([
+            [
+                "notes/b.md",
+                { content: new Uint8Array([66, 66]), etag: "etag-b", mtime: t1 }
+            ],
+            [
+                "notes/sub/c.md",
+                { content: new Uint8Array([67, 67, 67]), etag: "etag-c", mtime: t1 }
+            ]
+        ]);
+        const deletedRemotePaths: string[] = [];
+
+        const adapter: Partial<DataAdapter> = {
+            exists: async (p: string): Promise<boolean> =>
+                localFolders.has(p) || localFiles.has(p) || textFiles.has(p),
+            list: async (dir: string): Promise<ListedFiles> => {
+                const prefix: string = dir === "" ? "" : `${dir}/`;
+                const folders: string[] = [];
+                const files: string[] = [];
+                for (const folder of localFolders) {
+                    if (
+                        folder.startsWith(prefix) &&
+                        !folder.slice(prefix.length).includes("/")
+                    ) {
+                        folders.push(folder);
+                    }
+                }
+                for (const file of localFiles.keys()) {
+                    if (
+                        file.startsWith(prefix) &&
+                        !file.slice(prefix.length).includes("/")
+                    ) {
+                        files.push(file);
+                    }
+                }
+                folders.sort();
+                files.sort();
+                return { files, folders };
+            },
+            mkdir: async (p: string): Promise<void> => {
+                localFolders.add(p);
+            },
+            read: async (p: string): Promise<string> => textFiles.get(p) ?? "",
+            readBinary: async (p: string): Promise<ArrayBuffer> => {
+                const entry = localFiles.get(p);
+                if (entry === undefined) {
+                    throw new Error(`ENOENT: ${p}`);
+                }
+                return entry.content.slice().buffer;
+            },
+            stat: async (p: string): Promise<Stat | null> => {
+                if (localFolders.has(p)) {
+                    return { ctime: t1, mtime: t1, size: 0, type: "folder" };
+                }
+                const entry = localFiles.get(p);
+                if (entry !== undefined) {
+                    return {
+                        ctime: entry.mtime,
+                        mtime: entry.mtime,
+                        size: entry.content.byteLength,
+                        type: "file"
+                    };
+                }
+                return null;
+            },
+            write: async (p: string, d: string): Promise<void> => {
+                textFiles.set(p, d);
+            },
+            writeBinary: async (
+                p: string,
+                data: ArrayBuffer,
+                options?: { mtime?: number }
+            ): Promise<void> => {
+                localFiles.set(p, {
+                    content: new Uint8Array(data.slice(0)),
+                    mtime: options?.mtime ?? t1
+                });
+            }
+        };
+
+        const mockClient: Partial<WebDavClient> = {
+            createDirectory: async (p: string): Promise<void> => {
+                remoteFolders.add(p);
+            },
+            deleteItem: async (p: string): Promise<void> => {
+                deletedRemotePaths.push(p);
+                remoteFiles.delete(p);
+                remoteFolders.delete(p);
+            },
+            downloadFile: async (p: string): Promise<ArrayBuffer> => {
+                const entry = remoteFiles.get(p);
+                if (entry === undefined) {
+                    throw new Error(`404 Not Found: ${p}`);
+                }
+                return entry.content.slice().buffer;
+            },
+            ensureRemoteBaseDir: async (): Promise<void> => undefined,
+            uploadFile: async (
+                p: string,
+                content: ArrayBuffer,
+                mtime: number
+            ): Promise<RemoteItem> => {
+                const etag: string = `etag-${p}`;
+                remoteFiles.set(p, {
+                    content: new Uint8Array(content.slice(0)),
+                    etag,
+                    mtime
+                });
+                return makeRemote(p, mtime, content.byteLength, etag, false);
+            },
+            walkRemote: async (): Promise<RemoteItem[]> => {
+                const items: RemoteItem[] = [];
+                for (const folder of remoteFolders) {
+                    items.push(makeRemote(folder, t1, 0, "", true));
+                }
+                for (const [p, entry] of remoteFiles.entries()) {
+                    items.push(
+                        makeRemote(
+                            p,
+                            entry.mtime,
+                            entry.content.byteLength,
+                            entry.etag,
+                            false
+                        )
+                    );
+                }
+                return items;
+            }
+        };
+
+        const stateStore: SyncStateStore = new SyncStateStore(
+            adapter as DataAdapter,
+            TEST_STATE_PATH,
+            TEST_CONFIG_DIR
+        );
+        const engine: SyncEngine = new SyncEngine(
+            { adapter: adapter as DataAdapter, configDir: TEST_CONFIG_DIR } as Vault,
+            mockClient as WebDavClient,
+            stateStore,
+            {
+                appPassword: "pw",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        const sync1: SyncResult = await engine.runSync();
+        expect(sync1.errors).toEqual([]);
+        expect(sync1.uploaded).toBe(1);
+        expect(sync1.downloaded).toBe(2);
+        // Must reuse local "Notes" folder rather than creating duplicate lowercase "notes"
+        expect(localFolders.has("notes")).toBe(false);
+        expect(localFolders.has("Notes/sub")).toBe(true);
+        expect(localFiles.has("Notes/b.md")).toBe(true);
+        expect(localFiles.has("Notes/sub/c.md")).toBe(true);
+        expect(remoteFiles.has("notes/a.md")).toBe(true);
+
+        // Sync 2 must be a clean no-op with zero remote deletions
+        const sync2: SyncResult = await engine.runSync();
+        expect(sync2.errors).toEqual([]);
+        expect(sync2.deletedRemote).toBe(0);
+        expect(sync2.deletedLocal).toBe(0);
+        expect(deletedRemotePaths).toEqual([]);
+        expect(remoteFiles.has("notes/b.md")).toBe(true);
+        expect(remoteFiles.has("notes/sub/c.md")).toBe(true);
+    });
+
+    it("writes updates, new downloads, and conflict resolutions into existing Linux NFD local paths without creating duplicate NFC files or folders", async () => {
+        const t1: number = Date.UTC(2026, 9, 14, 19, 0, 0);
+        const t2: number = Date.UTC(2026, 9, 14, 20, 0, 0);
+        const nfdFolder: string = "Mu\u0308ller";
+        const nfcFolder: string = "M\u00fcller";
+        const nfdFile: string = `${nfdFolder}/No\u0308te.md`;
+        const nfcFile: string = `${nfcFolder}/N\u00f6te.md`;
+
+        const localFolders: Set<string> = new Set<string>([nfdFolder]);
+        const localFiles: Map<string, { content: Uint8Array; mtime: number }> =
+            new Map<string, { content: Uint8Array; mtime: number }>([
+                [nfdFile, { content: new Uint8Array([1, 2, 3]), mtime: t1 }]
+            ]);
+        const textFiles: Map<string, string> = new Map<string, string>();
+        const uploadedPaths: string[] = [];
+
+        const adapter: Partial<DataAdapter> = {
+            exists: async (p: string): Promise<boolean> =>
+                localFolders.has(p) || localFiles.has(p) || textFiles.has(p),
+            list: async (dir: string): Promise<ListedFiles> => {
+                const prefix: string = dir === "" ? "" : `${dir}/`;
+                return {
+                    files: Array.from(localFiles.keys()).filter(
+                        (f: string) =>
+                            f.startsWith(prefix) &&
+                            !f.slice(prefix.length).includes("/")
+                    ),
+                    folders: Array.from(localFolders).filter(
+                        (f: string) =>
+                            f.startsWith(prefix) &&
+                            !f.slice(prefix.length).includes("/")
+                    )
+                };
+            },
+            mkdir: async (p: string): Promise<void> => {
+                localFolders.add(p);
+            },
+            read: async (p: string): Promise<string> => textFiles.get(p) ?? "",
+            readBinary: async (p: string): Promise<ArrayBuffer> => {
+                const entry = localFiles.get(p);
+                if (entry === undefined) {
+                    throw new Error(`ENOENT: ${p}`);
+                }
+                return entry.content.slice().buffer;
+            },
+            stat: async (p: string): Promise<Stat | null> => {
+                if (localFolders.has(p)) {
+                    return { ctime: t1, mtime: t1, size: 0, type: "folder" };
+                }
+                const entry = localFiles.get(p);
+                if (entry !== undefined) {
+                    return {
+                        ctime: entry.mtime,
+                        mtime: entry.mtime,
+                        size: entry.content.byteLength,
+                        type: "file"
+                    };
+                }
+                return null;
+            },
+            write: async (p: string, d: string): Promise<void> => {
+                textFiles.set(p, d);
+            },
+            writeBinary: async (
+                p: string,
+                data: ArrayBuffer,
+                options?: { mtime?: number }
+            ): Promise<void> => {
+                localFiles.set(p, {
+                    content: new Uint8Array(data.slice(0)),
+                    mtime: options?.mtime ?? t2
+                });
+            }
+        };
+
+        const mockClient: Partial<WebDavClient> = {
+            createDirectory: async (): Promise<void> => undefined,
+            downloadFile: async (p: string): Promise<ArrayBuffer> => {
+                if (p === nfcFile) {
+                    return new Uint8Array([9, 8, 7, 6]).buffer;
+                }
+                if (p === `${nfcFolder}/Sub/Added.md`) {
+                    return new Uint8Array([5, 5]).buffer;
+                }
+                throw new Error(`404 Not Found: ${p}`);
+            },
+            uploadFile: async (
+                p: string,
+                content: ArrayBuffer,
+                mtime: number
+            ): Promise<RemoteItem> => {
+                uploadedPaths.push(p);
+                return makeRemote(p, mtime, content.byteLength, `etag-${p}`, false);
+            }
+        };
+
+        const stateStore: SyncStateStore = new SyncStateStore(
+            adapter as DataAdapter,
+            TEST_STATE_PATH,
+            TEST_CONFIG_DIR
+        );
+        const engine: SyncEngine = new SyncEngine(
+            { adapter: adapter as DataAdapter, configDir: TEST_CONFIG_DIR } as Vault,
+            mockClient as WebDavClient,
+            stateStore,
+            {
+                appPassword: "pw",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        const walked: LocalItem[] = await engine.walkLocal();
+        const remoteItems: RemoteItem[] = [
+            makeRemote(nfcFolder, t1, 0, "", true),
+            makeRemote(`${nfcFolder}/Sub`, t2, 0, "", true),
+            makeRemote(nfcFile, t2, 4, "etag-remote-v2", false),
+            makeRemote(`${nfcFolder}/Sub/Added.md`, t2, 2, "etag-added", false)
+        ];
+
+        // 1. Conflict (keep_both) + new nested subdir/file download into existing NFD folder
+        const plan: SyncPlan = buildSyncPlan(
+            walked,
+            remoteItems,
+            {},
+            t2,
+            TEST_CONFIG_DIR
+        );
+        const result: SyncResult = await engine.executePlan(
+            plan,
+            walked,
+            remoteItems
+        );
+        expect(result.errors).toEqual([]);
+        expect(result.conflictsResolved).toBe(1);
+        expect(result.downloaded).toBe(1);
+
+        // Must NOT create duplicate NFC folder or NFC main file
+        expect(localFolders.has(nfcFolder)).toBe(false);
+        expect(localFolders.has(`${nfdFolder}/Sub`)).toBe(true);
+        expect(localFiles.has(nfcFile)).toBe(false);
+        expect(Array.from(localFiles.get(nfdFile)?.content ?? [])).toEqual([
+            9, 8, 7, 6
+        ]);
+        expect(localFiles.has(`${nfdFolder}/Sub/Added.md`)).toBe(true);
+        expect(
+            localFiles.has(`${nfdFolder}/N\u00f6te.conflict-20261014-200000.md`)
+        ).toBe(true);
+        expect(uploadedPaths).toContain(
+            `${nfcFolder}/N\u00f6te.conflict-20261014-200000.md`
+        );
+
+        // 2. Subsequent remote-only update (plain download) must overwrite existing NFD file in place
+        const t3: number = Date.UTC(2026, 9, 14, 21, 0, 0);
+        const updatedWalked: LocalItem[] = await engine.walkLocal();
+        const remoteItemsV3: RemoteItem[] = [
+            makeRemote(nfcFolder, t1, 0, "", true),
+            makeRemote(`${nfcFolder}/Sub`, t2, 0, "", true),
+            makeRemote(nfcFile, t3, 4, "etag-remote-v3", false),
+            makeRemote(`${nfcFolder}/Sub/Added.md`, t2, 2, "etag-added", false),
+            makeRemote(
+                `${nfcFolder}/N\u00f6te.conflict-20261014-200000.md`,
+                t1,
+                3,
+                `etag-${nfcFolder}/N\u00f6te.conflict-20261014-200000.md`,
+                false
+            )
+        ];
+        const stateSnapshot: Record<string, SyncStateRecord> = stateStore.getAll();
+        const downloadPlan: SyncPlan = buildSyncPlan(
+            updatedWalked,
+            remoteItemsV3,
+            stateSnapshot,
+            t3,
+            TEST_CONFIG_DIR
+        );
+        expect(
+            downloadPlan.actions.some(
+                (a: SyncAction) => a.path === nfcFile && a.type === "download"
+            )
+        ).toBe(true);
+        const downloadResult: SyncResult = await engine.executePlan(
+            downloadPlan,
+            updatedWalked,
+            remoteItemsV3
+        );
+        expect(downloadResult.errors).toEqual([]);
+        expect(downloadResult.downloaded).toBe(1);
+        expect(localFiles.has(nfcFile)).toBe(false);
+        expect(localFolders.has(nfcFolder)).toBe(false);
+    });
+
+    it("stats local entries concurrently in walkLocal() while preserving deterministic order", async () => {
+        const t1: number = Date.UTC(2026, 9, 14, 19, 0, 0);
+        const fileNames: string[] = Array.from(
+            { length: 10 },
+            (_unused: unknown, i: number) => `Note-${String(i).padStart(2, "0")}.md`
+        );
+        let activeStats: number = 0;
+        let maxActiveStats: number = 0;
+
+        const adapter: Partial<DataAdapter> = {
+            list: async (dir: string): Promise<ListedFiles> => {
+                if (dir === "") {
+                    return { files: fileNames, folders: [] };
+                }
+                return { files: [], folders: [] };
+            },
+            stat: async (): Promise<Stat | null> => {
+                activeStats += 1;
+                if (activeStats > maxActiveStats) {
+                    maxActiveStats = activeStats;
+                }
+                await new Promise<void>((resolve) => setTimeout(resolve, 10));
+                activeStats -= 1;
+                return { ctime: t1, mtime: t1, size: 12, type: "file" };
+            }
+        };
+
+        const stateStore: SyncStateStore = new SyncStateStore(
+            adapter as DataAdapter,
+            TEST_STATE_PATH,
+            TEST_CONFIG_DIR
+        );
+        const engine: SyncEngine = new SyncEngine(
+            { adapter: adapter as DataAdapter, configDir: TEST_CONFIG_DIR } as Vault,
+            {} as WebDavClient,
+            stateStore,
+            {
+                appPassword: "pw",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        const walked: LocalItem[] = await engine.walkLocal();
+        expect(maxActiveStats).toBeGreaterThan(1);
+        expect(walked.map((item: LocalItem) => item.path)).toEqual(fileNames);
     });
 });
 

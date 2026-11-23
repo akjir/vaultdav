@@ -3,11 +3,11 @@ import type { ProgressReporter } from "./types";
 
 export type { ProgressReporter };
 
-const BASIC_AUTH_REDACT_REGEX: RegExp = /Basic\s+[A-Za-z0-9+/=]+/g;
+const BASIC_AUTH_REDACT_REGEX: RegExp = /Basic\s+[A-Za-z0-9+/=]+/gi;
 const DEFAULT_NOTICE_DURATION_MS: number = 4000;
 const LOG_PREFIX: string = "[VaultDAV]";
 const NOTICE_PREFIX: string = "VaultDAV:";
-const URL_USERINFO_REDACT_REGEX: RegExp = /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/\s@]+@/g;
+const URL_USERINFO_REDACT_REGEX: RegExp = /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/\s?#]+@/g;
 
 export interface Logger {
     debug: (message: string, ...args: unknown[]) => void;
@@ -86,7 +86,7 @@ export const log: Logger = {
         );
     },
     info(message: string, ...args: unknown[]): void {
-        console.info(
+        console.debug(
             `${LOG_PREFIX} ${redactSensitiveText(message)}`,
             ...sanitizeLogArgs(args)
         );

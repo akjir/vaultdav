@@ -3,21 +3,34 @@ import { log } from "../src/log";
 import {
     MAX_FILE_SIZE_BYTES,
     MAX_WALK_DEPTH,
-    PLUGIN_DATA_FILE_PATH,
-    SYNC_STATE_FILE_PATH,
+    PLUGIN_DATA_RELATIVE_PATH,
+    SYNC_STATE_RELATIVE_PATH,
     util
 } from "../src/utilities";
 
 describe("utilities and logging", () => {
-    it("exports top-level file path and size constants sorted alphabetically", () => {
+    it("exports top-level file path helpers and size constants", () => {
         expect(MAX_FILE_SIZE_BYTES).toBe(50 * 1024 * 1024);
         expect(MAX_WALK_DEPTH).toBe(64);
-        expect(PLUGIN_DATA_FILE_PATH).toBe(".obsidian/plugins/vaultdav/data.json");
-        expect(SYNC_STATE_FILE_PATH).toBe(".obsidian/plugins/vaultdav/sync-state.json");
+        expect(PLUGIN_DATA_RELATIVE_PATH).toBe("plugins/vaultdav/data.json");
+        expect(SYNC_STATE_RELATIVE_PATH).toBe("plugins/vaultdav/sync-state.json");
         expect(util.MAX_FILE_SIZE_BYTES).toBe(MAX_FILE_SIZE_BYTES);
         expect(util.MAX_WALK_DEPTH).toBe(MAX_WALK_DEPTH);
-        expect(util.PLUGIN_DATA_FILE_PATH).toBe(PLUGIN_DATA_FILE_PATH);
-        expect(util.SYNC_STATE_FILE_PATH).toBe(SYNC_STATE_FILE_PATH);
+        expect(util.getPluginDataFilePath(".obsidian")).toBe(
+            ".obsidian/plugins/vaultdav/data.json"
+        );
+        expect(util.getSyncStateFilePath(".obsidian")).toBe(
+            ".obsidian/plugins/vaultdav/sync-state.json"
+        );
+        expect(util.getSyncStateFilePath("custom-config")).toBe(
+            "custom-config/plugins/vaultdav/sync-state.json"
+        );
+        expect(() => util.getSyncStateFilePath("")).toThrow(/configDir/i);
+        expect(() => util.getPluginDataFilePath("../escape")).toThrow(/configDir/i);
+        expect(util.hasControlChars("normal text")).toBe(false);
+        expect(util.hasControlChars("bad\x00text")).toBe(true);
+        expect(util.hasControlChars("bad\ntext")).toBe(true);
+        expect(util.hasControlChars("bad\x7ftext")).toBe(true);
     });
 
     it("encodes ASCII and UTF-8 credentials for HTTP Basic Auth", () => {
@@ -94,6 +107,38 @@ describe("utilities and logging", () => {
                 "Notes"
             )
         ).toBe("https://cloud.example.com/remote.php/dav/files/m%C3%BCller/Notes");
+
+        expect(
+            util.buildNextcloudWebDavBaseUrl(
+                "https://cloud.example.com/remote.php/dav",
+                "alice",
+                "Notes"
+            )
+        ).toBe("https://cloud.example.com/remote.php/dav/files/alice/Notes");
+
+        expect(
+            util.buildNextcloudWebDavBaseUrl(
+                "https://cloud.example.com/nextcloud/remote.php/dav/",
+                "alice",
+                "Notes"
+            )
+        ).toBe("https://cloud.example.com/nextcloud/remote.php/dav/files/alice/Notes");
+
+        expect(
+            util.buildNextcloudWebDavBaseUrl(
+                "https://cloud.example.com/remote.php/webdav/",
+                "alice",
+                "Notes"
+            )
+        ).toBe("https://cloud.example.com/remote.php/dav/files/alice/Notes");
+
+        expect(
+            util.buildNextcloudWebDavBaseUrl(
+                "https://cloud.example.com/nextcloud/remote.php/webdav/OldDir",
+                "alice",
+                "Notes"
+            )
+        ).toBe("https://cloud.example.com/nextcloud/remote.php/dav/files/alice/Notes");
 
         expect(() =>
             util.buildNextcloudWebDavBaseUrl(
@@ -273,6 +318,25 @@ describe("utilities and logging", () => {
         expect(util.isExcludedPath(".obsidian/workspace.json")).toBe(true);
         expect(util.isExcludedPath(".OBSIDIAN/workspace.json")).toBe(true);
         expect(util.isExcludedPath(".obsidian/workspace-mobile.json")).toBe(true);
+        expect(util.isExcludedPath(".obsidian-mobile/plugins/vaultdav/data.json")).toBe(
+            true
+        );
+        expect(util.isExcludedPath(".obsidian-mobile/workspace.json")).toBe(true);
+        expect(
+            util.isExcludedPath("custom-config/plugins/vaultdav/data.json", "custom-config")
+        ).toBe(true);
+        expect(
+            util.isExcludedPath("custom-config/plugins/vaultdav", "custom-config")
+        ).toBe(true);
+        expect(
+            util.isExcludedPath("custom-config/workspace.json", "custom-config")
+        ).toBe(true);
+        expect(
+            util.isExcludedPath("custom-config/plugins/other/sync-state.json", "custom-config")
+        ).toBe(true);
+        expect(
+            util.isExcludedPath("custom-config/app.json", "custom-config")
+        ).toBe(false);
         expect(util.isExcludedPath(".trash/note.md")).toBe(true);
         expect(util.isExcludedPath(".TRASH/note.md")).toBe(true);
         expect(util.isExcludedPath("sub/.DS_Store")).toBe(true);
@@ -287,6 +351,46 @@ describe("utilities and logging", () => {
         expect(util.isExcludedPath(".gitlab/issue_templates/bug.md")).toBe(false);
         expect(util.isExcludedPath(".obsidian/app.json")).toBe(false);
         expect(util.isExcludedPath("Notes/Daily.md")).toBe(false);
+
+        // Custom vault.configDir support (e.g. .obsidian-mobile)
+        expect(
+            util.isExcludedPath(
+                ".obsidian-mobile/plugins/vaultdav/data.json",
+                ".obsidian-mobile"
+            )
+        ).toBe(true);
+        expect(
+            util.isExcludedPath(
+                ".obsidian-mobile/plugins/vaultdav/sync-state.json",
+                ".obsidian-mobile"
+            )
+        ).toBe(true);
+        expect(
+            util.isExcludedPath(
+                ".obsidian-mobile/plugins/other/data.json",
+                ".obsidian-mobile"
+            )
+        ).toBe(true);
+        expect(
+            util.isExcludedPath(
+                ".obsidian-mobile/workspace-mobile.json",
+                ".obsidian-mobile"
+            )
+        ).toBe(true);
+        expect(
+            util.isExcludedPath(
+                ".obsidian-mobile/app.json",
+                ".obsidian-mobile"
+            )
+        ).toBe(false);
+        expect(util.getSyncStateFilePath(".obsidian-mobile")).toBe(
+            ".obsidian-mobile/plugins/vaultdav/sync-state.json"
+        );
+        expect(util.isExplicitRootPath("")).toBe(true);
+        expect(util.isExplicitRootPath("/")).toBe(true);
+        expect(util.isExplicitRootPath("\n")).toBe(false);
+        expect(util.isExplicitRootPath("\r/")).toBe(false);
+        expect(util.isExplicitRootPath("\t")).toBe(false);
     });
 
     it("compares ArrayBuffers and limits concurrency in runConcurrent including NaN guard", async () => {
@@ -436,8 +540,16 @@ describe("utilities and logging", () => {
             ).toThrow(/remoteBaseDir/i);
         }
 
-        // 3. Username traversal, slashes, control chars, and prototype keys must be rejected; NFD username must match NFC href
-        for (const badUser of [".", "..", "alice/bob", "alice\\bob", "alice\0", "__proto__"]) {
+        // 3. Username traversal, colons, slashes, control chars, and prototype keys must be rejected; NFD username must match NFC href
+        for (const badUser of [
+            ".",
+            "..",
+            "alice:injected",
+            "alice/bob",
+            "alice\\bob",
+            "alice\0",
+            "__proto__"
+        ]) {
             expect(() =>
                 util.buildNextcloudWebDavBaseUrl(
                     "https://cloud.example.com",
@@ -500,5 +612,35 @@ describe("utilities and logging", () => {
         expect(() => util.getConflictPath("../secret.md", 1000)).toThrow(
             /Conflict path/i
         );
+    });
+
+    it("aborts remaining queued tasks in runConcurrent when a worker rejects and supports O(1) existingLowerPaths in getConflictPath", async () => {
+        const started: number[] = [];
+        const tasks: Array<() => Promise<number>> = Array.from(
+            { length: 12 },
+            (_unused: unknown, index: number) => async (): Promise<number> => {
+                started.push(index);
+                await Promise.resolve();
+                if (index === 0) {
+                    throw new Error("boom");
+                }
+                await new Promise<void>((resolve) => setTimeout(resolve, 10));
+                return index;
+            }
+        );
+
+        await expect(util.runConcurrent(tasks, 3)).rejects.toThrow("boom");
+        // Allow the other in-flight workers (indices 1 and 2) to settle; no queued tasks (3..11) may start
+        await new Promise<void>((resolve) => setTimeout(resolve, 30));
+        expect(started).toEqual([0, 1, 2]);
+
+        const stamp: number = Date.UTC(2026, 9, 14, 18, 30, 0);
+        const existingLower: Set<string> = new Set<string>([
+            "notes/doc.conflict-20261014-183000.md",
+            "notes/doc.conflict-20261014-183000-2.md"
+        ]);
+        expect(
+            util.getConflictPath("Notes/Doc.md", stamp, undefined, existingLower)
+        ).toBe("Notes/Doc.conflict-20261014-183000-3.md");
     });
 });

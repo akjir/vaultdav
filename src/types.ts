@@ -2,6 +2,7 @@ export type ConflictStrategy = "keep_both" | "newest_wins";
 
 export interface LocalItem {
     ctime: number;
+    fsPath?: string;
     isDirectory: boolean;
     mtime: number;
     path: string;
@@ -97,5 +98,6 @@ export interface WebDavRequestOptions {
     headers?: Record<string, string>;
     method: WebDavMethod;
     path: string;
+    retryOnTimeout?: boolean;
     timeoutMs?: number;
 }
