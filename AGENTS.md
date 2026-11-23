@@ -53,4 +53,5 @@
 - Development & Build: Use **`vaultdav-dev-workflow`** to build, test, and develop.
 - Security Audit: Use **`red`** (`/red`, `/red <filename>`, or `/red all`) to audit and harden `src/`.
 - Documentation: Use **`update-documentation`** to update `README.md`, `manifest.json`, and `versions.json`.
+- Commit: Use **`commit`** (`/commit [force] [push] [<message>]`) to verify, stage, commit, and optionally push changes.
 - Release: Use **`release`** (`/release <X.Y.Z>`) to create official releases with `X.Y.Z` tags (no leading `v`).
