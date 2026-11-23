@@ -643,4 +643,113 @@ describe("utilities and logging", () => {
             util.getConflictPath("Notes/Doc.md", stamp, undefined, existingLower)
         ).toBe("Notes/Doc.conflict-20261014-183000-3.md");
     });
+
+    it("neutralizes backslash/triple-slash URL bypasses, NTFS ADS exclusion bypasses, cross-endpoint/encoded-separator href spoofing, and drains in-flight workers on runConcurrent abort", async () => {
+        // 1. Backslash and triple-slash https:// URL parsing bypasses in decodeWebDavHref
+        for (const maliciousUrlHref of [
+            "https://cloud.example.com\\remote.php\\dav\\files\\alice\\Obsidian%20Vault\\Notes\\..\\secret.md",
+            "https://cloud.example.com\\remote.php\\dav\\files\\eve\\..\\alice\\Obsidian%20Vault\\pwned.md",
+            "https://cloud.example.com\\remote.php\\dav\\uploads\\alice\\..\\..\\files\\alice\\Obsidian%20Vault\\pwned.md",
+            "https://cloud.example.com\\remote.php\\dav\\files\\alice\\Obsidian%20Vault\\Notes\\..\\",
+            "https://cloud.example.com\\remote.php\\dav\\files\\alice\\Obsidian%20Vault\\note.md?",
+            "https://cloud.example.com\\remote.php\\dav\\files\\eve\\shared/remote.php/dav/files/alice/Obsidian%20Vault/pwned.md",
+            "https:///remote.php/dav/files/alice/Obsidian%20Vault/pwned.md",
+            "https://:@cloud.example.com/remote.php/dav/files/alice/Obsidian%20Vault/pwned.md"
+        ]) {
+            expect(
+                util.decodeWebDavHref(
+                    maliciousUrlHref,
+                    "alice",
+                    "Obsidian Vault"
+                )
+            ).toBeNull();
+        }
+
+        // 2. Windows NTFS Alternate Data Stream (ADS) bypasses across normalizeVaultPath, isExcludedPath, and decodeWebDavHref
+        for (const adsPath of [
+            ".obsidian/plugins/vaultdav::$INDEX_ALLOCATION/main.js",
+            ".obsidian/plugins::$INDEX_ALLOCATION/vaultdav/main.js",
+            ".obsidian/plugins/vaultdav::$INDEX_ALLOCATION/data.json",
+            ".obsidian/plugins/other/data.json::$DATA",
+            ".obsidian/workspace.json::$DATA",
+            ".git::$INDEX_ALLOCATION/config",
+            ".trash::$INDEX_ALLOCATION/note.md",
+            "custom-config::$INDEX_ALLOCATION/plugins/vaultdav/data.json",
+            "..::$INDEX_ALLOCATION/secret.md",
+            "Notes/file.md:hidden"
+        ]) {
+            expect(util.normalizeVaultPath(adsPath)).toBe("");
+            expect(util.isExcludedPath(adsPath, "custom-config")).toBe(true);
+            expect(
+                util.decodeWebDavHref(
+                    `/remote.php/dav/files/alice/Vault/${adsPath}`,
+                    "alice",
+                    "Vault"
+                )
+            ).toBeNull();
+        }
+
+        // 3. Cross-endpoint spoofing (/remote.php/webdav, /public.php) and encoded path separator (%2F/%5C) or relative/backslash hrefs
+        for (const spoofedHref of [
+            "/remote.php/webdav/remote.php/dav/files/alice/Obsidian%20Vault/pwned.md",
+            "/remote.php/carddav/calendars/remote.php/dav/files/alice/Obsidian%20Vault/pwned.md",
+            "/public.php/dav/files/token/remote.php/dav/files/alice/Obsidian%20Vault/pwned.md",
+            "/remote.php/dav/files/alice/Obsidian%20Vault/Notes%2fpwned.md",
+            "/remote.php/dav/files/alice/Obsidian%20Vault/Notes%5cpwned.md",
+            "/remote.php%2fdav%2ffiles%2falice%2fObsidian%20Vault%2fpwned.md",
+            "evil.example.com/remote.php/dav/files/alice/Obsidian%20Vault/pwned.md",
+            "/evil.example.com\\remote.php\\dav\\files\\alice\\Obsidian%20Vault\\pwned.md"
+        ]) {
+            expect(
+                util.decodeWebDavHref(
+                    spoofedHref,
+                    "alice",
+                    "Obsidian Vault"
+                )
+            ).toBeNull();
+        }
+
+        // Legitimate nested directory named remote.php inside the user's vault must still decode normally
+        expect(
+            util.decodeWebDavHref(
+                "/remote.php/dav/files/alice/Obsidian%20Vault/remote.php/dav/files/note.md",
+                "alice",
+                "Obsidian Vault"
+            )
+        ).toBe("remote.php/dav/files/note.md");
+
+        // 4. runConcurrent must wait for all in-flight workers to settle before rejecting (no orphaned background tasks)
+        let activeWorkers: number = 0;
+        let activeAtReject: number = -1;
+        const started: number[] = [];
+        const drainTasks: Array<() => Promise<number>> = Array.from(
+            { length: 8 },
+            (_unused: unknown, index: number) => async (): Promise<number> => {
+                started.push(index);
+                activeWorkers += 1;
+                try {
+                    if (index === 0) {
+                        await new Promise<void>((resolve) => setTimeout(resolve, 5));
+                        throw new Error("chunk failed");
+                    }
+                    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+                    return index;
+                } finally {
+                    activeWorkers -= 1;
+                }
+            }
+        );
+
+        let caughtErr: unknown = null;
+        try {
+            await util.runConcurrent(drainTasks, 3);
+        } catch (err: unknown) {
+            caughtErr = err;
+            activeAtReject = activeWorkers;
+        }
+        expect(caughtErr).toBeInstanceOf(Error);
+        expect((caughtErr as Error).message).toBe("chunk failed");
+        expect(activeAtReject).toBe(0);
+        expect(started).toEqual([0, 1, 2]);
+    });
 });

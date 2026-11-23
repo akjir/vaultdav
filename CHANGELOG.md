@@ -10,6 +10,10 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - Enforce zero `eslint-plugin-obsidianmd` warnings (`fatal === 0`, `errors === 0`, `warnings === 0`) in `.github/workflows/release.yml` and the `/release` workflow.
 
+### Fixed
+- Harden `decodeWebDavHref`, `normalizeVaultPath`, and `isExcludedPath` against backslash/triple-slash URL bypasses, Windows NTFS Alternate Data Stream exclusion bypasses, cross-endpoint href spoofing, and encoded path separator injection.
+- Drain in-flight workers before rejecting in `runConcurrent` to prevent orphaned background requests and memory retention on abort.
+
 ## [1.1.0] - 2026-11-24
 
 ### Added

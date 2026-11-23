@@ -8,7 +8,6 @@ export const SYNC_STATE_RELATIVE_PATH: string = "plugins/vaultdav/sync-state.jso
 const BACKSLASH_REGEX: RegExp = /\\/g;
 const BASE64_CHARS: string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const DOTS_ONLY_REGEX: RegExp = /^\.+$/;
-const DRIVE_PREFIX_REGEX: RegExp = /^[a-zA-Z]:/;
 const FORBIDDEN_OBJECT_KEYS: ReadonlySet<string> = new Set<string>([
     "__proto__",
     "constructor",
@@ -26,6 +25,11 @@ const IGNORED_SEGMENTS_LOWER: ReadonlySet<string> = new Set<string>([
 ]);
 const LEADING_SLASHES_REGEX: RegExp = /^\/+/;
 const MAX_DATE_TIMESTAMP_MS: number = 8_640_000_000_000_000;
+const NEXTCLOUD_ALT_ENDPOINTS_LOWER: ReadonlySet<string> = new Set<string>([
+    "index.php",
+    "public.php",
+    "status.php"
+]);
 const PLUGIN_DIR_RELATIVE_PATH: string = "plugins/vaultdav";
 const PLUGIN_DIR_RELATIVE_PREFIX: string = "plugins/vaultdav/";
 const PLUGINS_RELATIVE_PREFIX: string = "plugins/";
@@ -135,7 +139,11 @@ export function decodeWebDavHref(
     }
 
     let rawPathname: string = href.trim();
-    if (rawPathname === "" || rawPathname.startsWith("//")) {
+    if (
+        rawPathname === "" ||
+        rawPathname.startsWith("//") ||
+        rawPathname.includes("\\")
+    ) {
         return null;
     }
     if (URI_SCHEME_REGEX.test(rawPathname)) {
@@ -153,15 +161,27 @@ export function decodeWebDavHref(
                 return null;
             }
             const schemeIdx: number = rawPathname.indexOf("://");
-            const afterScheme: string =
-                schemeIdx !== -1 ? rawPathname.slice(schemeIdx + 3) : "";
+            if (schemeIdx === -1) {
+                return null;
+            }
+            const afterScheme: string = rawPathname.slice(schemeIdx + 3);
             const slashIdx: number = afterScheme.indexOf("/");
-            const rawUrlPath: string =
-                slashIdx !== -1 ? afterScheme.slice(slashIdx) : "";
-            rawPathname = rawUrlPath !== "" ? rawUrlPath : parsedUrl.pathname;
+            if (slashIdx <= 0) {
+                return null;
+            }
+            const rawAuthority: string = afterScheme.slice(0, slashIdx);
+            if (
+                rawAuthority.includes("@") ||
+                QUERY_OR_HASH_REGEX.test(rawAuthority)
+            ) {
+                return null;
+            }
+            rawPathname = afterScheme.slice(slashIdx);
         } catch {
             return null;
         }
+    } else if (!rawPathname.startsWith("/")) {
+        return null;
     }
     if (QUERY_OR_HASH_REGEX.test(rawPathname)) {
         return null;
@@ -179,42 +199,43 @@ export function decodeWebDavHref(
         if (decodedPart === null) {
             return null;
         }
-        if (hasControlChars(decodedPart)) {
+        if (
+            hasControlChars(decodedPart) ||
+            decodedPart.includes("/") ||
+            decodedPart.includes("\\")
+        ) {
             return null;
         }
-        const subSegments: string[] = decodedPart
-            .normalize("NFC")
-            .replace(BACKSLASH_REGEX, "/")
-            .split("/");
-        for (const sub of subSegments) {
-            const trimmedSub: string = sub.trim();
-            if (
-                trimmedSub === "" ||
-                DOTS_ONLY_REGEX.test(trimmedSub) ||
-                TRAILING_DOT_OR_SPACE_REGEX.test(sub) ||
-                DRIVE_PREFIX_REGEX.test(trimmedSub) ||
-                FORBIDDEN_OBJECT_KEYS.has(trimmedSub.toLowerCase())
-            ) {
-                return null;
-            }
-            decodedSegments.push(sub);
+        const normalizedSegment: string = decodedPart.normalize("NFC");
+        const trimmedSegment: string = normalizedSegment.trim();
+        if (
+            trimmedSegment === "" ||
+            DOTS_ONLY_REGEX.test(trimmedSegment) ||
+            TRAILING_DOT_OR_SPACE_REGEX.test(normalizedSegment) ||
+            normalizedSegment.includes(":") ||
+            FORBIDDEN_OBJECT_KEYS.has(trimmedSegment.toLowerCase())
+        ) {
+            return null;
         }
+        decodedSegments.push(normalizedSegment);
     }
 
     let davIndex: number = -1;
-    for (let i: number = 0; i <= decodedSegments.length - 3; i += 1) {
-        if (
-            decodedSegments[i]?.toLowerCase() === "remote.php" &&
-            decodedSegments[i + 1]?.toLowerCase() === "dav"
-        ) {
+    for (let i: number = 0; i < decodedSegments.length; i += 1) {
+        const segmentLower: string = decodedSegments[i]?.toLowerCase() ?? "";
+        if (NEXTCLOUD_ALT_ENDPOINTS_LOWER.has(segmentLower)) {
+            return null;
+        }
+        if (segmentLower === "remote.php") {
             davIndex = i;
             break;
         }
     }
-    if (davIndex === -1) {
-        return null;
-    }
-    if (decodedSegments[davIndex + 2]?.toLowerCase() !== "files") {
+    if (
+        davIndex === -1 ||
+        decodedSegments[davIndex + 1]?.toLowerCase() !== "dav" ||
+        decodedSegments[davIndex + 2]?.toLowerCase() !== "files"
+    ) {
         return null;
     }
     const hrefUser: string | undefined = decodedSegments[davIndex + 3];
@@ -575,7 +596,7 @@ export function normalizeVaultPath(path: string): string {
             trimmedSegment === "" ||
             DOTS_ONLY_REGEX.test(trimmedSegment) ||
             TRAILING_DOT_OR_SPACE_REGEX.test(rawSegment) ||
-            DRIVE_PREFIX_REGEX.test(trimmedSegment) ||
+            rawSegment.includes(":") ||
             FORBIDDEN_OBJECT_KEYS.has(trimmedSegment.toLowerCase())
         ) {
             return "";
@@ -595,7 +616,7 @@ export function normalizeVaultPath(path: string): string {
                 trimmedSegment === "" ||
                 DOTS_ONLY_REGEX.test(trimmedSegment) ||
                 TRAILING_DOT_OR_SPACE_REGEX.test(segment) ||
-                DRIVE_PREFIX_REGEX.test(trimmedSegment) ||
+                segment.includes(":") ||
                 FORBIDDEN_OBJECT_KEYS.has(trimmedSegment.toLowerCase())
             ) {
                 return "";
@@ -623,6 +644,8 @@ export async function runConcurrent<T>(
     const safeConcurrency: number = Math.max(1, Math.min(5, rawConcurrency));
     const results: T[] = new Array<T>(tasks.length);
     let aborted: boolean = false;
+    let firstError: unknown = undefined;
+    let hasError: boolean = false;
     let nextIndex: number = 0;
 
     const worker = async (): Promise<void> => {
@@ -634,8 +657,12 @@ export async function runConcurrent<T>(
                 try {
                     results[currentIndex] = await task();
                 } catch (err: unknown) {
+                    if (!hasError) {
+                        hasError = true;
+                        firstError = err;
+                    }
                     aborted = true;
-                    throw err;
+                    return;
                 }
             }
         }
@@ -646,7 +673,10 @@ export async function runConcurrent<T>(
     for (let i: number = 0; i < workerCount; i += 1) {
         workers.push(worker());
     }
-    await Promise.all(workers);
+    await Promise.allSettled(workers);
+    if (hasError) {
+        throw firstError;
+    }
     return results;
 }
 
