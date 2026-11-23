@@ -1,18 +1,24 @@
+import * as obsidian from "obsidian";
 import type { App, Command, PluginManifest } from "obsidian";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { log } from "../src/log";
 import VaultDavPlugin from "../src/main";
-import { DEFAULT_SETTINGS, VaultDavSettingTab } from "../src/settings";
+import {
+    DEFAULT_APP_PASSWORD_SECRET_ID,
+    DEFAULT_SETTINGS,
+    VaultDavSettingTab
+} from "../src/settings";
 import { SyncEngine } from "../src/sync/engine";
 import type { SyncResult, VaultDavSettings } from "../src/types";
 import { WebDavClient } from "../src/webdav/client";
+import { SecretStorage as MockSecretStorage } from "./obsidian_mock";
 
 function createConfiguredSettings(
     overrides: Partial<VaultDavSettings> = {}
 ): VaultDavSettings {
     return {
         ...DEFAULT_SETTINGS,
-        appPassword: "app-password-123",
+        appPasswordSecret: DEFAULT_APP_PASSWORD_SECRET_ID,
         remoteBaseDir: "ObsidianVault",
         url: "https://cloud.example.com",
         username: "alice",
@@ -22,12 +28,16 @@ function createConfiguredSettings(
 
 function createTestPlugin(
     vaultName: string = "MyVault",
-    configDir: string = ".obsidian"
+    configDir: string = ".obsidian",
+    includeSecretStorage: boolean = true
 ): {
     app: App;
     plugin: VaultDavPlugin;
+    secretStorage: MockSecretStorage;
 } {
+    const secretStorage: MockSecretStorage = new MockSecretStorage();
     const mockApp: App = {
+        ...(includeSecretStorage ? { secretStorage } : {}),
         vault: {
             adapter: {
                 exists: async (): Promise<boolean> => false,
@@ -45,13 +55,13 @@ function createTestPlugin(
         description: "Test",
         id: "vaultdav",
         isDesktopOnly: false,
-        minAppVersion: "1.5.0",
+        minAppVersion: "1.11.4",
         name: "VaultDAV",
         version: "0.1.0"
     };
 
     const plugin: VaultDavPlugin = new VaultDavPlugin(mockApp, mockManifest);
-    return { app: mockApp, plugin };
+    return { app: mockApp, plugin, secretStorage };
 }
 
 describe("VaultDavPlugin lifecycle, settings, and actions", () => {
@@ -63,12 +73,14 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         vi.useRealTimers();
     });
 
-    it("falls back safely in loadSettings() when loadData() returns null, primitives, or malformed fields", async () => {
-        const { plugin } = createTestPlugin();
+    it("falls back safely in loadSettings() when loadData() returns null, primitives, or malformed fields, and migrates legacy plaintext appPassword into SecretStorage", async () => {
+        const { plugin, secretStorage } = createTestPlugin();
+        const saveDataSpy = vi.spyOn(plugin, "saveData").mockResolvedValue(undefined);
 
         vi.spyOn(plugin, "loadData").mockResolvedValueOnce(null);
         await plugin.loadSettings();
         expect(plugin.settings).toEqual(DEFAULT_SETTINGS);
+        expect(saveDataSpy).not.toHaveBeenCalled();
 
         vi.spyOn(plugin, "loadData").mockResolvedValueOnce("primitive-string");
         await plugin.loadSettings();
@@ -80,6 +92,7 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
 
         vi.spyOn(plugin, "loadData").mockResolvedValueOnce({
             appPassword: 999,
+            appPasswordSecret: "INVALID_SECRET!",
             conflictStrategy: "invalid_mode",
             remoteBaseDir: "  //Notes//Vault/  ",
             syncInterval: -5,
@@ -91,6 +104,13 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
             ...DEFAULT_SETTINGS,
             remoteBaseDir: "Notes/Vault"
         });
+        expect(saveDataSpy).toHaveBeenCalledTimes(1);
+        expect(
+            Object.prototype.hasOwnProperty.call(
+                saveDataSpy.mock.calls[0]?.[0] as Record<string, unknown>,
+                "appPassword"
+            )
+        ).toBe(false);
 
         vi.spyOn(plugin, "loadData").mockResolvedValueOnce({
             appPassword: "  secret  ",
@@ -104,7 +124,7 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         });
         await plugin.loadSettings();
         expect(plugin.settings).toEqual({
-            appPassword: "secret",
+            appPasswordSecret: DEFAULT_APP_PASSWORD_SECRET_ID,
             chunkSizeMB: 10,
             chunkingThresholdMB: 90,
             conflictStrategy: "newest_wins",
@@ -113,23 +133,119 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
             url: "https://nc.example.com",
             username: "bob"
         });
+        expect(secretStorage.getSecret(DEFAULT_APP_PASSWORD_SECRET_ID)).toBe("secret");
+        expect(plugin.getAppPassword()).toBe("secret");
+        const migratedData: Record<string, unknown> =
+            saveDataSpy.mock.calls[1]?.[0] as Record<string, unknown>;
+        expect(migratedData.appPasswordSecret).toBe(DEFAULT_APP_PASSWORD_SECRET_ID);
+        expect(Object.prototype.hasOwnProperty.call(migratedData, "appPassword")).toBe(
+            false
+        );
 
         vi.spyOn(plugin, "loadData").mockResolvedValueOnce({
+            appPasswordSecret: "  custom-nc-key  ",
             chunkSizeMB: 16.8,
             chunkingThresholdMB: 105.4,
             conflictStrategy: "keep_both",
             syncInterval: 12.9
         });
         await plugin.loadSettings();
+        expect(plugin.settings.appPasswordSecret).toBe("custom-nc-key");
         expect(plugin.settings.conflictStrategy).toBe("keep_both");
         expect(plugin.settings.syncInterval).toBe(12);
         expect(plugin.settings.chunkingThresholdMB).toBe(105);
         expect(plugin.settings.chunkSizeMB).toBe(16);
     });
 
-    it("checks credentials in isConfigured()", () => {
-        const { plugin } = createTestPlugin();
+    it("handles collision-safe legacy appPassword migration, deduplication, SecretStorage failures, and unavailable SecretStorage", async () => {
+        const { plugin, secretStorage } = createTestPlugin();
+        const saveDataSpy = vi.spyOn(plugin, "saveData").mockResolvedValue(undefined);
+        const errorSpy = vi.spyOn(log, "error").mockImplementation((): void => undefined);
+        const warnSpy = vi.spyOn(log, "warn").mockImplementation((): void => undefined);
+
+        // 1. Existing secret under default ID with DIFFERENT value must not be overwritten
+        secretStorage.setSecret(DEFAULT_APP_PASSWORD_SECRET_ID, "vault-a-password");
+        vi.spyOn(plugin, "loadData").mockResolvedValueOnce({
+            appPassword: "vault-b-password",
+            url: "https://cloud.example.com",
+            username: "alice"
+        });
+        await plugin.loadSettings();
+        expect(plugin.settings.appPasswordSecret).toBe(
+            `${DEFAULT_APP_PASSWORD_SECRET_ID}-2`
+        );
+        expect(secretStorage.getSecret(DEFAULT_APP_PASSWORD_SECRET_ID)).toBe(
+            "vault-a-password"
+        );
+        expect(secretStorage.getSecret(`${DEFAULT_APP_PASSWORD_SECRET_ID}-2`)).toBe(
+            "vault-b-password"
+        );
+        expect(saveDataSpy).toHaveBeenCalledTimes(1);
+
+        // 2. Existing secret with SAME value reuses existing ID without duplicating
+        vi.spyOn(plugin, "loadData").mockResolvedValueOnce({
+            appPassword: "vault-a-password",
+            url: "https://cloud.example.com",
+            username: "alice"
+        });
+        await plugin.loadSettings();
+        expect(plugin.settings.appPasswordSecret).toBe(DEFAULT_APP_PASSWORD_SECRET_ID);
+        expect(secretStorage.listSecrets()).toEqual([
+            DEFAULT_APP_PASSWORD_SECRET_ID,
+            `${DEFAULT_APP_PASSWORD_SECRET_ID}-2`
+        ]);
+        expect(saveDataSpy).toHaveBeenCalledTimes(2);
+
+        // 3. Existing valid appPasswordSecret in data.json is kept and stale legacy appPassword is purged
+        secretStorage.setSecret("my-own-secret", "real-secret");
+        vi.spyOn(plugin, "loadData").mockResolvedValueOnce({
+            appPassword: "stale-legacy-password",
+            appPasswordSecret: "my-own-secret",
+            url: "https://cloud.example.com",
+            username: "alice"
+        });
+        await plugin.loadSettings();
+        expect(plugin.settings.appPasswordSecret).toBe("my-own-secret");
+        expect(secretStorage.getSecret("my-own-secret")).toBe("real-secret");
+        expect(saveDataSpy).toHaveBeenCalledTimes(3);
+
+        // 4. Failing setSecret must NOT purge data.json and must not leak password
+        vi.spyOn(secretStorage, "setSecret").mockImplementationOnce(() => {
+            throw new Error("Keychain locked");
+        });
+        vi.spyOn(plugin, "loadData").mockResolvedValueOnce({
+            appPassword: "brand-new-secret-pw",
+            url: "https://cloud.example.com",
+            username: "alice"
+        });
+        await plugin.loadSettings();
+        expect(plugin.settings.appPasswordSecret).toBe("");
+        expect(saveDataSpy).toHaveBeenCalledTimes(3);
+        expect(errorSpy).toHaveBeenCalledWith(
+            "Failed to migrate legacy app password to secret storage:",
+            expect.any(Error)
+        );
+
+        // 5. Unavailable SecretStorage fails closed without clobbering legacy data.json
+        const { plugin: oldPlugin } = createTestPlugin("MyVault", ".obsidian", false);
+        const oldSaveSpy = vi.spyOn(oldPlugin, "saveData").mockResolvedValue(undefined);
+        vi.spyOn(oldPlugin, "loadData").mockResolvedValueOnce({
+            appPassword: "legacy-pw",
+            url: "https://cloud.example.com",
+            username: "alice"
+        });
+        await oldPlugin.loadSettings();
+        expect(oldPlugin.settings.appPasswordSecret).toBe("");
+        expect(oldPlugin.isConfigured()).toBe(false);
+        expect(oldSaveSpy).not.toHaveBeenCalled();
+        expect(warnSpy).toHaveBeenCalled();
+    });
+
+    it("checks credentials dynamically against SecretStorage in isConfigured() and getAppPassword()", () => {
+        const { plugin, secretStorage } = createTestPlugin();
         expect(plugin.isConfigured()).toBe(false);
+
+        secretStorage.setSecret(DEFAULT_APP_PASSWORD_SECRET_ID, "app-password-123");
 
         plugin.settings = createConfiguredSettings({ url: "   " });
         expect(plugin.isConfigured()).toBe(false);
@@ -137,11 +253,26 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         plugin.settings = createConfiguredSettings({ username: "   " });
         expect(plugin.isConfigured()).toBe(false);
 
-        plugin.settings = createConfiguredSettings({ appPassword: "   " });
+        plugin.settings = createConfiguredSettings({ appPasswordSecret: "   " });
+        expect(plugin.isConfigured()).toBe(false);
+
+        plugin.settings = createConfiguredSettings({
+            appPasswordSecret: "missing-secret"
+        });
         expect(plugin.isConfigured()).toBe(false);
 
         plugin.settings = createConfiguredSettings();
         expect(plugin.isConfigured()).toBe(true);
+        expect(plugin.getAppPassword()).toBe("app-password-123");
+
+        // Live rotation in SecretStorage is observed immediately without caching
+        secretStorage.setSecret(DEFAULT_APP_PASSWORD_SECRET_ID, "  rotated-pw-456  ");
+        expect(plugin.getAppPassword()).toBe("rotated-pw-456");
+
+        // Control characters in SecretStorage value are rejected
+        secretStorage.setSecret(DEFAULT_APP_PASSWORD_SECRET_ID, "bad\r\npw");
+        expect(plugin.getAppPassword()).toBe("");
+        expect(plugin.isConfigured()).toBe(false);
     });
 
     it("registers ribbon icon, status bar item, commands, setting tab, and auto-sync in onload(), and cleans up in onunload()", async () => {
@@ -272,8 +403,8 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         expect(clearIntervalSpy).toHaveBeenCalledTimes(2);
     });
 
-    it("handles unconfigured state, fallback remoteBaseDir, success, failure, and thrown errors in testConnection()", async () => {
-        const { plugin } = createTestPlugin("  /FallbackVault/  ");
+    it("handles unconfigured state, missing secret, unsupported API, fallback remoteBaseDir, success, failure, and thrown errors in testConnection()", async () => {
+        const { plugin, secretStorage } = createTestPlugin("  /FallbackVault/  ");
         const notifySpy = vi.spyOn(log, "notify").mockImplementation((): void => undefined);
         const errorSpy = vi.spyOn(log, "error").mockImplementation((): void => undefined);
 
@@ -284,6 +415,23 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         );
 
         plugin.settings = createConfiguredSettings({ remoteBaseDir: "   " });
+        const missingSecretResult: boolean = await plugin.testConnection();
+        expect(missingSecretResult).toBe(false);
+        expect(notifySpy).toHaveBeenLastCalledWith(
+            "App password secret was not found in secret storage."
+        );
+
+        const versionSpy = vi
+            .spyOn(obsidian, "requireApiVersion")
+            .mockReturnValueOnce(false);
+        const unsupportedResult: boolean = await plugin.testConnection();
+        expect(unsupportedResult).toBe(false);
+        expect(notifySpy).toHaveBeenLastCalledWith(
+            "Obsidian 1.11.4 or newer is required for secure password storage."
+        );
+        versionSpy.mockRestore();
+
+        secretStorage.setSecret(DEFAULT_APP_PASSWORD_SECRET_ID, "app-password-123");
         let capturedBaseUrl: string = "";
         const checkSpy = vi
             .spyOn(WebDavClient.prototype, "checkConnection")
@@ -338,7 +486,14 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
             "Connection failed: raw string failure"
         );
 
-        const { plugin: emptyNamePlugin } = createTestPlugin("..");
+        const {
+            plugin: emptyNamePlugin,
+            secretStorage: emptyNameSecretStorage
+        } = createTestPlugin("..");
+        emptyNameSecretStorage.setSecret(
+            DEFAULT_APP_PASSWORD_SECRET_ID,
+            "app-password-123"
+        );
         emptyNamePlugin.settings = createConfiguredSettings({ remoteBaseDir: ".." });
         checkSpy.mockImplementationOnce(
             async function (this: WebDavClient): Promise<boolean> {
@@ -354,7 +509,7 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
     });
 
     it("guards concurrent runs, checks configuration, updates and clears status bar, reports SyncResult summaries, and resets isSyncing in triggerSync()", async () => {
-        const { plugin } = createTestPlugin("MyVault");
+        const { plugin, secretStorage } = createTestPlugin("MyVault");
         await plugin.onload();
         const notifySpy = vi.spyOn(log, "notify").mockImplementation((): void => undefined);
         const errorSpy = vi.spyOn(log, "error").mockImplementation((): void => undefined);
@@ -376,6 +531,13 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         );
 
         plugin.settings = createConfiguredSettings({ remoteBaseDir: "" });
+        const missingSecretSyncResult: SyncResult | null = await plugin.triggerSync();
+        expect(missingSecretSyncResult).toBeNull();
+        expect(notifySpy).toHaveBeenLastCalledWith(
+            "App password secret was not found in secret storage."
+        );
+
+        secretStorage.setSecret(DEFAULT_APP_PASSWORD_SECRET_ID, "app-password-123");
         const cleanSyncResult: SyncResult = {
             conflictsResolved: 1,
             deletedLocal: 2,
@@ -446,9 +608,10 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         );
     });
 
-    it("clamps and sanitizes loaded settings, guards 32-bit auto-sync timer overflow, handles undefined statusBarItem on mobile, and serializes saveSettings()", async () => {
+    it("clamps and sanitizes loaded settings, scrubs embedded URL credentials and invalid legacy passwords from data.json, guards 32-bit auto-sync timer overflow, handles undefined statusBarItem on mobile, and serializes saveSettings()", async () => {
         vi.useFakeTimers();
         const { plugin } = createTestPlugin();
+        const scrubSaveSpy = vi.spyOn(plugin, "saveData").mockResolvedValue(undefined);
 
         vi.spyOn(plugin, "loadData").mockResolvedValueOnce({
             appPassword: "bad\r\npassword",
@@ -462,13 +625,36 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         });
         await plugin.loadSettings();
 
-        expect(plugin.settings.appPassword).toBe("");
+        expect(plugin.settings.appPasswordSecret).toBe("");
         expect(plugin.settings.chunkSizeMB).toBe(512);
         expect(plugin.settings.chunkingThresholdMB).toBe(512);
         expect(plugin.settings.remoteBaseDir).toBe("");
         expect(plugin.settings.syncInterval).toBe(10080);
         expect(plugin.settings.url).toBe("https://cloud.example.com/remote.php/dav");
         expect(plugin.settings.username).toBe("");
+        expect(scrubSaveSpy).toHaveBeenCalledTimes(1);
+        const scrubbedPayload: Record<string, unknown> =
+            scrubSaveSpy.mock.calls[0]?.[0] as Record<string, unknown>;
+        expect(Object.prototype.hasOwnProperty.call(scrubbedPayload, "appPassword")).toBe(
+            false
+        );
+        expect(scrubbedPayload.url).toBe("https://cloud.example.com/remote.php/dav");
+        scrubSaveSpy.mockRestore();
+
+        // Embedded URL credentials without legacy appPassword field must also be scrubbed from data.json
+        const urlScrubSpy = vi.spyOn(plugin, "saveData").mockResolvedValue(undefined);
+        vi.spyOn(plugin, "loadData").mockResolvedValueOnce({
+            appPasswordSecret: DEFAULT_APP_PASSWORD_SECRET_ID,
+            url: "https://alice:topsecret@cloud.example.com",
+            username: "alice"
+        });
+        await plugin.loadSettings();
+        expect(plugin.settings.url).toBe("https://cloud.example.com");
+        expect(urlScrubSpy).toHaveBeenCalledTimes(1);
+        expect(
+            (urlScrubSpy.mock.calls[0]?.[0] as Record<string, unknown>).url
+        ).toBe("https://cloud.example.com");
+        urlScrubSpy.mockRestore();
 
         // Direct mutation of syncInterval above 32-bit timer max must still clamp in configureAutoSync()
         const setIntervalSpy = vi.spyOn(window, "setInterval");

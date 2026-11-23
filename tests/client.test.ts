@@ -5,7 +5,7 @@ import type {
 } from "obsidian";
 import * as obsidian from "obsidian";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { RemoteItem, VaultDavSettings } from "../src/types";
+import type { RemoteItem, WebDavClientConfig } from "../src/types";
 import { WebDavClient } from "../src/webdav/client";
 
 function createMockResponse(
@@ -28,13 +28,11 @@ function createMockResponse(
     });
 }
 
-const DEFAULT_TEST_SETTINGS: VaultDavSettings = {
+const DEFAULT_TEST_SETTINGS: WebDavClientConfig = {
     appPassword: "app-password-123",
     chunkSizeMB: 10,
     chunkingThresholdMB: 90,
-    conflictStrategy: "keep_both",
     remoteBaseDir: "Vault/SubVault",
-    syncInterval: 5,
     url: "https://cloud.example.com",
     username: "alice"
 };
@@ -1087,8 +1085,20 @@ describe("WebDavClient", () => {
 
     it("rejects traversal and excluded paths in listDirectory and statRemote, isolates settings from external mutation, and blocks root/excluded remoteBaseDir across all methods", async () => {
         const requestSpy = vi.spyOn(obsidian, "requestUrl");
-        const mutableSettings: VaultDavSettings = { ...DEFAULT_TEST_SETTINGS };
+        const mutableSettings: WebDavClientConfig = { ...DEFAULT_TEST_SETTINGS };
         const client: WebDavClient = new WebDavClient(mutableSettings, 1);
+
+        // Constructor must reject empty or control-char app passwords and never retain plaintext appPassword on the instance
+        for (const badPassword of ["", "   ", "secret\r\ninjected", "pw\0null"]) {
+            expect(
+                () =>
+                    new WebDavClient(
+                        { ...DEFAULT_TEST_SETTINGS, appPassword: badPassword },
+                        1
+                    )
+            ).toThrow(/app password/i);
+        }
+        expect(JSON.stringify(client)).not.toContain("app-password-123");
 
         // Traversal and control-char paths must throw in listDirectory and statRemote instead of normalizing to ""
         for (const badPath of [
@@ -1511,7 +1521,7 @@ describe("WebDavClient", () => {
                 );
                 return Object.assign(delayedResp, {
                     arrayBuffer: delayedResp.then((r) => r.arrayBuffer),
-                    json: delayedResp.then((r) => r.json),
+                    json: delayedResp.then((r): unknown => r.json as unknown),
                     text: delayedResp.then((r) => r.text)
                 });
             }

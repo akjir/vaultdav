@@ -314,7 +314,7 @@ describe("SyncEngine delta calculation and execution", () => {
         };
 
         const settings: VaultDavSettings = {
-            appPassword: "pw",
+            appPasswordSecret: "vaultdav-app-password",
             chunkSizeMB: 10,
             chunkingThresholdMB: 90,
             conflictStrategy: "keep_both",
@@ -467,7 +467,7 @@ describe("SyncEngine delta calculation and execution", () => {
         };
 
         const settings: VaultDavSettings = {
-            appPassword: "pw",
+            appPasswordSecret: "vaultdav-app-password",
             chunkSizeMB: 10,
             chunkingThresholdMB: 90,
             conflictStrategy: "newest_wins",
@@ -546,7 +546,7 @@ describe("SyncEngine delta calculation and execution", () => {
             {} as WebDavClient,
             new SyncStateStore(adapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR),
             {
-                appPassword: "pw",
+                appPasswordSecret: "vaultdav-app-password",
                 chunkSizeMB: 10,
                 chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
@@ -626,7 +626,7 @@ describe("SyncEngine delta calculation and execution", () => {
             mockClient as WebDavClient,
             stateStore,
             {
-                appPassword: "pw",
+                appPasswordSecret: "vaultdav-app-password",
                 chunkSizeMB: 10,
                 chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
@@ -705,7 +705,7 @@ describe("SyncEngine delta calculation and execution", () => {
             mockClient as WebDavClient,
             stateStore,
             {
-                appPassword: "pw",
+                appPasswordSecret: "vaultdav-app-password",
                 chunkSizeMB: 10,
                 chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
@@ -759,7 +759,7 @@ describe("SyncEngine delta calculation and execution", () => {
             {} as WebDavClient,
             new SyncStateStore(cyclicAdapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR),
             {
-                appPassword: "pw",
+                appPasswordSecret: "vaultdav-app-password",
                 chunkSizeMB: 10,
                 chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
@@ -805,7 +805,7 @@ describe("SyncEngine delta calculation and execution", () => {
             {} as WebDavClient,
             new SyncStateStore(deepAdapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR),
             {
-                appPassword: "pw",
+                appPasswordSecret: "vaultdav-app-password",
                 chunkSizeMB: 10,
                 chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
@@ -839,7 +839,7 @@ describe("SyncEngine delta calculation and execution", () => {
             {} as WebDavClient,
             new SyncStateStore(adapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR),
             {
-                appPassword: "pw",
+                appPasswordSecret: "vaultdav-app-password",
                 chunkSizeMB: 10,
                 chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
@@ -889,7 +889,7 @@ describe("SyncEngine delta calculation and execution", () => {
             {} as WebDavClient,
             new SyncStateStore(trashAdapter as DataAdapter, TEST_STATE_PATH, TEST_CONFIG_DIR),
             {
-                appPassword: "pw",
+                appPasswordSecret: "vaultdav-app-password",
                 chunkSizeMB: 10,
                 chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
@@ -1014,7 +1014,7 @@ describe("SyncEngine delta calculation and execution", () => {
             mockClient as WebDavClient,
             stateStore,
             {
-                appPassword: "pw",
+                appPasswordSecret: "vaultdav-app-password",
                 chunkSizeMB: 10,
                 chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
@@ -1159,7 +1159,7 @@ describe("SyncEngine delta calculation and execution", () => {
             mockClient as WebDavClient,
             stateStore,
             {
-                appPassword: "pw",
+                appPasswordSecret: "vaultdav-app-password",
                 chunkSizeMB: 10,
                 chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
@@ -1236,7 +1236,7 @@ describe("SyncEngine delta calculation and execution", () => {
             mockClient as WebDavClient,
             stateStore,
             {
-                appPassword: "pw",
+                appPasswordSecret: "vaultdav-app-password",
                 chunkSizeMB: 10,
                 chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
@@ -1428,7 +1428,7 @@ describe("SyncEngine delta calculation and execution", () => {
                 mockClient as WebDavClient,
                 stateStore,
                 {
-                    appPassword: "pw",
+                    appPasswordSecret: "vaultdav-app-password",
                     chunkSizeMB: 10,
                     chunkingThresholdMB: 90,
                     conflictStrategy: "keep_both",
@@ -1503,7 +1503,7 @@ describe("SyncEngine delta calculation and execution", () => {
             mockClient as WebDavClient,
             stateStore,
             {
-                appPassword: "pw",
+                appPasswordSecret: "vaultdav-app-password",
                 chunkSizeMB: 10,
                 chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
@@ -1652,7 +1652,7 @@ describe("SyncEngine delta calculation and execution", () => {
             mockClient as WebDavClient,
             stateStore,
             {
-                appPassword: "pw",
+                appPasswordSecret: "vaultdav-app-password",
                 chunkSizeMB: 10,
                 chunkingThresholdMB: 5000,
                 conflictStrategy: "keep_both",
@@ -1751,7 +1751,7 @@ describe("SyncEngine delta calculation and execution", () => {
             mockClient as WebDavClient,
             stateStore,
             {
-                appPassword: "pw",
+                appPasswordSecret: "vaultdav-app-password",
                 chunkSizeMB: 10,
                 chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
@@ -1900,7 +1900,7 @@ describe("SyncEngine delta calculation and execution", () => {
             {} as WebDavClient,
             stateStore,
             {
-                appPassword: "pw",
+                appPasswordSecret: "vaultdav-app-password",
                 chunkSizeMB: 10,
                 chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
@@ -2039,7 +2039,7 @@ describe("SyncEngine delta calculation and execution", () => {
             mockClient as WebDavClient,
             stateStore,
             {
-                appPassword: "pw",
+                appPasswordSecret: "vaultdav-app-password",
                 chunkSizeMB: 10,
                 chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
@@ -2237,7 +2237,7 @@ describe("SyncEngine delta calculation and execution", () => {
             mockClient as WebDavClient,
             stateStore,
             {
-                appPassword: "pw",
+                appPasswordSecret: "vaultdav-app-password",
                 chunkSizeMB: 10,
                 chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
@@ -2375,7 +2375,7 @@ describe("SyncEngine delta calculation and execution", () => {
             mockClient as WebDavClient,
             stateStore,
             {
-                appPassword: "pw",
+                appPasswordSecret: "vaultdav-app-password",
                 chunkSizeMB: 10,
                 chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",
@@ -2503,7 +2503,7 @@ describe("SyncEngine delta calculation and execution", () => {
             {} as WebDavClient,
             stateStore,
             {
-                appPassword: "pw",
+                appPasswordSecret: "vaultdav-app-password",
                 chunkSizeMB: 10,
                 chunkingThresholdMB: 90,
                 conflictStrategy: "keep_both",

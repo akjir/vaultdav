@@ -58,8 +58,17 @@ function sanitizeLogArg(arg: unknown): unknown {
     }
     if (arg instanceof Error) {
         const redactedMessage: string = redactSensitiveText(arg.message);
-        if (redactedMessage !== arg.message) {
-            return new Error(redactedMessage);
+        const redactedStack: string | undefined =
+            typeof arg.stack === "string"
+                ? redactSensitiveText(arg.stack)
+                : undefined;
+        if (redactedMessage !== arg.message || redactedStack !== arg.stack) {
+            const sanitizedError: Error = new Error(redactedMessage);
+            sanitizedError.name = arg.name;
+            if (redactedStack !== undefined) {
+                sanitizedError.stack = redactedStack;
+            }
+            return sanitizedError;
         }
     }
     return arg;

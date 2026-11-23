@@ -1,5 +1,14 @@
 import type { RequestUrlParam, RequestUrlResponse, RequestUrlResponsePromise } from "obsidian";
 
+export class BaseComponent {
+    public disabled: boolean = false;
+
+    public setDisabled(disabled: boolean): this {
+        this.disabled = disabled;
+        return this;
+    }
+}
+
 export class Notice {
     public duration: number;
     public message: string;
@@ -105,6 +114,60 @@ export class PluginSettingTab {
     }
 }
 
+const SECRET_ID_REGEX: RegExp = /^[a-z0-9-]{1,64}$/;
+
+export class SecretComponent extends BaseComponent {
+    public static instances: SecretComponent[] = [];
+
+    public app: unknown;
+    public containerEl: HTMLElement;
+    public onChangeHandler: ((value: string | null) => unknown) | null = null;
+    public value: string = "";
+
+    public constructor(app: unknown, containerEl: HTMLElement) {
+        super();
+        this.app = app;
+        this.containerEl = containerEl;
+        const inputEl: HTMLInputElement = document.createElement("input");
+        inputEl.type = "text";
+        inputEl.classList.add("secret-component");
+        this.containerEl.appendChild(inputEl);
+        SecretComponent.instances.push(this);
+    }
+
+    public onChange(cb: (value: string | null) => unknown): this {
+        this.onChangeHandler = cb;
+        return this;
+    }
+
+    public setValue(value: string): this {
+        this.value = value;
+        return this;
+    }
+}
+
+export class SecretStorage {
+    private readonly secrets: Map<string, string> = new Map<string, string>();
+
+    public getSecret(id: string): string | null {
+        const stored: string | undefined = this.secrets.get(id);
+        return stored !== undefined ? stored : null;
+    }
+
+    public listSecrets(): string[] {
+        return Array.from(this.secrets.keys());
+    }
+
+    public setSecret(id: string, secret: string): void {
+        if (!SECRET_ID_REGEX.test(id)) {
+            throw new Error(
+                "Invalid secret ID. Please only use lowercase alphanumeric characters and hyphens, up to 64 characters."
+            );
+        }
+        this.secrets.set(id, secret);
+    }
+}
+
 export class Setting {
     public static instances: Setting[] = [];
 
@@ -118,6 +181,7 @@ export class Setting {
     public isHeading: boolean = false;
     public name: string = "";
     public nameEl: HTMLElement;
+    public secretComponent: SecretComponent | null = null;
     public settingEl: HTMLElement;
     public textComponent: MockTextComponent | null = null;
     public textOnChange: ((value: string) => unknown) | null = null;
@@ -162,6 +226,16 @@ export class Setting {
         };
         this.buttonComponent = buttonObj;
         cb(buttonObj);
+        return this;
+    }
+
+    public addComponent<T extends BaseComponent>(
+        cb: (el: HTMLElement) => T
+    ): this {
+        const component: T = cb(this.controlEl);
+        if (component instanceof SecretComponent) {
+            this.secretComponent = component;
+        }
         return this;
     }
 

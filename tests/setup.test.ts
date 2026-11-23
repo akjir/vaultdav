@@ -6,6 +6,7 @@ import packageJson from "../package.json";
 import VaultDavPlugin from "../src/main";
 import { VaultDavSettingTab } from "../src/settings";
 import versionsJson from "../versions.json";
+import { SecretStorage as MockSecretStorage } from "./obsidian_mock";
 
 const SEMVER_REGEX: RegExp = /^\d+\.\d+\.\d+$/;
 
@@ -29,6 +30,7 @@ describe("Test environment setup and plugin metadata", () => {
         expect(packageLockJson.version).toBe(packageJson.version);
         expect(packageLockJson.packages[""].version).toBe(packageJson.version);
         expect(packageLockJson.packages[""].license).toBe(packageJson.license);
+        expect(manifestJson.minAppVersion).toBe("1.11.4");
         expect(versionsRecord[manifestJson.version]).toBe(manifestJson.minAppVersion);
         expect("dependencies" in record).toBe(false);
         expect("optionalDependencies" in record).toBe(false);
@@ -54,6 +56,7 @@ describe("Test environment setup and plugin metadata", () => {
 
     it("initializes VaultDavPlugin lifecycle and renders VaultDavSettingTab", async () => {
         const mockApp: Partial<App> = {
+            secretStorage: new MockSecretStorage() as unknown as App["secretStorage"],
             vault: {
                 adapter: {
                     exists: async (): Promise<boolean> => false,
@@ -70,7 +73,7 @@ describe("Test environment setup and plugin metadata", () => {
             description: "Test",
             id: "vaultdav",
             isDesktopOnly: false,
-            minAppVersion: "1.5.0",
+            minAppVersion: "1.11.4",
             name: "VaultDAV",
             version: "0.1.0"
         };

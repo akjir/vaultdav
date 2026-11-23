@@ -58,12 +58,7 @@ export function buildNextcloudWebDavBaseUrl(
     remoteBaseDir: string
 ): string {
     const rawUrl: string = url.trim();
-    let parsedUrl: URL | null = null;
-    try {
-        parsedUrl = new URL(rawUrl);
-    } catch {
-        throw new Error("Invalid Nextcloud server URL");
-    }
+    const parsedUrl: URL = parseServerUrl(rawUrl);
     if (parsedUrl.protocol !== "https:") {
         throw new Error("Nextcloud server URL must use HTTPS");
     }
@@ -112,6 +107,14 @@ export function buildNextcloudWebDavBaseUrl(
         return userRootUrl;
     }
     return `${userRootUrl}/${encodedBaseDir}`;
+}
+
+function decodeUriSegment(part: string): string | null {
+    try {
+        return decodeURIComponent(part);
+    } catch {
+        return null;
+    }
 }
 
 export function decodeWebDavHref(
@@ -172,10 +175,8 @@ export function decodeWebDavHref(
         if (DOTS_ONLY_REGEX.test(part.trim())) {
             return null;
         }
-        let decodedPart: string = "";
-        try {
-            decodedPart = decodeURIComponent(part);
-        } catch {
+        const decodedPart: string | null = decodeUriSegment(part);
+        if (decodedPart === null) {
             return null;
         }
         if (hasControlChars(decodedPart)) {
@@ -265,7 +266,7 @@ export function decodeWebDavHref(
 export function delay(ms: number): Promise<void> {
     const safeMs: number = Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0;
     return new Promise<void>((resolve: () => void) => {
-        setTimeout(resolve, safeMs);
+        window.setTimeout(resolve, safeMs);
     });
 }
 
@@ -602,6 +603,14 @@ export function normalizeVaultPath(path: string): string {
         }
     }
     return normalized;
+}
+
+function parseServerUrl(rawUrl: string): URL {
+    try {
+        return new URL(rawUrl);
+    } catch {
+        throw new Error("Invalid Nextcloud server URL");
+    }
 }
 
 export async function runConcurrent<T>(

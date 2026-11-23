@@ -25,5 +25,5 @@ Include the following details in your report:
 
 - VaultDAV requires HTTPS for Nextcloud WebDAV endpoints and rejects embedded URL credentials and query strings.
 - All network traffic goes exclusively through Obsidian `requestUrl` to the user-configured Nextcloud server with zero telemetry or third-party runtime dependencies.
-- App passwords are stored locally in `<config-dir>/plugins/vaultdav/data.json`, which is excluded from synchronization.
-- Sensitive authorization headers and URL userinfo are redacted from logs and notices.
+- App passwords are stored in Obsidian `SecretStorage` (Obsidian 1.11.4+) rather than plaintext in `<config-dir>/plugins/vaultdav/data.json`. Only the secret reference ID (`appPasswordSecret`) is saved in `data.json` (which is also excluded from synchronization). Legacy plaintext `appPassword` fields and embedded URL credentials in `data.json` are migrated or scrubbed automatically on load.
+- Sensitive authorization headers and URL userinfo are redacted from logs, error stack traces, status bar updates, and notices.

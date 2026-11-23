@@ -1,6 +1,10 @@
 import { type RequestUrlParam, type RequestUrlResponse, requestUrl } from "obsidian";
 import { log } from "../log";
-import type { RemoteItem, VaultDavSettings, WebDavRequestOptions } from "../types";
+import type {
+    RemoteItem,
+    WebDavClientConfig,
+    WebDavRequestOptions
+} from "../types";
 import { util } from "../utilities";
 import { buildPropfindBody, parseMultiStatus, parseSingleStat } from "./xml_parser";
 
@@ -32,36 +36,54 @@ const UPLOADS_DAV_MARKER: string = "/remote.php/dav/uploads/";
 const WALK_CONCURRENCY: number = 4;
 const XML_CONTENT_TYPE: string = "application/xml; charset=utf-8";
 
+interface SanitizedClientSettings {
+    chunkSizeMB: number;
+    chunkingThresholdMB: number;
+    remoteBaseDir: string;
+    username: string;
+}
+
 export class WebDavClient {
     private readonly authHeader: string;
     private readonly baseUrl: string;
     private readonly configDir: string;
     private readonly retryBaseMs: number;
-    private readonly settings: Readonly<VaultDavSettings>;
+    private readonly settings: Readonly<SanitizedClientSettings>;
     private readonly uploadsRootUrl: string;
     private readonly userRootUrl: string;
 
     public constructor(
-        settings: VaultDavSettings,
+        config: WebDavClientConfig,
         retryBaseMs: number = DEFAULT_RETRY_BASE_MS,
         configDir: string = ""
     ) {
-        const frozenSettings: Readonly<VaultDavSettings> = Object.freeze({
-            ...settings
+        if (
+            typeof config.appPassword !== "string" ||
+            util.hasControlChars(config.appPassword) ||
+            config.appPassword.trim() === ""
+        ) {
+            throw new Error("Nextcloud app password must not be empty or invalid");
+        }
+        const safeAppPassword: string = config.appPassword.trim();
+        const frozenSettings: Readonly<SanitizedClientSettings> = Object.freeze({
+            chunkSizeMB: config.chunkSizeMB,
+            chunkingThresholdMB: config.chunkingThresholdMB,
+            remoteBaseDir: config.remoteBaseDir,
+            username: config.username
         });
         this.settings = frozenSettings;
         this.configDir =
             configDir !== "" ? util.normalizeVaultPath(configDir) : "";
         this.authHeader = util.encodeBasicAuth(
             frozenSettings.username,
-            frozenSettings.appPassword
+            safeAppPassword
         );
         this.retryBaseMs =
             Number.isFinite(retryBaseMs) && retryBaseMs >= 0
                 ? retryBaseMs
                 : DEFAULT_RETRY_BASE_MS;
         this.userRootUrl = util.buildNextcloudWebDavBaseUrl(
-            frozenSettings.url,
+            config.url,
             frozenSettings.username,
             ""
         );
@@ -71,7 +93,7 @@ export class WebDavClient {
                 ? `${this.userRootUrl.slice(0, markerIndex)}${UPLOADS_DAV_MARKER}${this.userRootUrl.slice(markerIndex + FILES_DAV_MARKER.length)}`
                 : `${this.userRootUrl}/uploads`;
         this.baseUrl = util.buildNextcloudWebDavBaseUrl(
-            frozenSettings.url,
+            config.url,
             frozenSettings.username,
             util.normalizeVaultPath(frozenSettings.remoteBaseDir)
         );
@@ -467,13 +489,13 @@ export class WebDavClient {
         ) {
             return await requestUrl(param);
         }
-        let timerId: ReturnType<typeof setTimeout> | null = null;
+        let timerId: number | null = null;
         try {
             return await Promise.race([
                 requestUrl(param),
                 new Promise<never>(
                     (_resolve, reject: (reason?: unknown) => void) => {
-                        timerId = setTimeout(() => {
+                        timerId = window.setTimeout(() => {
                             reject(
                                 new Error(
                                     `WebDAV ${method} ${path} timed out after ${timeoutMs}ms`
@@ -485,7 +507,7 @@ export class WebDavClient {
             ]);
         } finally {
             if (timerId !== null) {
-                clearTimeout(timerId);
+                window.clearTimeout(timerId);
             }
         }
     }
@@ -657,14 +679,26 @@ export class WebDavClient {
         };
 
         for (let attempt: number = 0; attempt <= DEFAULT_MAX_RETRIES; attempt += 1) {
-            let response: RequestUrlResponse | null = null;
             try {
-                response = await this.executeRequest(
+                const response: RequestUrlResponse = await this.executeRequest(
                     param,
                     options.method,
                     options.path,
                     options.timeoutMs
                 );
+                if (
+                    RETRYABLE_STATUS_CODES.has(response.status) &&
+                    !(response.status === 504 && options.retryOnTimeout === false) &&
+                    attempt < DEFAULT_MAX_RETRIES
+                ) {
+                    const waitMs: number = this.retryBaseMs * Math.pow(2, attempt);
+                    log.debug(
+                        `Retrying ${options.method} ${options.path} after HTTP ${response.status} (${waitMs}ms)`
+                    );
+                    await util.delay(waitMs);
+                    continue;
+                }
+                return response;
             } catch (err: unknown) {
                 const isMockError: boolean =
                     err instanceof Error &&
@@ -685,19 +719,6 @@ export class WebDavClient {
                 }
                 throw err;
             }
-            if (
-                RETRYABLE_STATUS_CODES.has(response.status) &&
-                !(response.status === 504 && options.retryOnTimeout === false) &&
-                attempt < DEFAULT_MAX_RETRIES
-            ) {
-                const waitMs: number = this.retryBaseMs * Math.pow(2, attempt);
-                log.debug(
-                    `Retrying ${options.method} ${options.path} after HTTP ${response.status} (${waitMs}ms)`
-                );
-                await util.delay(waitMs);
-                continue;
-            }
-            return response;
         }
         throw new Error(
             `WebDAV ${options.method} ${options.path} exhausted retry attempts`

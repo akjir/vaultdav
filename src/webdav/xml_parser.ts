@@ -28,7 +28,7 @@ export function findChildByLocalName(
     localName: string
 ): Element | null {
     const targetLower: string = localName.toLowerCase();
-    let children: HTMLCollection | null = null;
+    let children: HTMLCollection = parent.children;
     if ("documentElement" in parent) {
         const root: Element | null = parent.documentElement;
         if (root === null) {
@@ -38,8 +38,6 @@ export function findChildByLocalName(
             return root;
         }
         children = root.children;
-    } else {
-        children = parent.children;
     }
 
     for (let i: number = 0; i < children.length; i += 1) {
@@ -57,7 +55,7 @@ export function findChildrenByLocalName(
 ): Element[] {
     const targetLower: string = localName.toLowerCase();
     const matched: Element[] = [];
-    let children: HTMLCollection | null = null;
+    let children: HTMLCollection = parent.children;
     if ("documentElement" in parent) {
         const root: Element | null = parent.documentElement;
         if (root === null) {
@@ -68,8 +66,6 @@ export function findChildrenByLocalName(
             return matched;
         }
         children = root.children;
-    } else {
-        children = parent.children;
     }
 
     for (let i: number = 0; i < children.length; i += 1) {

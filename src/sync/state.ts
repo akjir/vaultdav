@@ -184,13 +184,12 @@ export class SyncStateStore {
             };
         }
 
-        let raw: string = "";
-        try {
-            raw = await this.adapter.read(this.stateFilePath);
-        } catch (err: unknown) {
-            log.error("Failed to read sync state file:", err);
-            throw err;
-        }
+        const raw: string = await this.adapter
+            .read(this.stateFilePath)
+            .catch((err: unknown): never => {
+                log.error("Failed to read sync state file:", err);
+                throw err;
+            });
 
         if (raw.length > MAX_FILE_SIZE_BYTES) {
             log.warn(
@@ -212,13 +211,12 @@ export class SyncStateStore {
                 parsed !== null &&
                 !Array.isArray(parsed) &&
                 "records" in parsed &&
-                typeof (parsed as { records: unknown }).records === "object" &&
-                (parsed as { records: unknown }).records !== null &&
-                !Array.isArray((parsed as { records: unknown }).records)
+                typeof parsed.records === "object" &&
+                parsed.records !== null &&
+                !Array.isArray(parsed.records)
             ) {
-                const rawRecords: Record<string, unknown> = (
-                    parsed as { records: Record<string, unknown> }
-                ).records;
+                const rawRecords: Record<string, unknown> =
+                    parsed.records as Record<string, unknown>;
                 const validated: Record<string, SyncStateRecord> =
                     createRecordMap();
                 const lowerKeyMap: Map<string, string> = new Map<
@@ -234,8 +232,7 @@ export class SyncStateStore {
                     ) {
                         const normalizedKey: string =
                             util.normalizeVaultPath(key);
-                        const candidate: Partial<SyncStateRecord> =
-                            val as Partial<SyncStateRecord>;
+                        const candidate: Partial<SyncStateRecord> = val;
                         if (
                             normalizedKey !== "" &&
                             !util.isExcludedPath(normalizedKey, this.configDir)

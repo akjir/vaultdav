@@ -115,6 +115,18 @@ describe("log", () => {
             "VaultDAV: Lowercase Basic [REDACTED] and UPPER Basic [REDACTED] with https://[REDACTED]@cloud.example.com/dav and https://cloud.example.com?email=user@example.org#tag@frag",
             4000
         );
+
+        const stackError: Error = new Error("Generic failure");
+        stackError.stack =
+            "Error: Generic failure\n    at https://alice:topsecret@cloud.example.com/dav (Basic YWxpY2U6dG9wc2VjcmV0)";
+        log.error("Stack redaction check", stackError);
+        const stackLoggedArgs: unknown[] = errorSpy.mock.calls[1] ?? [];
+        const sanitizedStackError: Error = stackLoggedArgs[1] as Error;
+        expect(sanitizedStackError.message).toBe("Generic failure");
+        expect(sanitizedStackError.stack).toContain("https://[REDACTED]@cloud.example.com/dav");
+        expect(sanitizedStackError.stack).toContain("Basic [REDACTED]");
+        expect(sanitizedStackError.stack).not.toContain("topsecret");
+        expect(sanitizedStackError.stack).not.toContain("YWxpY2U6dG9wc2VjcmV0");
     });
 
     it("formats real-time status bar transfer progress strings with numeric guards", () => {

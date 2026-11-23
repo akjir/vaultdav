@@ -5,20 +5,27 @@ import VaultDavPlugin from "../src/main";
 import {
     createSettingGroup,
     DEFAULT_SETTINGS,
+    hasEmbeddedUrlCredentials,
     MAX_CHUNK_SIZE_MB,
     MAX_CHUNKING_THRESHOLD_MB,
+    MAX_SECRET_ID_LENGTH,
     MAX_SYNC_INTERVAL_MINUTES,
+    sanitizeSecretId,
     VaultDavSettingTab
 } from "../src/settings";
 import {
+    SecretComponent as MockSecretComponent,
+    SecretStorage as MockSecretStorage,
     Setting as MockSetting,
     SettingGroup as MockSettingGroup
 } from "./obsidian_mock";
 
 function createTestPlugin(
     configDir: string = ".obsidian"
-): { app: App; plugin: VaultDavPlugin } {
+): { app: App; plugin: VaultDavPlugin; secretStorage: MockSecretStorage } {
+    const secretStorage: MockSecretStorage = new MockSecretStorage();
     const mockApp: App = {
+        secretStorage,
         vault: {
             adapter: {
                 exists: async (): Promise<boolean> => false,
@@ -36,13 +43,13 @@ function createTestPlugin(
         description: "Test",
         id: "vaultdav",
         isDesktopOnly: false,
-        minAppVersion: "1.5.0",
+        minAppVersion: "1.11.4",
         name: "VaultDAV",
         version: "0.1.0"
     };
 
     const plugin: VaultDavPlugin = new VaultDavPlugin(mockApp, mockManifest);
-    return { app: mockApp, plugin };
+    return { app: mockApp, plugin, secretStorage };
 }
 
 function getSettingByName(name: string): MockSetting {
@@ -57,13 +64,14 @@ function getSettingByName(name: string): MockSetting {
 
 describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
     beforeEach(() => {
+        MockSecretComponent.instances.length = 0;
         MockSetting.instances.length = 0;
         MockSettingGroup.instances.length = 0;
     });
 
-    it("defines expected DEFAULT_SETTINGS keys, default values, and freezes the object against mutation", () => {
+    it("defines expected DEFAULT_SETTINGS keys without plaintext passwords and freezes the object against mutation", () => {
         expect(Object.keys(DEFAULT_SETTINGS).sort()).toEqual([
-            "appPassword",
+            "appPasswordSecret",
             "chunkSizeMB",
             "chunkingThresholdMB",
             "conflictStrategy",
@@ -73,7 +81,7 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             "username"
         ]);
         expect(DEFAULT_SETTINGS).toEqual({
-            appPassword: "",
+            appPasswordSecret: "",
             chunkSizeMB: 10,
             chunkingThresholdMB: 90,
             conflictStrategy: "keep_both",
@@ -82,6 +90,7 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             url: "",
             username: ""
         });
+        expect("appPassword" in DEFAULT_SETTINGS).toBe(false);
         expect(Object.isFrozen(DEFAULT_SETTINGS)).toBe(true);
         expect(() => {
             (DEFAULT_SETTINGS as { chunkSizeMB: number }).chunkSizeMB = 9999;
@@ -176,8 +185,10 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             "Enter username"
         );
         expect(getSettingByName("App password").desc).toBe(
-            "Nextcloud app password for HTTP basic authentication."
+            "Select or create a secret for your Nextcloud app password."
         );
+        expect(getSettingByName("App password").secretComponent).not.toBeNull();
+        expect(getSettingByName("App password").textComponent).toBeNull();
         expect(getSettingByName("Remote base directory").desc).toBe(
             "Target remote folder path inside the Nextcloud user files root."
         );
@@ -236,18 +247,14 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         versionSpy.mockRestore();
     });
 
-    it("configures mobile input hygiene and input types/bounds on text controls", () => {
+    it("configures mobile input hygiene, SecretComponent binding, and input types/bounds on controls", () => {
         const { app, plugin } = createTestPlugin();
+        plugin.settings.appPasswordSecret = "vaultdav-app-password";
         const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
 
         tab.display();
 
-        for (const label of [
-            "Server URL",
-            "Username",
-            "App password",
-            "Remote base directory"
-        ]) {
+        for (const label of ["Server URL", "Username", "Remote base directory"]) {
             const setting: MockSetting = getSettingByName(label);
             const inputEl: HTMLInputElement | undefined = setting.textComponent?.inputEl;
             expect(inputEl).toBeDefined();
@@ -255,9 +262,10 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             expect(inputEl?.spellcheck).toBe(false);
         }
 
-        const passwordInput: HTMLInputElement | undefined =
-            getSettingByName("App password").textComponent?.inputEl;
-        expect(passwordInput?.type).toBe("password");
+        const appPasswordSetting: MockSetting = getSettingByName("App password");
+        expect(appPasswordSetting.textComponent).toBeNull();
+        expect(appPasswordSetting.secretComponent).not.toBeNull();
+        expect(appPasswordSetting.secretComponent?.value).toBe("vaultdav-app-password");
 
         const intervalInput: HTMLInputElement | undefined =
             getSettingByName("Sync interval").textComponent?.inputEl;
@@ -278,6 +286,24 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         expect(chunkSizeInput?.max).toBe(String(MAX_CHUNK_SIZE_MB));
     });
 
+    it("fails closed without plaintext password input when Obsidian 1.11.4 SecretComponent API is unavailable", () => {
+        const { app, plugin } = createTestPlugin();
+        const versionSpy = vi
+            .spyOn(obsidian, "requireApiVersion")
+            .mockImplementation((version: string): boolean => version !== "1.11.4");
+        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
+
+        tab.display();
+
+        const appPasswordSetting: MockSetting = getSettingByName("App password");
+        expect(appPasswordSetting.secretComponent).toBeNull();
+        expect(appPasswordSetting.textComponent).toBeNull();
+        expect(appPasswordSetting.desc).toBe(
+            "Obsidian 1.11.4 or newer is required for secure password storage."
+        );
+        versionSpy.mockRestore();
+    });
+
     it("normalizes and persists setting changes across all controls", async () => {
         const { app, plugin } = createTestPlugin();
         const saveSpy = vi.spyOn(plugin, "saveSettings").mockResolvedValue(undefined);
@@ -291,8 +317,13 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         await getSettingByName("Username").textOnChange?.("  alice  ");
         expect(plugin.settings.username).toBe("alice");
 
-        await getSettingByName("App password").textOnChange?.("  secret-token  ");
-        expect(plugin.settings.appPassword).toBe("secret-token");
+        await getSettingByName("App password").secretComponent?.onChangeHandler?.(
+            "  vaultdav-app-password  "
+        );
+        expect(plugin.settings.appPasswordSecret).toBe("vaultdav-app-password");
+
+        await getSettingByName("App password").secretComponent?.onChangeHandler?.(null);
+        expect(plugin.settings.appPasswordSecret).toBe("");
 
         await getSettingByName("Remote base directory").textOnChange?.(
             "  /Notes//Subfolder/  "
@@ -342,7 +373,7 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         await chunkSizeSetting.textOnChange?.("   ");
         expect(plugin.settings.chunkSizeMB).toBe(10);
 
-        expect(saveSpy).toHaveBeenCalledTimes(17);
+        expect(saveSpy).toHaveBeenCalledTimes(18);
     });
 
     it("blocks red-team exploit inputs (32-bit timer overflow, OOM chunk sizes, excluded remoteBaseDir, embedded URL credentials, and control/colon injection)", async () => {
@@ -427,8 +458,42 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         await getSettingByName("Username").textOnChange?.("alice\x00admin");
         expect(plugin.settings.username).toBe("");
 
-        await getSettingByName("App password").textOnChange?.("token\r\ninjected");
-        expect(plugin.settings.appPassword).toBe("");
+        await getSettingByName("App password").secretComponent?.onChangeHandler?.(
+            "token\r\ninjected"
+        );
+        expect(plugin.settings.appPasswordSecret).toBe("");
+
+        for (const badSecretId of [
+            "",
+            "   ",
+            "UPPERCASE",
+            "has spaces",
+            "bad_underscore",
+            "../traversal",
+            "a".repeat(MAX_SECRET_ID_LENGTH + 1),
+            null,
+            123
+        ]) {
+            expect(sanitizeSecretId(badSecretId)).toBe("");
+        }
+        expect(sanitizeSecretId("  vaultdav-app-password-2  ")).toBe(
+            "vaultdav-app-password-2"
+        );
+        expect(
+            hasEmbeddedUrlCredentials(
+                "https://alice:secret@cloud.example.com/remote.php/dav"
+            )
+        ).toBe(true);
+        expect(
+            hasEmbeddedUrlCredentials(
+                "https://alice:secret@cloud.example.com\r\nX-Injected: true"
+            )
+        ).toBe(true);
+        expect(
+            hasEmbeddedUrlCredentials(
+                "https://cloud.example.com?email=user@example.org"
+            )
+        ).toBe(false);
     });
 
     it("disables Test connection button during execution and restores state in finally", async () => {

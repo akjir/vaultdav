@@ -1,13 +1,16 @@
-import { Plugin } from "obsidian";
+import { Plugin, requireApiVersion, type SecretStorage } from "obsidian";
 import { log, redactSensitiveText } from "./log";
 import {
+    DEFAULT_APP_PASSWORD_SECRET_ID,
     DEFAULT_SETTINGS,
+    hasEmbeddedUrlCredentials,
     MAX_SYNC_INTERVAL_MINUTES,
     VaultDavSettingTab,
     sanitizeAppPassword,
     sanitizeChunkSizeMB,
     sanitizeChunkingThresholdMB,
     sanitizeRemoteBaseDir,
+    sanitizeSecretId,
     sanitizeServerUrl,
     sanitizeSyncInterval,
     sanitizeUsername
@@ -18,10 +21,13 @@ import type {
     ConflictStrategy,
     ProgressReporter,
     SyncResult,
-    VaultDavSettings
+    VaultDavSettings,
+    WebDavClientConfig
 } from "./types";
 import { util } from "./utilities";
 import { WebDavClient } from "./webdav/client";
+
+const MAX_MIGRATION_SECRET_ATTEMPTS: number = 1000;
 
 export default class VaultDavPlugin extends Plugin implements ProgressReporter {
     private activeSyncInterval: number = 0;
@@ -65,6 +71,43 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
         }
     }
 
+    public getAppPassword(): string {
+        const secretId: string = sanitizeSecretId(
+            this.settings.appPasswordSecret
+        );
+        if (secretId === "") {
+            return "";
+        }
+        const storage: SecretStorage | null = this.getSecretStorage();
+        if (storage === null) {
+            return "";
+        }
+        try {
+            const storedSecret: string | null = storage.getSecret(secretId);
+            if (typeof storedSecret !== "string") {
+                return "";
+            }
+            return sanitizeAppPassword(storedSecret);
+        } catch (err: unknown) {
+            log.warn("Failed to read app password from secret storage:", err);
+            return "";
+        }
+    }
+
+    private getResolvedClientConfig(
+        resolvedSettings: VaultDavSettings,
+        appPassword: string
+    ): WebDavClientConfig {
+        return {
+            appPassword,
+            chunkSizeMB: resolvedSettings.chunkSizeMB,
+            chunkingThresholdMB: resolvedSettings.chunkingThresholdMB,
+            remoteBaseDir: resolvedSettings.remoteBaseDir,
+            url: resolvedSettings.url,
+            username: resolvedSettings.username
+        };
+    }
+
     private getResolvedSettings(): VaultDavSettings {
         const configDir: string = this.app.vault.configDir;
         const normalizedRemoteBaseDir: string = sanitizeRemoteBaseDir(
@@ -87,26 +130,48 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
         };
     }
 
+    private getSecretStorage(): SecretStorage | null {
+        if (!requireApiVersion("1.11.4")) {
+            return null;
+        }
+        const storage: SecretStorage | undefined = this.app.secretStorage;
+        if (
+            storage === undefined ||
+            storage === null ||
+            typeof storage.getSecret !== "function" ||
+            typeof storage.setSecret !== "function"
+        ) {
+            return null;
+        }
+        return storage;
+    }
+
+    public hasSecretStorage(): boolean {
+        return this.getSecretStorage() !== null;
+    }
+
     public isConfigured(): boolean {
         return (
             this.settings.url.trim() !== "" &&
             this.settings.username.trim() !== "" &&
-            this.settings.appPassword.trim() !== ""
+            this.getAppPassword() !== ""
         );
     }
 
     public async loadSettings(): Promise<void> {
         const loaded: unknown = await this.loadData();
+        if (this.isUnloaded) {
+            return;
+        }
         const record: Record<string, unknown> =
             typeof loaded === "object" && loaded !== null
                 ? (loaded as Record<string, unknown>)
                 : {};
         const configDir: string = this.app.vault.configDir;
 
-        const appPassword: string =
-            typeof record.appPassword === "string"
-                ? sanitizeAppPassword(record.appPassword)
-                : DEFAULT_SETTINGS.appPassword;
+        let appPasswordSecret: string = sanitizeSecretId(
+            record.appPasswordSecret
+        );
         const chunkSizeMB: number = sanitizeChunkSizeMB(record.chunkSizeMB);
         const chunkingThresholdMB: number = sanitizeChunkingThresholdMB(
             record.chunkingThresholdMB
@@ -121,17 +186,42 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
                 ? sanitizeRemoteBaseDir(record.remoteBaseDir, configDir)
                 : DEFAULT_SETTINGS.remoteBaseDir;
         const syncInterval: number = sanitizeSyncInterval(record.syncInterval);
+        const rawUrl: string = typeof record.url === "string" ? record.url : "";
+        const hadEmbeddedUrlCredentials: boolean =
+            rawUrl !== "" && hasEmbeddedUrlCredentials(rawUrl);
         const url: string =
-            typeof record.url === "string"
-                ? sanitizeServerUrl(record.url)
-                : DEFAULT_SETTINGS.url;
+            rawUrl !== "" ? sanitizeServerUrl(rawUrl) : DEFAULT_SETTINGS.url;
         const username: string =
             typeof record.username === "string"
                 ? sanitizeUsername(record.username)
                 : DEFAULT_SETTINGS.username;
 
+        const hasLegacyPasswordField: boolean =
+            Object.prototype.hasOwnProperty.call(record, "appPassword");
+        const legacyAppPassword: string =
+            typeof record.appPassword === "string"
+                ? sanitizeAppPassword(record.appPassword)
+                : "";
+        let shouldPersistScrubbedSettings: boolean = hadEmbeddedUrlCredentials;
+
+        if (hasLegacyPasswordField) {
+            if (legacyAppPassword === "") {
+                shouldPersistScrubbedSettings = true;
+            } else {
+                const migratedSecretId: string | null =
+                    this.migrateLegacyAppPassword(
+                        legacyAppPassword,
+                        appPasswordSecret
+                    );
+                if (migratedSecretId !== null) {
+                    appPasswordSecret = migratedSecretId;
+                    shouldPersistScrubbedSettings = true;
+                }
+            }
+        }
+
         this.settings = {
-            appPassword,
+            appPasswordSecret,
             chunkSizeMB,
             chunkingThresholdMB,
             conflictStrategy,
@@ -140,6 +230,66 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
             url,
             username
         };
+
+        if (shouldPersistScrubbedSettings && !this.isUnloaded) {
+            try {
+                await this.persistSettingsData();
+            } catch (err: unknown) {
+                log.error(
+                    "Failed to remove legacy plaintext credentials from plugin data:",
+                    err
+                );
+            }
+        }
+    }
+
+    private migrateLegacyAppPassword(
+        legacyAppPassword: string,
+        existingSecretId: string
+    ): string | null {
+        const storage: SecretStorage | null = this.getSecretStorage();
+        if (storage === null) {
+            log.warn(
+                "Obsidian 1.11.4 or newer is required to migrate the stored app password into secret storage."
+            );
+            return null;
+        }
+        try {
+            const resolved: { secretId: string; shouldWrite: boolean } | null =
+                this.resolveMigrationSecretId(
+                    storage,
+                    existingSecretId,
+                    legacyAppPassword
+                );
+            if (resolved === null) {
+                log.warn(
+                    "Unable to allocate an unused secret ID for legacy app password migration."
+                );
+                return null;
+            }
+            if (resolved.shouldWrite) {
+                storage.setSecret(resolved.secretId, legacyAppPassword);
+                const verified: string | null = storage.getSecret(
+                    resolved.secretId
+                );
+                if (
+                    typeof verified !== "string" ||
+                    sanitizeAppPassword(verified) !== legacyAppPassword
+                ) {
+                    log.error(
+                        "Failed to verify migrated app password in secret storage."
+                    );
+                    return null;
+                }
+            }
+            return resolved.secretId;
+        } catch (err: unknown) {
+            log.error(
+                "Failed to migrate legacy app password to secret storage:",
+                err
+            );
+            return null;
+        }
     }
 
     public async onload(): Promise<void> {
@@ -191,6 +341,28 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
         this.statusBarItem = null;
     }
 
+    private persistSettingsData(): Promise<void> {
+        const snapshot: VaultDavSettings = {
+            appPasswordSecret: sanitizeSecretId(this.settings.appPasswordSecret),
+            chunkSizeMB: this.settings.chunkSizeMB,
+            chunkingThresholdMB: this.settings.chunkingThresholdMB,
+            conflictStrategy: this.settings.conflictStrategy,
+            remoteBaseDir: this.settings.remoteBaseDir,
+            syncInterval: this.settings.syncInterval,
+            url: sanitizeServerUrl(this.settings.url),
+            username: this.settings.username
+        };
+        const writeTask = async (): Promise<void> => {
+            await this.saveData(snapshot);
+        };
+        const nextPromise: Promise<void> = this.saveSettingsPromise.then(
+            writeTask,
+            writeTask
+        );
+        this.saveSettingsPromise = nextPromise.catch(() => undefined);
+        return nextPromise;
+    }
+
     public reportProgress(message: string): void {
         if (this.statusBarItem === null || this.statusBarItem === undefined) {
             return;
@@ -204,29 +376,85 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
         }
     }
 
-    public saveSettings(): Promise<void> {
-        const snapshot: VaultDavSettings = { ...this.settings };
-        const writeTask = async (): Promise<void> => {
-            await this.saveData(snapshot);
-            this.configureAutoSync();
-        };
-        const nextPromise: Promise<void> = this.saveSettingsPromise.then(
-            writeTask,
-            writeTask
+    private resolveMigrationSecretId(
+        storage: SecretStorage,
+        existingSecretId: string,
+        legacyAppPassword: string
+    ): { secretId: string; shouldWrite: boolean } | null {
+        if (existingSecretId !== "") {
+            const existingSecret: string | null =
+                storage.getSecret(existingSecretId);
+            if (
+                typeof existingSecret === "string" &&
+                sanitizeAppPassword(existingSecret) !== ""
+            ) {
+                return { secretId: existingSecretId, shouldWrite: false };
+            }
+            return { secretId: existingSecretId, shouldWrite: true };
+        }
+
+        const listedIds: ReadonlySet<string> = new Set<string>(
+            typeof storage.listSecrets === "function"
+                ? storage.listSecrets()
+                : []
         );
-        this.saveSettingsPromise = nextPromise.catch(() => undefined);
-        return nextPromise;
+        for (
+            let attempt: number = 1;
+            attempt <= MAX_MIGRATION_SECRET_ATTEMPTS;
+            attempt += 1
+        ) {
+            const candidate: string =
+                attempt === 1
+                    ? DEFAULT_APP_PASSWORD_SECRET_ID
+                    : `${DEFAULT_APP_PASSWORD_SECRET_ID}-${attempt}`;
+            const existingValue: string | null = storage.getSecret(candidate);
+            if (
+                typeof existingValue === "string" &&
+                sanitizeAppPassword(existingValue) === legacyAppPassword
+            ) {
+                return { secretId: candidate, shouldWrite: false };
+            }
+            if (!listedIds.has(candidate) && existingValue === null) {
+                return { secretId: candidate, shouldWrite: true };
+            }
+        }
+        return null;
+    }
+
+    public async saveSettings(): Promise<void> {
+        await this.persistSettingsData();
+        this.configureAutoSync();
     }
 
     public async testConnection(): Promise<boolean> {
-        if (!this.isConfigured()) {
+        if (!this.hasSecretStorage()) {
+            log.notify(
+                "Obsidian 1.11.4 or newer is required for secure password storage."
+            );
+            return false;
+        }
+        const secretId: string = sanitizeSecretId(
+            this.settings.appPasswordSecret
+        );
+        if (
+            this.settings.url.trim() === "" ||
+            this.settings.username.trim() === "" ||
+            secretId === ""
+        ) {
             log.notify("Configure server URL, username, and app password first.");
+            return false;
+        }
+        const appPassword: string = this.getAppPassword();
+        if (appPassword === "") {
+            log.notify("App password secret was not found in secret storage.");
             return false;
         }
         try {
             const resolvedSettings: VaultDavSettings = this.getResolvedSettings();
+            const clientConfig: WebDavClientConfig =
+                this.getResolvedClientConfig(resolvedSettings, appPassword);
             const client: WebDavClient = new WebDavClient(
-                resolvedSettings,
+                clientConfig,
                 undefined,
                 this.app.vault.configDir
             );
@@ -250,14 +478,34 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
             log.notify("Synchronization is already in progress.");
             return null;
         }
-        if (!this.isConfigured()) {
+        if (!this.hasSecretStorage()) {
+            log.notify(
+                "Obsidian 1.11.4 or newer is required for secure password storage."
+            );
+            return null;
+        }
+        const secretId: string = sanitizeSecretId(
+            this.settings.appPasswordSecret
+        );
+        if (
+            this.settings.url.trim() === "" ||
+            this.settings.username.trim() === "" ||
+            secretId === ""
+        ) {
             log.notify("Configure Nextcloud WebDAV settings before syncing.");
+            return null;
+        }
+        const appPassword: string = this.getAppPassword();
+        if (appPassword === "") {
+            log.notify("App password secret was not found in secret storage.");
             return null;
         }
 
         this.isSyncing = true;
         try {
             const resolvedSettings: VaultDavSettings = this.getResolvedSettings();
+            const clientConfig: WebDavClientConfig =
+                this.getResolvedClientConfig(resolvedSettings, appPassword);
             const configDir: string = this.app.vault.configDir;
             const store: SyncStateStore =
                 this.stateStore ??
@@ -267,7 +515,7 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
                     configDir
                 );
             const client: WebDavClient = new WebDavClient(
-                resolvedSettings,
+                clientConfig,
                 undefined,
                 configDir
             );

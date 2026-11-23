@@ -29,7 +29,11 @@ const ALLOWED_CAPITALIZED_WORDS: ReadonlySet<string> = new Set<string>([
     "WebDAV"
 ]);
 const ASCII_PRINTABLE_REGEX: RegExp = /^[\x20-\x7e]+$/;
+const BARE_TIMER_CALL_REGEX: RegExp =
+    /(?:^|[^.\w])(?:setTimeout|clearTimeout|setInterval|clearInterval)\s*\(/;
 const CONTROL_CHAR_REGEX_LITERAL: RegExp = /\/[^\n/]*\\x00[^\n/]*\//;
+const DIRECT_CALL_SET_HEADING_REGEX: RegExp =
+    /(?:(?:^|[;={(\n])\s*|\breturn\s+)[A-Za-z_$][A-Za-z0-9_$]*\([^)]*\)\s*\.\s*setHeading\s*\(/;
 const EXPLICIT_ANY_REGEX: RegExp = /(:\s*any\b|\bas\s+any\b|<any>)/;
 const FORBIDDEN_CONSOLE_REGEX: RegExp = /\bconsole\.(log|info)\s*\(/;
 const FORBIDDEN_DOM_HTML_REGEX: RegExp = /\.(innerHTML|outerHTML|insertAdjacentHTML)\b/;
@@ -43,7 +47,7 @@ const LOG_NOTIFY_REGEX: RegExp = /\blog\.notify\(\s*["']([^"']+)["']/g;
 const LOOKBEHIND_REGEX: RegExp = /\(\?<[=!]/;
 const MANUAL_HEADING_REGEX: RegExp = /\.createEl\(\s*["']h[1-6]["']/;
 const NON_ALPHA_STRIP_REGEX: RegExp = /^[^A-Za-z]+|[^A-Za-z]+$/g;
-const ONUNLOAD_BLOCK_REGEX: RegExp = /onunload\s*\([^)]*\)[^{]*\{([\s\S]*?)\n    \}/;
+const ONUNLOAD_BLOCK_REGEX: RegExp = /onunload\s*\([^)]*\)[^{]*\{([\s\S]*?)\n {4}\}/;
 const PLACEHOLDER_SKIP_REGEX: RegExp = /^(https?:\/\/|\d+$|x+-x+)/i;
 const PROBLEMATIC_HEADING_REGEX: RegExp = /\b(vaultdav|settings?|general|options?)\b/i;
 const SET_BUTTON_TEXT_REGEX: RegExp = /\.setButtonText\(\s*["']([^"']+)["']\s*\)/g;
@@ -112,7 +116,7 @@ describe("Obsidian Plugin Linter static guard (eslint-plugin-obsidianmd)", () =>
 
     beforeAll(async () => {
         const fsModuleName: string = "node:fs";
-        const fs: NodeFsModule = (await import(fsModuleName)) as unknown as NodeFsModule;
+        const fs: NodeFsModule = (await import(fsModuleName)) as NodeFsModule;
         sourceFiles = collectSourceFiles(fs, "src");
     });
 
@@ -165,10 +169,29 @@ describe("Obsidian Plugin Linter static guard (eslint-plugin-obsidianmd)", () =>
     });
 
     it("prohibits manual HTML heading elements and problematic settings headings (settings-tab/*)", () => {
+        expect(
+            DIRECT_CALL_SET_HEADING_REGEX.test(
+                '        createSettingGroup(containerEl)\n            .setHeading("Advanced sync")'
+            )
+        ).toBe(true);
+        expect(
+            DIRECT_CALL_SET_HEADING_REGEX.test(
+                '        new Setting(containerEl).setName(text).setHeading();'
+            )
+        ).toBe(false);
+        expect(
+            DIRECT_CALL_SET_HEADING_REGEX.test(
+                '        advancedGroup\n            .setHeading("Advanced sync")'
+            )
+        ).toBe(false);
         for (const file of sourceFiles) {
             expect(
                 MANUAL_HEADING_REGEX.test(file.content),
                 `${file.relativePath} must not create manual h1-h6 elements`
+            ).toBe(false);
+            expect(
+                DIRECT_CALL_SET_HEADING_REGEX.test(file.content),
+                `${file.relativePath} must not chain .setHeading() directly on a function call`
             ).toBe(false);
             SET_HEADING_REGEX.lastIndex = 0;
             let match: RegExpExecArray | null = SET_HEADING_REGEX.exec(file.content);
@@ -180,6 +203,19 @@ describe("Obsidian Plugin Linter static guard (eslint-plugin-obsidianmd)", () =>
                 ).toBe(false);
                 match = SET_HEADING_REGEX.exec(file.content);
             }
+        }
+    });
+
+    it("enforces window-prefixed timers in src/ (prefer-window-timers)", () => {
+        expect(BARE_TIMER_CALL_REGEX.test("setTimeout(resolve, 10);")).toBe(true);
+        expect(BARE_TIMER_CALL_REGEX.test("clearTimeout(timerId);")).toBe(true);
+        expect(BARE_TIMER_CALL_REGEX.test("window.setTimeout(resolve, 10);")).toBe(false);
+        expect(BARE_TIMER_CALL_REGEX.test("window.clearTimeout(timerId);")).toBe(false);
+        for (const file of sourceFiles) {
+            expect(
+                BARE_TIMER_CALL_REGEX.test(file.content),
+                `${file.relativePath} must use window.setTimeout/clearTimeout/setInterval/clearInterval`
+            ).toBe(false);
         }
     });
 
@@ -238,15 +274,39 @@ describe("Obsidian Plugin Linter static guard (eslint-plugin-obsidianmd)", () =>
         }
     });
 
-    it("guards SettingGroup usage behind requireApiVersion('1.11.0') (no-unsupported-api)", () => {
+    it("guards SettingGroup, SecretComponent, and SecretStorage usage behind requireApiVersion and stores secrets outside data.json", () => {
         const settingsFile: SourceFileEntry | undefined = sourceFiles.find(
             (file: SourceFileEntry): boolean => file.relativePath === "src/settings.ts"
         );
+        const mainFile: SourceFileEntry | undefined = sourceFiles.find(
+            (file: SourceFileEntry): boolean => file.relativePath === "src/main.ts"
+        );
+        const typesFile: SourceFileEntry | undefined = sourceFiles.find(
+            (file: SourceFileEntry): boolean => file.relativePath === "src/types.ts"
+        );
         expect(settingsFile).toBeDefined();
-        const content: string = settingsFile?.content ?? "";
-        expect(content).toContain('requireApiVersion("1.11.0")');
-        expect(content).not.toMatch(/=\s*SettingGroup\b/);
-        expect(content).not.toMatch(/typeof\s+SettingGroup\s*\|/);
+        expect(mainFile).toBeDefined();
+        expect(typesFile).toBeDefined();
+        const settingsContent: string = settingsFile?.content ?? "";
+        const mainContent: string = mainFile?.content ?? "";
+        const typesContent: string = typesFile?.content ?? "";
+
+        expect(manifestJson.minAppVersion).toBe("1.11.4");
+        expect(settingsContent).toContain('requireApiVersion("1.11.0")');
+        expect(settingsContent).toContain('requireApiVersion("1.11.4")');
+        expect(settingsContent).toContain("new SecretComponent(this.app");
+        expect(settingsContent).not.toMatch(/inputEl\.type\s*=\s*["']password["']/);
+        expect(settingsContent).not.toMatch(/=\s*SettingGroup\b/);
+        expect(settingsContent).not.toMatch(/typeof\s+SettingGroup\s*\|/);
+        expect(mainContent).toContain('requireApiVersion("1.11.4")');
+        expect(mainContent).toContain("secretStorage");
+
+        const settingsInterfaceMatch: RegExpExecArray | null =
+            /export interface VaultDavSettings\s*\{([\s\S]*?)\}/.exec(typesContent);
+        expect(settingsInterfaceMatch).not.toBeNull();
+        const settingsInterfaceBody: string = settingsInterfaceMatch?.[1] ?? "";
+        expect(settingsInterfaceBody).toContain("appPasswordSecret: string;");
+        expect(settingsInterfaceBody).not.toMatch(/\bappPassword\s*:/);
     });
 
     it("enforces command ID, command name, and no-default-hotkeys rules (commands/*)", () => {
@@ -357,7 +417,13 @@ describe("Obsidian Plugin Linter static guard (eslint-plugin-obsidianmd)", () =>
             "Configure server URL, username, and app password first."
         );
         expect(extractedLiterals).toContain(
-            "Nextcloud app password for HTTP basic authentication."
+            "Select or create a secret for your Nextcloud app password."
+        );
+        expect(extractedLiterals).toContain(
+            "Obsidian 1.11.4 or newer is required for secure password storage."
+        );
+        expect(extractedLiterals).toContain(
+            "App password secret was not found in secret storage."
         );
         expect(extractedLiterals).toContain("Enter username");
         expect(extractedLiterals.length).toBeGreaterThanOrEqual(30);

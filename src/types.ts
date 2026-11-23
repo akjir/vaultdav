@@ -72,12 +72,21 @@ export interface SyncStateRecord {
 }
 
 export interface VaultDavSettings {
-    appPassword: string;
+    appPasswordSecret: string;
     chunkSizeMB: number;
     chunkingThresholdMB: number;
     conflictStrategy: ConflictStrategy;
     remoteBaseDir: string;
     syncInterval: number;
+    url: string;
+    username: string;
+}
+
+export interface WebDavClientConfig {
+    appPassword: string;
+    chunkSizeMB: number;
+    chunkingThresholdMB: number;
+    remoteBaseDir: string;
     url: string;
     username: string;
 }

@@ -2,6 +2,7 @@ import {
     type App,
     PluginSettingTab,
     requireApiVersion,
+    SecretComponent,
     Setting,
     SettingGroup
 } from "obsidian";
@@ -18,9 +19,10 @@ export type SettingGroupConstructor = new (
     containerEl: HTMLElement
 ) => SettingGroupBuilder;
 
+export const DEFAULT_APP_PASSWORD_SECRET_ID: string = "vaultdav-app-password";
 export const DEFAULT_SETTINGS: Readonly<VaultDavSettings> =
     Object.freeze<VaultDavSettings>({
-        appPassword: "",
+        appPasswordSecret: "",
         chunkSizeMB: 10,
         chunkingThresholdMB: 90,
         conflictStrategy: "keep_both",
@@ -31,8 +33,10 @@ export const DEFAULT_SETTINGS: Readonly<VaultDavSettings> =
     });
 export const MAX_CHUNK_SIZE_MB: number = 512;
 export const MAX_CHUNKING_THRESHOLD_MB: number = 512;
+export const MAX_SECRET_ID_LENGTH: number = 64;
 export const MAX_SYNC_INTERVAL_MINUTES: number = 10080;
 
+const SECRET_ID_REGEX: RegExp = /^[a-z0-9-]+$/;
 const URL_USERINFO_REGEX: RegExp = /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/\s?#]+@/i;
 
 export function createSettingGroup(
@@ -60,6 +64,10 @@ export function createSettingGroup(
         }
     };
     return fallbackGroup;
+}
+
+export function hasEmbeddedUrlCredentials(value: string): boolean {
+    return URL_USERINFO_REGEX.test(value.trim());
 }
 
 export function sanitizeAppPassword(value: string): string {
@@ -96,6 +104,21 @@ export function sanitizeRemoteBaseDir(value: string, configDir: string): string 
     return normalized !== "" && util.isExcludedPath(normalized, configDir)
         ? ""
         : normalized;
+}
+
+export function sanitizeSecretId(value: unknown): string {
+    if (typeof value !== "string" || util.hasControlChars(value)) {
+        return "";
+    }
+    const trimmed: string = value.trim();
+    if (
+        trimmed === "" ||
+        trimmed.length > MAX_SECRET_ID_LENGTH ||
+        !SECRET_ID_REGEX.test(trimmed)
+    ) {
+        return "";
+    }
+    return trimmed;
 }
 
 export function sanitizeServerUrl(value: string): string {
@@ -188,21 +211,31 @@ export class VaultDavSettingTab extends PluginSettingTab {
                 setting
                     .setName("App password")
                     .setDesc(
-                        "Nextcloud app password for HTTP basic authentication."
-                    )
-                    .addText((text) => {
-                        text.inputEl.type = "password";
-                        text.inputEl.autocapitalize = "none";
-                        text.inputEl.spellcheck = false;
-                        return text
-                            .setPlaceholder("xxxxx-xxxxx-xxxxx-xxxxx-xxxxx")
-                            .setValue(this.pluginInstance.settings.appPassword)
-                            .onChange(async (value: string): Promise<void> => {
-                                this.pluginInstance.settings.appPassword =
-                                    sanitizeAppPassword(value);
-                                await this.pluginInstance.saveSettings();
-                            });
-                    });
+                        "Select or create a secret for your Nextcloud app password."
+                    );
+                if (
+                    requireApiVersion("1.11.4") &&
+                    typeof SecretComponent === "function" &&
+                    typeof setting.addComponent === "function"
+                ) {
+                    setting.addComponent((el: HTMLElement): SecretComponent =>
+                        new SecretComponent(this.app, el)
+                            .setValue(
+                                this.pluginInstance.settings.appPasswordSecret
+                            )
+                            .onChange(
+                                async (value: string | null): Promise<void> => {
+                                    this.pluginInstance.settings.appPasswordSecret =
+                                        sanitizeSecretId(value);
+                                    await this.pluginInstance.saveSettings();
+                                }
+                            )
+                    );
+                } else {
+                    setting.setDesc(
+                        "Obsidian 1.11.4 or newer is required for secure password storage."
+                    );
+                }
             })
             .addSetting((setting: Setting): void => {
                 setting
@@ -317,7 +350,9 @@ export class VaultDavSettingTab extends PluginSettingTab {
             }
         );
 
-        createSettingGroup(containerEl)
+        const advancedGroup: SettingGroupBuilder =
+            createSettingGroup(containerEl);
+        advancedGroup
             .setHeading("Advanced sync")
             .addSetting((setting: Setting): void => {
                 setting
