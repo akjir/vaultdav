@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.2.0] - 2026-11-24
 
 ### Added
 - Implement dual declarative settings support (`getSettingDefinitions()`, `getControlValue()`, and `setControlValue()`) in `VaultDavSettingTab` for Obsidian 1.13+ settings search while preserving the `display()` fallback for Obsidian 1.11.4 to 1.12.x.
