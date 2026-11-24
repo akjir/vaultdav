@@ -15,6 +15,8 @@ export interface ActiveConflictItem {
 }
 
 export interface ConflictOutcome {
+    bytesDownloaded: number;
+    bytesUploaded: number;
     conflictCopyPath?: string;
     resolution: ConflictResolutionMode;
     size: number;
@@ -123,6 +125,8 @@ export interface SyncRunRecord {
 export type SyncRunStatus = "failed" | "partial" | "success";
 
 export interface SyncRunSummary {
+    bytesDownloaded: number;
+    bytesUploaded: number;
     conflictsIdentical: number;
     conflictsKeepBoth: number;
     conflictsNewestWins: number;

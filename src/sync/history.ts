@@ -181,6 +181,8 @@ function cloneRunRecord(run: SyncRunRecord): SyncRunRecord {
 
 function cloneRunSummary(summary: SyncRunSummary): SyncRunSummary {
     return {
+        bytesDownloaded: summary.bytesDownloaded,
+        bytesUploaded: summary.bytesUploaded,
         conflictsIdentical: summary.conflictsIdentical,
         conflictsKeepBoth: summary.conflictsKeepBoth,
         conflictsNewestWins: summary.conflictsNewestWins,
@@ -200,6 +202,8 @@ function cloneRunSummary(summary: SyncRunSummary): SyncRunSummary {
 
 export function createEmptyRunSummary(): SyncRunSummary {
     return {
+        bytesDownloaded: 0,
+        bytesUploaded: 0,
         conflictsIdentical: 0,
         conflictsKeepBoth: 0,
         conflictsNewestWins: 0,
@@ -264,6 +268,8 @@ export function isNoopRun(run: SyncRunRecord): boolean {
     const s: SyncRunSummary = run.summary;
     return (
         run.status === "success" &&
+        s.bytesDownloaded === 0 &&
+        s.bytesUploaded === 0 &&
         s.uploaded === 0 &&
         s.downloaded === 0 &&
         s.conflictsResolved === 0 &&
@@ -695,6 +701,18 @@ function sanitizeRunRecord(raw: unknown): SyncRunRecord | null {
         VALID_RUN_TRIGGERS.has(candidate.trigger)
             ? (candidate.trigger as SyncRunTrigger)
             : "manual";
+    const rawSummaryObj: Record<string, unknown> | null =
+        typeof candidate.summary === "object" &&
+        candidate.summary !== null &&
+        !Array.isArray(candidate.summary)
+            ? (candidate.summary as Record<string, unknown>)
+            : null;
+    const hasExplicitBytesUploaded: boolean =
+        rawSummaryObj !== null &&
+        Object.prototype.hasOwnProperty.call(rawSummaryObj, "bytesUploaded");
+    const hasExplicitBytesDownloaded: boolean =
+        rawSummaryObj !== null &&
+        Object.prototype.hasOwnProperty.call(rawSummaryObj, "bytesDownloaded");
     const summary: SyncRunSummary = sanitizeRunSummary(candidate.summary);
     const rawEvents: unknown[] = Array.isArray(candidate.events)
         ? candidate.events
@@ -702,16 +720,60 @@ function sanitizeRunRecord(raw: unknown): SyncRunRecord | null {
     let orderedEvents: SyncLogEvent[] = [];
     let buckets: SyncLogEvent[][] | null = null;
     let validEventCount: number = 0;
+    let legacyBytesUploaded: number = 0;
+    let legacyBytesDownloaded: number = 0;
 
     for (const item of rawEvents) {
         if (typeof item !== "object" || item === null || Array.isArray(item)) {
             continue;
         }
-        const rawKind: unknown = (item as Record<string, unknown>).kind;
+        const itemRecord: Record<string, unknown> = item as Record<
+            string,
+            unknown
+        >;
+        const rawKind: unknown = itemRecord.kind;
         if (typeof rawKind !== "string" || !VALID_EVENT_KINDS.has(rawKind)) {
             continue;
         }
         validEventCount += 1;
+        if (!hasExplicitBytesUploaded || !hasExplicitBytesDownloaded) {
+            const eventBytes: number = sanitizeNonNegativeInt(
+                itemRecord.size,
+                0
+            );
+            if (eventBytes > 0) {
+                if (rawKind === "upload") {
+                    legacyBytesUploaded = clampSafeNonNegativeAdd(
+                        legacyBytesUploaded,
+                        eventBytes
+                    );
+                } else if (rawKind === "download") {
+                    legacyBytesDownloaded = clampSafeNonNegativeAdd(
+                        legacyBytesDownloaded,
+                        eventBytes
+                    );
+                } else if (rawKind === "conflict") {
+                    const rawRes: unknown = itemRecord.resolution;
+                    if (
+                        rawRes === "keep_both" ||
+                        rawRes === "newest_wins_local"
+                    ) {
+                        legacyBytesUploaded = clampSafeNonNegativeAdd(
+                            legacyBytesUploaded,
+                            eventBytes
+                        );
+                    } else if (
+                        rawRes === "identical" ||
+                        rawRes === "newest_wins_remote"
+                    ) {
+                        legacyBytesDownloaded = clampSafeNonNegativeAdd(
+                            legacyBytesDownloaded,
+                            eventBytes
+                        );
+                    }
+                }
+            }
+        }
         if (buckets === null) {
             if (validEventCount <= MAX_EVENTS_PER_RUN) {
                 const sanitizedEvent: SyncLogEvent | null =
@@ -745,6 +807,13 @@ function sanitizeRunRecord(raw: unknown): SyncRunRecord | null {
                 targetBucket.push(sanitizedEvent);
             }
         }
+    }
+
+    if (!hasExplicitBytesUploaded) {
+        summary.bytesUploaded = legacyBytesUploaded;
+    }
+    if (!hasExplicitBytesDownloaded) {
+        summary.bytesDownloaded = legacyBytesDownloaded;
     }
 
     const keptEvents: SyncLogEvent[] =
@@ -795,6 +864,8 @@ function sanitizeRunSummary(raw: unknown): SyncRunSummary {
     }
     const candidate: Record<string, unknown> = raw as Record<string, unknown>;
     return {
+        bytesDownloaded: sanitizeNonNegativeInt(candidate.bytesDownloaded),
+        bytesUploaded: sanitizeNonNegativeInt(candidate.bytesUploaded),
         conflictsIdentical: sanitizeNonNegativeInt(candidate.conflictsIdentical),
         conflictsKeepBoth: sanitizeNonNegativeInt(candidate.conflictsKeepBoth),
         conflictsNewestWins: sanitizeNonNegativeInt(candidate.conflictsNewestWins),

@@ -26,7 +26,7 @@
 - `src/sync/state.ts`: Local metadata index persistence (`localMtime`, `remoteMtime`, `etag`, `size`, `lastSyncTime`) to track deletions (tombstones) and modifications.
 - `src/sync/history.ts`: Device-local sync history store (`<config-dir>/plugins/vaultdav/sync-history.json`) with Hybrid Tiered Retention (consecutive no-op folding, 500-event priority cap per run, configurable TTL, 100-run critical-preserving cap, 1 MB compaction ceiling).
 - `src/sync/engine.ts`: Bidirectional delta calculation, conflict resolution (`keep_both` or `newest_wins`), threshold-based chunked transfer routing, structured sync event capture, and rate-limited execution queue.
-- `src/ui/sync_log_view.ts` & `styles.css`: Dockable Obsidian `ItemView` displaying latest sync overview, live active `.conflict-*` files, chronological run history, category/path filters, copyable Markdown summary, and two-step clear history.
+- `src/ui/sync_log_view.ts` & `styles.css`: Dockable Obsidian `ItemView` displaying live active `.conflict-*` files, date-grouped paginated run history with status/search filters and cumulative upload/download byte totals, in-place run details with inline summary pills and event category/path filters, copyable Markdown summary, and two-step clear history.
 
 ## Technical Constraints
 - **Network & CORS:** Execute all HTTP/WebDAV requests exclusively via Obsidian `requestUrl`. Do not use `fetch`, `XMLHttpRequest`, or external HTTP libraries.

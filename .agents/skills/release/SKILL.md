@@ -39,7 +39,7 @@ Set all version-bearing files to `"X.Y.Z"` (4-space indentation):
 4. **`versions.json`:** Add or update `"X.Y.Z": "<minAppVersion>"` matching `minAppVersion` from `manifest.json`.
 
 ## 4. Changelog Finalization (`CHANGELOG.md`)
-1. Verify `CHANGELOG.md` contains non-empty release notes under `## [Unreleased]` (or `## [X.Y.Z]`). If missing or empty, populate changes from commits since the last tag (or abort if there are no changes to release).
+1. Verify `CHANGELOG.md` contains non-empty release notes under `## [Unreleased]` (or `## [X.Y.Z]`). If missing or empty, populate changes from commits since the last tag per `vaultdav-dev-workflow` (or abort if there are no changes to release).
 2. Replace `## [Unreleased]` with `## [X.Y.Z] - YYYY-MM-DD` using the current local date (`YYYY-MM-DD`).
 3. **No Empty `[Unreleased]`:** Never insert or leave an empty `## [Unreleased]` heading in `CHANGELOG.md`.
 

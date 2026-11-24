@@ -28,10 +28,12 @@ Execute changes autonomously in this strict sequence until all checks pass with 
 4. **Self-Correction:** If any check fails, analyze the output, fix the root cause in `src/` or `tests/`, and re-run step 3 until all three checks pass.
 
 ## 3. Changelog Maintenance (`CHANGELOG.md`)
-Update `CHANGELOG.md` under the `## [Unreleased]` section (create `## [Unreleased]` above the latest release heading if absent) for every user-facing or architectural change:
+Update `CHANGELOG.md` under `## [Unreleased]` (create it above the latest release heading if absent) for notable user-facing, security, or release changes:
 - Use Keep a Changelog categories: `### Added`, `### Changed`, `### Fixed`, `### Removed`.
-- Write entries in the imperative mood (ASD-STE100), starting with a verb.
-- Do not add redundant implementation details already visible in git diffs.
+- Write one concise, high-level sentence per entry in the imperative mood (ASD-STE100), starting with a verb.
+- Focus on observable outcomes and general impact rather than how the code works.
+- Omit internal code details: no class, function, method, or variable names, no source/config file paths, and no algorithmic, regex, or linter-rule minutiae.
+- Group related internal hardening, refactoring, or compliance fixes into a single summary bullet instead of listing each code change separately.
 
 ## 4. Post-Execution Sync
 - Run `update-documentation` if settings, commands, file names, or architecture changed.

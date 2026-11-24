@@ -2659,6 +2659,8 @@ describe("SyncEngine delta calculation and execution", () => {
 
         expect(result.summary.uploaded).toBe(1);
         expect(result.summary.downloaded).toBe(1);
+        expect(result.summary.bytesUploaded).toBe(7);
+        expect(result.summary.bytesDownloaded).toBe(9);
         expect(result.summary.conflictsResolved).toBe(2);
         expect(result.summary.conflictsKeepBoth).toBe(1);
         expect(result.summary.conflictsIdentical).toBe(1);

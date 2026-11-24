@@ -913,4 +913,100 @@ describe("SyncHistoryStore and Hybrid Tiered Retention", () => {
         ]);
         expect(capped.omittedEvents).toBe(2);
     });
+
+    it("persists bytesUploaded/bytesDownloaded and backfills legacy runs missing byte totals from events", async () => {
+        const { adapter, files }: MockHistoryFs = createMockHistoryAdapter();
+        const historyPath: string = ".obsidian/plugins/vaultdav/sync-history.json";
+        const baseNow: number = Date.UTC(2026, 10, 24, 18, 0, 0);
+
+        const legacyPayload: string = JSON.stringify({
+            runs: [
+                {
+                    collapsedCount: 1,
+                    detailsPruned: false,
+                    durationMs: 400,
+                    events: [
+                        { isDirectory: false, kind: "upload", path: "A.md", size: 120 },
+                        { isDirectory: false, kind: "download", path: "B.md", size: 300 },
+                        {
+                            conflictCopyPath: "C.conflict-20261124-120000.md",
+                            isDirectory: false,
+                            kind: "conflict",
+                            path: "C.md",
+                            resolution: "keep_both",
+                            size: 80
+                        },
+                        {
+                            isDirectory: false,
+                            kind: "conflict",
+                            path: "D.md",
+                            resolution: "identical",
+                            size: 50
+                        }
+                    ],
+                    finishedAt: baseNow - 5000,
+                    id: "legacy-run",
+                    omittedEvents: 0,
+                    startedAt: baseNow - 5400,
+                    status: "success",
+                    summary: {
+                        conflictsIdentical: 1,
+                        conflictsKeepBoth: 1,
+                        conflictsNewestWins: 0,
+                        conflictsResolved: 2,
+                        deletedLocal: 0,
+                        deletedLocalDirs: 0,
+                        deletedRemote: 0,
+                        deletedRemoteDirs: 0,
+                        dirsCreatedLocal: 0,
+                        dirsCreatedRemote: 0,
+                        downloaded: 1,
+                        errors: 0,
+                        uploaded: 1,
+                        warnings: 0
+                    },
+                    trigger: "manual"
+                },
+                {
+                    collapsedCount: 1,
+                    detailsPruned: false,
+                    durationMs: 300,
+                    events: [],
+                    finishedAt: baseNow - 1000,
+                    id: "modern-run",
+                    omittedEvents: 0,
+                    startedAt: baseNow - 1300,
+                    status: "success",
+                    summary: {
+                        ...createEmptyRunSummary(),
+                        bytesDownloaded: 2048,
+                        bytesUploaded: 1024,
+                        downloaded: 1,
+                        uploaded: 1
+                    },
+                    trigger: "manual"
+                }
+            ],
+            version: CURRENT_HISTORY_VERSION
+        });
+        files.set(historyPath, legacyPayload);
+
+        const store: SyncHistoryStore = new SyncHistoryStore(
+            adapter,
+            historyPath,
+            ".obsidian"
+        );
+        await store.load(30, baseNow);
+        const loadedRuns: SyncRunRecord[] = store.getRuns();
+        const modernRun: SyncRunRecord | undefined = loadedRuns.find(
+            (r: SyncRunRecord) => r.id === "modern-run"
+        );
+        const legacyRun: SyncRunRecord | undefined = loadedRuns.find(
+            (r: SyncRunRecord) => r.id === "legacy-run"
+        );
+        expect(modernRun?.summary.bytesUploaded).toBe(1024);
+        expect(modernRun?.summary.bytesDownloaded).toBe(2048);
+        expect(legacyRun?.summary.bytesUploaded).toBe(200);
+        expect(legacyRun?.summary.bytesDownloaded).toBe(350);
+    });
 });

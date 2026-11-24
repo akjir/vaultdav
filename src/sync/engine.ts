@@ -41,6 +41,21 @@ interface WalkStatResult {
     stat: Stat | null;
 }
 
+function addSafeNonNegativeInt(current: number, delta: number): number {
+    const safeCurrent: number =
+        Number.isFinite(current) && current > 0
+            ? Math.min(Number.MAX_SAFE_INTEGER, Math.floor(current))
+            : 0;
+    const safeDelta: number =
+        Number.isFinite(delta) && delta > 0
+            ? Math.min(Number.MAX_SAFE_INTEGER, Math.floor(delta))
+            : 0;
+    if (safeCurrent >= Number.MAX_SAFE_INTEGER - safeDelta) {
+        return Number.MAX_SAFE_INTEGER;
+    }
+    return safeCurrent + safeDelta;
+}
+
 export function buildSyncPlan(
     localItems: ReadonlyArray<LocalItem>,
     remoteItems: ReadonlyArray<RemoteItem>,
@@ -851,6 +866,8 @@ export class SyncEngine {
                     remoteDirCasingByLower
                 );
                 return {
+                    bytesDownloaded: 0,
+                    bytesUploaded: uploadedSize,
                     resolution: "newest_wins_local",
                     size: uploadedSize
                 };
@@ -865,6 +882,8 @@ export class SyncEngine {
                     localDirFsPathByLower
                 );
                 return {
+                    bytesDownloaded: downloadedSize,
+                    bytesUploaded: 0,
                     resolution: "newest_wins_remote",
                     size: downloadedSize
                 };
@@ -928,6 +947,8 @@ export class SyncEngine {
                 size: remoteBuffer.byteLength
             });
             return {
+                bytesDownloaded: remoteBuffer.byteLength,
+                bytesUploaded: 0,
                 resolution: "identical",
                 size: remoteBuffer.byteLength
             };
@@ -1039,6 +1060,8 @@ export class SyncEngine {
             size: remoteBuffer.byteLength
         });
         return {
+            bytesDownloaded: remoteBuffer.byteLength,
+            bytesUploaded: localBuffer.byteLength,
             conflictCopyPath: conflictPath,
             resolution: "keep_both",
             size: localBuffer.byteLength
@@ -1613,6 +1636,10 @@ export class SyncEngine {
                         );
                         result.uploaded += 1;
                         summary.uploaded += 1;
+                        summary.bytesUploaded = addSafeNonNegativeInt(
+                            summary.bytesUploaded,
+                            uploadedSize
+                        );
                         events.push({
                             isDirectory: false,
                             kind: "upload",
@@ -1631,6 +1658,10 @@ export class SyncEngine {
                         );
                         result.downloaded += 1;
                         summary.downloaded += 1;
+                        summary.bytesDownloaded = addSafeNonNegativeInt(
+                            summary.bytesDownloaded,
+                            downloadedSize
+                        );
                         events.push({
                             isDirectory: false,
                             kind: "download",
@@ -1654,6 +1685,14 @@ export class SyncEngine {
                         result.conflictsResolved += 1;
                         summary.conflictsResolved += 1;
                         if (outcome !== null) {
+                            summary.bytesUploaded = addSafeNonNegativeInt(
+                                summary.bytesUploaded,
+                                outcome.bytesUploaded
+                            );
+                            summary.bytesDownloaded = addSafeNonNegativeInt(
+                                summary.bytesDownloaded,
+                                outcome.bytesDownloaded
+                            );
                             if (outcome.resolution === "keep_both") {
                                 summary.conflictsKeepBoth += 1;
                             } else if (outcome.resolution === "identical") {
