@@ -490,4 +490,427 @@ describe("SyncHistoryStore and Hybrid Tiered Retention", () => {
         runs[0]!.events.push({ kind: "error", message: "mutated" });
         expect(store.getRuns()[0]?.events.length).toBe(1);
     });
+
+    it("enforces strict allowlist in constructor rejecting workspace, plugin code, .git, .trash, other plugins, and invalid configDir", () => {
+        const { adapter } = createMockHistoryAdapter();
+
+        expect(
+            () =>
+                new SyncHistoryStore(
+                    adapter,
+                    ".obsidian/workspace.json",
+                    ".obsidian"
+                )
+        ).toThrow("Invalid sync history file path");
+        expect(
+            () =>
+                new SyncHistoryStore(
+                    adapter,
+                    ".obsidian/plugins/vaultdav/main.js",
+                    ".obsidian"
+                )
+        ).toThrow("Invalid sync history file path");
+        expect(
+            () =>
+                new SyncHistoryStore(
+                    adapter,
+                    ".obsidian/plugins/vaultdav/manifest.json",
+                    ".obsidian"
+                )
+        ).toThrow("Invalid sync history file path");
+        expect(
+            () =>
+                new SyncHistoryStore(
+                    adapter,
+                    ".obsidian/plugins/vaultdav",
+                    ".obsidian"
+                )
+        ).toThrow("Invalid sync history file path");
+        expect(
+            () =>
+                new SyncHistoryStore(
+                    adapter,
+                    ".obsidian/plugins/other-plugin/sync-history.json",
+                    ".obsidian"
+                )
+        ).toThrow("Invalid sync history file path");
+        expect(
+            () => new SyncHistoryStore(adapter, ".git/config", ".obsidian")
+        ).toThrow("Invalid sync history file path");
+        expect(
+            () =>
+                new SyncHistoryStore(
+                    adapter,
+                    ".git/plugins/vaultdav/sync-history.json",
+                    ".git"
+                )
+        ).toThrow("Invalid sync history file path");
+        expect(
+            () =>
+                new SyncHistoryStore(
+                    adapter,
+                    ".git/plugins/vaultdav/sync-history.json"
+                )
+        ).toThrow("Invalid sync history file path");
+        expect(
+            () => new SyncHistoryStore(adapter, ".trash/note.md", ".obsidian")
+        ).toThrow("Invalid sync history file path");
+        expect(
+            () =>
+                new SyncHistoryStore(
+                    adapter,
+                    ".obsidian/plugins/vaultdav/sync-history.json",
+                    "../escape"
+                )
+        ).toThrow("Invalid sync history file path");
+        expect(
+            () =>
+                new SyncHistoryStore(
+                    adapter,
+                    "custom-config/plugins/vaultdav/sync-history.json",
+                    "custom-config"
+                )
+        ).not.toThrow();
+        expect(
+            () =>
+                new SyncHistoryStore(
+                    adapter,
+                    ".obsidian/plugins/vaultdav/sync-history.json"
+                )
+        ).not.toThrow();
+    });
+
+    it("prevents lost updates on cold-start concurrent recordRun() and prevents stale load() from clobbering clear() or recordRun()", async () => {
+        const files: Map<string, string> = new Map<string, string>();
+        let delayReads: boolean = true;
+        const adapter: DataAdapter = {
+            exists: async (path: string): Promise<boolean> => {
+                if (delayReads) {
+                    await new Promise<void>((resolve: () => void) => {
+                        setTimeout(resolve, 10);
+                    });
+                }
+                return files.has(path);
+            },
+            mkdir: async (): Promise<void> => undefined,
+            read: async (path: string): Promise<string> => {
+                if (delayReads) {
+                    await new Promise<void>((resolve: () => void) => {
+                        setTimeout(resolve, 20);
+                    });
+                }
+                return files.get(path) ?? '{"runs":[],"version":1}';
+            },
+            write: async (path: string, data: string): Promise<void> => {
+                await new Promise<void>((resolve: () => void) => {
+                    setTimeout(resolve, 5);
+                });
+                files.set(path, data);
+            }
+        } as unknown as DataAdapter;
+
+        // Cold-start concurrent recordRun() must retain both runs
+        const coldStore: SyncHistoryStore = new SyncHistoryStore(
+            adapter,
+            historyPath,
+            ".obsidian"
+        );
+        await Promise.all([
+            coldStore.recordRun(
+                makeRun({
+                    events: [{ kind: "upload", path: "First.md", size: 10 }],
+                    finishedAt: baseNow,
+                    id: "cold-1",
+                    summary: { ...createEmptyRunSummary(), uploaded: 1 }
+                }),
+                30,
+                baseNow
+            ),
+            coldStore.recordRun(
+                makeRun({
+                    events: [{ kind: "download", path: "Second.md", size: 20 }],
+                    finishedAt: baseNow + 1000,
+                    id: "cold-2",
+                    summary: { ...createEmptyRunSummary(), downloaded: 1 }
+                }),
+                30,
+                baseNow + 1000
+            )
+        ]);
+        expect(coldStore.getRuns().map((r: SyncRunRecord) => r.id)).toEqual([
+            "cold-2",
+            "cold-1"
+        ]);
+
+        // Stale load() overlapping with clear() must not resurrect cleared runs
+        const loadDuringClear: Promise<unknown> = coldStore.load(30, baseNow + 2000);
+        const clearOp: Promise<void> = coldStore.clear();
+        await Promise.all([loadDuringClear, clearOp]);
+        expect(coldStore.getRuns()).toEqual([]);
+
+        // Stale load() overlapping with recordRun() must not drop the new run
+        await coldStore.recordRun(
+            makeRun({
+                events: [{ kind: "upload", path: "Seed.md", size: 10 }],
+                finishedAt: baseNow + 3000,
+                id: "seed-run",
+                summary: { ...createEmptyRunSummary(), uploaded: 1 }
+            }),
+            30,
+            baseNow + 3000
+        );
+        const loadDuringRecord: Promise<unknown> = coldStore.load(30, baseNow + 4000);
+        const recordOp: Promise<SyncRunRecord[]> = coldStore.recordRun(
+            makeRun({
+                events: [{ kind: "upload", path: "Fresh.md", size: 15 }],
+                finishedAt: baseNow + 4000,
+                id: "fresh-run",
+                summary: { ...createEmptyRunSummary(), uploaded: 1 }
+            }),
+            30,
+            baseNow + 4000
+        );
+        await Promise.all([loadDuringRecord, recordOp]);
+        expect(coldStore.getRuns().map((r: SyncRunRecord) => r.id)).toEqual([
+            "fresh-run",
+            "seed-run"
+        ]);
+        delayReads = false;
+    });
+
+    it("blocks ReDoS messages and redacts huge truncated credential URLs without leaking password prefixes", async () => {
+        const { adapter, files } = createMockHistoryAdapter();
+        const store: SyncHistoryStore = new SyncHistoryStore(
+            adapter,
+            historyPath,
+            ".obsidian"
+        );
+
+        const redosMsg: string = "a".repeat(100_000);
+        const hugeSecretUrl: string = `Failed: https://alice:${"p".repeat(30_000)}@cloud.example.com/dav`;
+        const startMs: number = performance.now();
+        await store.recordRun(
+            makeRun({
+                events: [
+                    { kind: "error", message: redosMsg, path: "Redos.md" },
+                    { kind: "error", message: hugeSecretUrl, path: "Secret.md" }
+                ],
+                finishedAt: baseNow,
+                id: "redos-run",
+                status: "partial",
+                summary: { ...createEmptyRunSummary(), errors: 2 }
+            }),
+            30,
+            baseNow
+        );
+        const elapsedMs: number = performance.now() - startMs;
+
+        expect(elapsedMs).toBeLessThan(250);
+        const persisted: string = files.get(historyPath) ?? "";
+        expect(persisted).not.toContain("alice:");
+        expect(persisted).not.toContain("pppppp");
+        expect(persisted).toContain("https://[REDACTED]");
+    });
+
+    it("handles O(N) large-scale run eviction, Phase C priority sorting, stat() pre-check, and 4 MB read limit", async () => {
+        // 1. O(N) eviction with 20,000 runs (10k newer routine + 10k older critical)
+        const manyRuns: SyncRunRecord[] = [];
+        for (let i: number = 0; i < 10_000; i += 1) {
+            manyRuns.push(
+                makeRun({
+                    finishedAt: baseNow - (20 * dayMs) + i * 1000,
+                    id: `old-crit-${i}`,
+                    status: "failed",
+                    summary: { ...createEmptyRunSummary(), errors: 1 }
+                })
+            );
+            manyRuns.push(
+                makeRun({
+                    finishedAt: baseNow - (5 * dayMs) + i * 1000,
+                    id: `new-clean-${i}`,
+                    summary: { ...createEmptyRunSummary(), uploaded: 1 }
+                })
+            );
+        }
+        const startPruneMs: number = performance.now();
+        const pruned: SyncRunRecord[] = pruneHistoryRuns(
+            manyRuns,
+            baseNow,
+            30,
+            MAX_HISTORY_RUNS
+        );
+        const pruneElapsedMs: number = performance.now() - startPruneMs;
+        expect(pruneElapsedMs).toBeLessThan(300);
+        expect(pruned.length).toBe(MAX_HISTORY_RUNS);
+        expect(pruned.every((r: SyncRunRecord) => isCriticalRun(r))).toBe(true);
+        expect(pruned[0]?.id).toBe("old-crit-9999");
+
+        // 2. Phase C must prioritize an error even when it appears at the END of latest.events
+        const tailErrorEvents: SyncLogEvent[] = [];
+        for (let i: number = 0; i < 40; i += 1) {
+            tailErrorEvents.push({
+                kind: "upload",
+                path: `Folder/SubFolder/RoutineUploadItem-${i}.md`,
+                size: 512
+            });
+        }
+        tailErrorEvents.push({
+            kind: "error",
+            message: "Critical tail failure",
+            path: "Critical.md"
+        });
+        const phaseCRun: SyncRunRecord = makeRun({
+            events: tailErrorEvents,
+            finishedAt: baseNow,
+            id: "phase-c-tail-error",
+            status: "partial",
+            summary: { ...createEmptyRunSummary(), errors: 1, uploaded: 40 }
+        });
+        const trimmedPhaseC: SyncRunRecord[] = pruneHistoryRuns(
+            [phaseCRun],
+            baseNow,
+            30,
+            100,
+            1200
+        );
+        expect(trimmedPhaseC.length).toBe(1);
+        expect(trimmedPhaseC[0]?.events[0]?.kind).toBe("error");
+        expect(trimmedPhaseC[0]?.events[0]?.path).toBe("Critical.md");
+        expect(
+            new TextEncoder().encode(
+                JSON.stringify({
+                    runs: trimmedPhaseC,
+                    version: CURRENT_HISTORY_VERSION
+                })
+            ).byteLength
+        ).toBeLessThanOrEqual(1200);
+
+        // 3. load() rejects huge file via stat() BEFORE calling read()
+        const readSpy = vi.fn(async (): Promise<string> => '{"runs":[],"version":1}');
+        const statAdapter: DataAdapter = {
+            exists: async (): Promise<boolean> => true,
+            mkdir: async (): Promise<void> => undefined,
+            read: readSpy,
+            stat: async () => ({
+                ctime: 0,
+                mtime: 0,
+                size: 10 * 1024 * 1024,
+                type: "file" as const
+            }),
+            write: async (): Promise<void> => undefined
+        } as unknown as DataAdapter;
+        const warnSpy = vi.spyOn(log, "warn").mockImplementation((): void => undefined);
+        const statStore: SyncHistoryStore = new SyncHistoryStore(
+            statAdapter,
+            historyPath,
+            ".obsidian"
+        );
+        const oversizedStatResult = await statStore.load(30, baseNow);
+        expect(oversizedStatResult.runs).toEqual([]);
+        expect(readSpy).not.toHaveBeenCalled();
+
+        // 4. load() rejects >4 MB file even when stat() is unavailable
+        const { adapter: bigAdapter, files: bigFiles } = createMockHistoryAdapter();
+        bigFiles.set(historyPath, "x".repeat(4 * 1024 * 1024 + 1));
+        const bigStore: SyncHistoryStore = new SyncHistoryStore(
+            bigAdapter,
+            historyPath,
+            ".obsidian"
+        );
+        const oversizedReadResult = await bigStore.load(30, baseNow);
+        expect(oversizedReadResult.runs).toEqual([]);
+        warnSpy.mockRestore();
+    });
+
+    it("rejects unsafe integer overflows and Object.prototype event kind lookups", async () => {
+        const { adapter, files } = createMockHistoryAdapter();
+        const extremePayload: string = JSON.stringify({
+            runs: [
+                {
+                    collapsedCount: 1e308,
+                    detailsPruned: false,
+                    durationMs: 1e308,
+                    events: [
+                        {
+                            kind: "upload",
+                            path: "Extreme.md",
+                            size: Number.MAX_SAFE_INTEGER + 100
+                        }
+                    ],
+                    finishedAt: baseNow - 2000,
+                    id: "extreme-overflow",
+                    omittedEvents: 1e308,
+                    startedAt: baseNow - 2100,
+                    status: "success",
+                    summary: {
+                        ...createEmptyRunSummary(),
+                        deletedLocal: 1e308,
+                        uploaded: Number.MAX_VALUE
+                    },
+                    trigger: "manual"
+                },
+                {
+                    collapsedCount: Number.MAX_SAFE_INTEGER,
+                    detailsPruned: false,
+                    durationMs: 10,
+                    events: [],
+                    finishedAt: baseNow - 1000,
+                    id: "noop-max",
+                    omittedEvents: 0,
+                    startedAt: baseNow - 1010,
+                    status: "success",
+                    summary: createEmptyRunSummary(),
+                    trigger: "auto"
+                }
+            ],
+            version: CURRENT_HISTORY_VERSION
+        });
+        files.set(historyPath, extremePayload);
+
+        const store: SyncHistoryStore = new SyncHistoryStore(
+            adapter,
+            historyPath,
+            ".obsidian"
+        );
+        await store.load(30, baseNow);
+        const loadedRuns: SyncRunRecord[] = store.getRuns();
+        const extremeRun: SyncRunRecord | undefined = loadedRuns.find(
+            (r: SyncRunRecord) => r.id === "extreme-overflow"
+        );
+        expect(extremeRun?.collapsedCount).toBe(1);
+        expect(extremeRun?.durationMs).toBe(100);
+        expect(extremeRun?.omittedEvents).toBe(0);
+        expect(extremeRun?.summary.deletedLocal).toBe(0);
+        expect(extremeRun?.summary.uploaded).toBe(0);
+        expect(extremeRun?.events[0]?.size).toBeUndefined();
+
+        // Folding onto a MAX_SAFE_INTEGER no-op saturates instead of overflowing to Infinity/null
+        await store.recordRun(
+            makeRun({
+                collapsedCount: 5,
+                finishedAt: baseNow,
+                id: "noop-fold-overflow",
+                startedAt: baseNow - 5,
+                trigger: "auto"
+            }),
+            30,
+            baseNow
+        );
+        const afterFold: SyncRunRecord | undefined = store.getRuns()[0];
+        expect(afterFold?.collapsedCount).toBe(Number.MAX_SAFE_INTEGER);
+        expect(Number.isSafeInteger(afterFold?.collapsedCount)).toBe(true);
+        expect(files.get(historyPath)).not.toContain('"collapsedCount":null');
+
+        // Prototype keys in capRunEvents() must not resolve to Object.prototype functions
+        const protoEvents: SyncLogEvent[] = [
+            { kind: "toString" as unknown as SyncLogEvent["kind"], path: "Proto.md" },
+            { kind: "constructor" as unknown as SyncLogEvent["kind"], path: "Ctor.md" },
+            { kind: "error", message: "Real error", path: "Err.md" }
+        ];
+        const capped = capRunEvents(protoEvents, 1);
+        expect(capped.events).toEqual([
+            { kind: "error", message: "Real error", path: "Err.md" }
+        ]);
+        expect(capped.omittedEvents).toBe(2);
+    });
 });

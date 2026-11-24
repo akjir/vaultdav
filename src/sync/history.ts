@@ -1,4 +1,4 @@
-import type { DataAdapter } from "obsidian";
+import type { DataAdapter, Stat } from "obsidian";
 import { log, redactSensitiveText } from "../log";
 import type {
     ConflictResolutionMode,
@@ -10,31 +10,52 @@ import type {
     SyncRunSummary,
     SyncRunTrigger
 } from "../types";
-import { MAX_FILE_SIZE_BYTES, util } from "../utilities";
+import { util } from "../utilities";
 
 export const CURRENT_HISTORY_VERSION: number = 1;
 export const DEFAULT_HISTORY_RETENTION_DAYS: number = 30;
 export const MAX_EVENT_MESSAGE_LENGTH: number = 500;
 export const MAX_EVENTS_PER_RUN: number = 500;
 export const MAX_HISTORY_BYTES: number = 1024 * 1024;
+export const MAX_HISTORY_FILE_BYTES: number = MAX_HISTORY_BYTES * 4;
 export const MAX_HISTORY_RETENTION_DAYS: number = 365;
 export const MAX_HISTORY_RUNS: number = 100;
 export const MIN_HISTORY_RETENTION_DAYS: number = 1;
 
-const EVENT_PRIORITY: Readonly<Record<SyncEventKind, number>> = Object.freeze({
-    conflict: 1,
-    create_local_dir: 5,
-    create_remote_dir: 5,
-    delete_local: 3,
-    delete_remote: 3,
-    download: 4,
-    error: 1,
-    upload: 4,
-    warning: 2
-});
+const EVENT_PRIORITY_MAP: ReadonlyMap<SyncEventKind, number> = new Map<
+    SyncEventKind,
+    number
+>([
+    ["conflict", 1],
+    ["create_local_dir", 5],
+    ["create_remote_dir", 5],
+    ["delete_local", 3],
+    ["delete_remote", 3],
+    ["download", 4],
+    ["error", 1],
+    ["upload", 4],
+    ["warning", 2]
+]);
+const FORBIDDEN_HISTORY_SEGMENTS_LOWER: ReadonlySet<string> = new Set<string>([
+    ".ds_store",
+    ".git",
+    ".svn",
+    ".trash",
+    "desktop.ini",
+    "node_modules",
+    "thumbs.db"
+]);
+const MAX_EVENT_PRIORITY: number = 5;
+const MAX_RAW_EVENT_MESSAGE_LENGTH: number = 16_384;
 const MAX_SAFE_TIMESTAMP_MS: number = 8_640_000_000_000_000;
 const MS_PER_DAY: number = 86_400_000;
 const TEXT_ENCODER: TextEncoder = new TextEncoder();
+const HISTORY_ENVELOPE_BYTES: number = TEXT_ENCODER.encode(
+    JSON.stringify({
+        runs: [],
+        version: CURRENT_HISTORY_VERSION
+    })
+).byteLength;
 const VALID_EVENT_KINDS: ReadonlySet<string> = new Set<SyncEventKind>([
     "conflict",
     "create_local_dir",
@@ -61,6 +82,7 @@ const VALID_RUN_TRIGGERS: ReadonlySet<string> = new Set<SyncRunTrigger>([
     "auto",
     "manual"
 ]);
+const WHITESPACE_CHAR_REGEX: RegExp = /\s/;
 
 export function capRunEvents(
     events: ReadonlyArray<SyncLogEvent>,
@@ -68,36 +90,48 @@ export function capRunEvents(
 ): { events: SyncLogEvent[]; omittedEvents: number } {
     const safeMax: number =
         Number.isFinite(maxEvents) && maxEvents >= 0
-            ? Math.floor(maxEvents)
+            ? Math.min(Number.MAX_SAFE_INTEGER, Math.floor(maxEvents))
             : MAX_EVENTS_PER_RUN;
-    const sanitized: SyncLogEvent[] = events.map((event: SyncLogEvent) =>
-        cloneLogEvent(event)
-    );
-    if (sanitized.length <= safeMax) {
+    if (safeMax === 0) {
         return {
-            events: sanitized,
+            events: [],
+            omittedEvents: events.length
+        };
+    }
+    if (events.length <= safeMax) {
+        return {
+            events: events.map((event: SyncLogEvent) => cloneLogEvent(event)),
             omittedEvents: 0
         };
     }
-    const indexed: Array<{ event: SyncLogEvent; index: number; priority: number }> =
-        sanitized.map((event: SyncLogEvent, index: number) => ({
-            event,
-            index,
-            priority: EVENT_PRIORITY[event.kind] ?? 5
-        }));
-    indexed.sort((a, b): number => {
-        if (a.priority !== b.priority) {
-            return a.priority - b.priority;
+    const buckets: SyncLogEvent[][] = [[], [], [], [], []];
+    for (const event of events) {
+        const priority: number = getEventPriority(event.kind);
+        const bucket: SyncLogEvent[] | undefined = buckets[priority - 1];
+        if (bucket !== undefined && bucket.length < safeMax) {
+            bucket.push(cloneLogEvent(event));
         }
-        return a.index - b.index;
-    });
-    const kept: SyncLogEvent[] = indexed
-        .slice(0, safeMax)
-        .map((item) => item.event);
+    }
+    const kept: SyncLogEvent[] = drainPriorityBuckets(buckets, safeMax);
     return {
         events: kept,
-        omittedEvents: sanitized.length - kept.length
+        omittedEvents: events.length - kept.length
     };
+}
+
+function clampSafeNonNegativeAdd(a: number, b: number): number {
+    const safeA: number =
+        Number.isFinite(a) && a > 0
+            ? Math.min(Number.MAX_SAFE_INTEGER, Math.floor(a))
+            : 0;
+    const safeB: number =
+        Number.isFinite(b) && b > 0
+            ? Math.min(Number.MAX_SAFE_INTEGER, Math.floor(b))
+            : 0;
+    if (safeA >= Number.MAX_SAFE_INTEGER - safeB) {
+        return Number.MAX_SAFE_INTEGER;
+    }
+    return safeA + safeB;
 }
 
 function cloneLogEvent(event: SyncLogEvent): SyncLogEvent {
@@ -136,13 +170,32 @@ function cloneRunRecord(run: SyncRunRecord): SyncRunRecord {
         omittedEvents: run.omittedEvents,
         startedAt: run.startedAt,
         status: run.status,
-        summary: { ...run.summary },
+        summary: cloneRunSummary(run.summary),
         trigger: run.trigger
     };
     if (run.firstCollapsedAt !== undefined) {
         copy.firstCollapsedAt = run.firstCollapsedAt;
     }
     return copy;
+}
+
+function cloneRunSummary(summary: SyncRunSummary): SyncRunSummary {
+    return {
+        conflictsIdentical: summary.conflictsIdentical,
+        conflictsKeepBoth: summary.conflictsKeepBoth,
+        conflictsNewestWins: summary.conflictsNewestWins,
+        conflictsResolved: summary.conflictsResolved,
+        deletedLocal: summary.deletedLocal,
+        deletedLocalDirs: summary.deletedLocalDirs,
+        deletedRemote: summary.deletedRemote,
+        deletedRemoteDirs: summary.deletedRemoteDirs,
+        dirsCreatedLocal: summary.dirsCreatedLocal,
+        dirsCreatedRemote: summary.dirsCreatedRemote,
+        downloaded: summary.downloaded,
+        errors: summary.errors,
+        uploaded: summary.uploaded,
+        warnings: summary.warnings
+    };
 }
 
 export function createEmptyRunSummary(): SyncRunSummary {
@@ -164,26 +217,38 @@ export function createEmptyRunSummary(): SyncRunSummary {
     };
 }
 
-function findOldestEvictableIndex(runs: ReadonlyArray<SyncRunRecord>): number {
-    for (let i: number = runs.length - 1; i >= 0; i -= 1) {
-        const candidate: SyncRunRecord | undefined = runs[i];
-        if (candidate !== undefined && !isCriticalRun(candidate)) {
-            return i;
+function drainPriorityBuckets(
+    buckets: ReadonlyArray<ReadonlyArray<SyncLogEvent>>,
+    maxCount: number
+): SyncLogEvent[] {
+    const kept: SyncLogEvent[] = [];
+    for (const bucket of buckets) {
+        const remaining: number = maxCount - kept.length;
+        if (remaining <= 0) {
+            break;
+        }
+        if (bucket.length <= remaining) {
+            for (const item of bucket) {
+                kept.push(item);
+            }
+        } else {
+            for (let i: number = 0; i < remaining; i += 1) {
+                const item: SyncLogEvent | undefined = bucket[i];
+                if (item !== undefined) {
+                    kept.push(item);
+                }
+            }
+            break;
         }
     }
-    return runs.length - 1;
+    return kept;
 }
 
-function findOldestEvictableIndexKeepingLatest(
-    runs: ReadonlyArray<SyncRunRecord>
-): number {
-    for (let i: number = runs.length - 1; i >= 1; i -= 1) {
-        const candidate: SyncRunRecord | undefined = runs[i];
-        if (candidate !== undefined && !isCriticalRun(candidate)) {
-            return i;
-        }
+function getEventPriority(kind: unknown): number {
+    if (typeof kind !== "string") {
+        return MAX_EVENT_PRIORITY;
     }
-    return runs.length - 1;
+    return EVENT_PRIORITY_MAP.get(kind as SyncEventKind) ?? MAX_EVENT_PRIORITY;
 }
 
 export function isCriticalRun(run: SyncRunRecord): boolean {
@@ -215,12 +280,19 @@ export function isNoopRun(run: SyncRunRecord): boolean {
     );
 }
 
-function measureHistoryBytes(runs: SyncRunRecord[]): number {
-    const payload: SyncHistoryData = {
-        runs,
-        version: CURRENT_HISTORY_VERSION
-    };
-    return TEXT_ENCODER.encode(JSON.stringify(payload)).byteLength;
+function measureRunBytes(run: SyncRunRecord): number {
+    return TEXT_ENCODER.encode(JSON.stringify(run)).byteLength;
+}
+
+function measureRunsTotalBytes(runBytes: ReadonlyArray<number>): number {
+    if (runBytes.length === 0) {
+        return HISTORY_ENVELOPE_BYTES;
+    }
+    let total: number = HISTORY_ENVELOPE_BYTES + runBytes.length - 1;
+    for (let i: number = 0; i < runBytes.length; i += 1) {
+        total += runBytes[i] ?? 0;
+    }
+    return total;
 }
 
 export function pruneHistoryRuns(
@@ -237,11 +309,11 @@ export function pruneHistoryRuns(
     const safeRetentionDays: number = sanitizeRetentionDays(retentionDays);
     const safeMaxRuns: number =
         Number.isFinite(maxRuns) && maxRuns >= 1
-            ? Math.floor(maxRuns)
+            ? Math.min(Number.MAX_SAFE_INTEGER, Math.floor(maxRuns))
             : MAX_HISTORY_RUNS;
     const safeMaxBytes: number =
         Number.isFinite(maxBytes) && maxBytes >= 1024
-            ? Math.floor(maxBytes)
+            ? Math.min(Number.MAX_SAFE_INTEGER, Math.floor(maxBytes))
             : MAX_HISTORY_BYTES;
     const cutoffMs: number =
         safeNow > 0 ? Math.max(0, safeNow - safeRetentionDays * MS_PER_DAY) : 0;
@@ -256,21 +328,59 @@ export function pruneHistoryRuns(
     }
 
     working.sort((a: SyncRunRecord, b: SyncRunRecord): number => {
-        if (b.finishedAt !== a.finishedAt) {
-            return b.finishedAt - a.finishedAt;
+        const aFin: number = Number.isFinite(a.finishedAt) ? a.finishedAt : 0;
+        const bFin: number = Number.isFinite(b.finishedAt) ? b.finishedAt : 0;
+        if (bFin !== aFin) {
+            return bFin - aFin;
         }
-        return b.startedAt - a.startedAt;
+        const aStart: number = Number.isFinite(a.startedAt) ? a.startedAt : 0;
+        const bStart: number = Number.isFinite(b.startedAt) ? b.startedAt : 0;
+        return bStart - aStart;
     });
 
-    while (working.length > safeMaxRuns) {
-        const removeIndex: number = findOldestEvictableIndex(working);
-        if (removeIndex < 0 || removeIndex >= working.length) {
-            break;
+    if (working.length > safeMaxRuns) {
+        let toEvict: number = working.length - safeMaxRuns;
+        const evicted: Uint8Array = new Uint8Array(working.length);
+        for (
+            let i: number = working.length - 1;
+            i >= 0 && toEvict > 0;
+            i -= 1
+        ) {
+            const candidate: SyncRunRecord | undefined = working[i];
+            if (candidate !== undefined && !isCriticalRun(candidate)) {
+                evicted[i] = 1;
+                toEvict -= 1;
+            }
         }
-        working.splice(removeIndex, 1);
+        for (
+            let i: number = working.length - 1;
+            i >= 0 && toEvict > 0;
+            i -= 1
+        ) {
+            if (evicted[i] === 0) {
+                evicted[i] = 1;
+                toEvict -= 1;
+            }
+        }
+        const retained: SyncRunRecord[] = [];
+        for (let i: number = 0; i < working.length; i += 1) {
+            const run: SyncRunRecord | undefined = working[i];
+            if (evicted[i] === 0 && run !== undefined) {
+                retained.push(run);
+            }
+        }
+        working = retained;
     }
 
-    if (working.length === 0 || measureHistoryBytes(working) <= safeMaxBytes) {
+    if (working.length === 0) {
+        return working;
+    }
+
+    const runBytes: number[] = working.map((run: SyncRunRecord) =>
+        measureRunBytes(run)
+    );
+    let totalBytes: number = measureRunsTotalBytes(runBytes);
+    if (totalBytes <= safeMaxBytes) {
         return working;
     }
 
@@ -278,10 +388,17 @@ export function pruneHistoryRuns(
     for (let i: number = working.length - 1; i >= 1; i -= 1) {
         const run: SyncRunRecord | undefined = working[i];
         if (run !== undefined && !isCriticalRun(run) && run.events.length > 0) {
-            run.omittedEvents += run.events.length;
+            const oldBytes: number = runBytes[i] ?? 0;
+            run.omittedEvents = clampSafeNonNegativeAdd(
+                run.omittedEvents,
+                run.events.length
+            );
             run.events = [];
             run.detailsPruned = true;
-            if (measureHistoryBytes(working) <= safeMaxBytes) {
+            const newBytes: number = measureRunBytes(run);
+            runBytes[i] = newBytes;
+            totalBytes += newBytes - oldBytes;
+            if (totalBytes <= safeMaxBytes) {
                 return working;
             }
         }
@@ -291,54 +408,158 @@ export function pruneHistoryRuns(
     for (let i: number = working.length - 1; i >= 1; i -= 1) {
         const run: SyncRunRecord | undefined = working[i];
         if (run !== undefined && run.events.length > 0) {
-            run.omittedEvents += run.events.length;
+            const oldBytes: number = runBytes[i] ?? 0;
+            run.omittedEvents = clampSafeNonNegativeAdd(
+                run.omittedEvents,
+                run.events.length
+            );
             run.events = [];
             run.detailsPruned = true;
-            if (measureHistoryBytes(working) <= safeMaxBytes) {
+            const newBytes: number = measureRunBytes(run);
+            runBytes[i] = newBytes;
+            totalBytes += newBytes - oldBytes;
+            if (totalBytes <= safeMaxBytes) {
                 return working;
             }
         }
     }
 
     // Phase B: evict oldest runs while preserving the most recent run
-    while (working.length > 1 && measureHistoryBytes(working) > safeMaxBytes) {
-        const removeIndex: number = findOldestEvictableIndexKeepingLatest(working);
-        if (removeIndex <= 0 || removeIndex >= working.length) {
-            break;
+    if (working.length > 1 && totalBytes > safeMaxBytes) {
+        const evicted: Uint8Array = new Uint8Array(working.length);
+        for (
+            let i: number = working.length - 1;
+            i >= 1 && totalBytes > safeMaxBytes;
+            i -= 1
+        ) {
+            const candidate: SyncRunRecord | undefined = working[i];
+            if (candidate !== undefined && !isCriticalRun(candidate)) {
+                evicted[i] = 1;
+                totalBytes -= (runBytes[i] ?? 0) + 1;
+            }
         }
-        working.splice(removeIndex, 1);
+        for (
+            let i: number = working.length - 1;
+            i >= 1 && totalBytes > safeMaxBytes;
+            i -= 1
+        ) {
+            if (evicted[i] === 0) {
+                evicted[i] = 1;
+                totalBytes -= (runBytes[i] ?? 0) + 1;
+            }
+        }
+        const retained: SyncRunRecord[] = [];
+        for (let i: number = 0; i < working.length; i += 1) {
+            const run: SyncRunRecord | undefined = working[i];
+            if (evicted[i] === 0 && run !== undefined) {
+                retained.push(run);
+            }
+        }
+        working = retained;
     }
 
     // Phase C: if the latest run alone still exceeds maxBytes, trim its lower-priority events
     const latest: SyncRunRecord | undefined = working[0];
-    if (latest !== undefined && measureHistoryBytes(working) > safeMaxBytes) {
-        const prioritized: { events: SyncLogEvent[]; omittedEvents: number } =
-            capRunEvents(latest.events, latest.events.length);
-        latest.events = prioritized.events;
-        while (latest.events.length > 0 && measureHistoryBytes(working) > safeMaxBytes) {
-            const dropCount: number = Math.max(1, Math.floor(latest.events.length / 2));
+    if (latest !== undefined && totalBytes > safeMaxBytes) {
+        latest.events = sortEventsByPriority(latest.events);
+        totalBytes = HISTORY_ENVELOPE_BYTES + measureRunBytes(latest);
+        while (latest.events.length > 0 && totalBytes > safeMaxBytes) {
+            const dropCount: number = Math.max(
+                1,
+                Math.floor(latest.events.length / 2)
+            );
             latest.events.splice(latest.events.length - dropCount, dropCount);
-            latest.omittedEvents += dropCount;
+            latest.omittedEvents = clampSafeNonNegativeAdd(
+                latest.omittedEvents,
+                dropCount
+            );
             if (latest.events.length === 0) {
                 latest.detailsPruned = true;
             }
+            totalBytes = HISTORY_ENVELOPE_BYTES + measureRunBytes(latest);
         }
     }
 
     return working;
 }
 
+function redactTruncatedUrlAuthority(text: string): string {
+    const lastSchemeSep: number = text.lastIndexOf("://");
+    if (lastSchemeSep === -1) {
+        return text;
+    }
+    const authorityStart: number = lastSchemeSep + 3;
+    for (let i: number = authorityStart; i < text.length; i += 1) {
+        const code: number = text.charCodeAt(i);
+        if (
+            code === 47 ||
+            code === 63 ||
+            code === 35 ||
+            code === 32 ||
+            (code >= 9 && code <= 13) ||
+            (code >= 128 && WHITESPACE_CHAR_REGEX.test(text.charAt(i)))
+        ) {
+            return text;
+        }
+    }
+    return `${text.slice(0, authorityStart)}[REDACTED]`;
+}
+
 function resolveHistoryFilePath(
     historyFilePath: string,
-    configDir: string
+    rawConfigDir: string
 ): string {
     const normalized: string = util.normalizeVaultPath(historyFilePath);
+    if (normalized === "") {
+        throw new Error(`Invalid sync history file path: ${historyFilePath}`);
+    }
     const lower: string = normalized.toLowerCase();
+    const expectedSuffix: string = `/${util.SYNC_HISTORY_RELATIVE_PATH}`;
+
+    if (rawConfigDir !== "") {
+        const normalizedConfigDir: string = util.normalizeVaultPath(rawConfigDir);
+        if (normalizedConfigDir === "") {
+            throw new Error(
+                `Invalid sync history file path: ${historyFilePath}`
+            );
+        }
+        const configSegments: string[] = normalizedConfigDir
+            .toLowerCase()
+            .split("/");
+        for (const segment of configSegments) {
+            if (FORBIDDEN_HISTORY_SEGMENTS_LOWER.has(segment)) {
+                throw new Error(
+                    `Invalid sync history file path: ${historyFilePath}`
+                );
+            }
+        }
+        const expectedPathLower: string = util
+            .getSyncHistoryFilePath(normalizedConfigDir)
+            .toLowerCase();
+        if (
+            lower !== expectedPathLower ||
+            !util.isExcludedPath(normalized, normalizedConfigDir)
+        ) {
+            throw new Error(
+                `Invalid sync history file path: ${historyFilePath}`
+            );
+        }
+        return normalized;
+    }
+
+    if (!lower.endsWith(expectedSuffix)) {
+        throw new Error(`Invalid sync history file path: ${historyFilePath}`);
+    }
+    const prefixLower: string = lower.slice(
+        0,
+        lower.length - expectedSuffix.length
+    );
     if (
-        normalized === "" ||
-        lower.endsWith("/data.json") ||
-        lower.endsWith("/sync-state.json") ||
-        !util.isExcludedPath(normalized, configDir)
+        prefixLower === "" ||
+        !prefixLower.startsWith(".") ||
+        prefixLower.includes("/") ||
+        FORBIDDEN_HISTORY_SEGMENTS_LOWER.has(prefixLower) ||
+        !util.isExcludedPath(normalized, "")
     ) {
         throw new Error(`Invalid sync history file path: ${historyFilePath}`);
     }
@@ -349,14 +570,22 @@ function sanitizeEventMessage(raw: unknown): string | undefined {
     if (typeof raw !== "string") {
         return undefined;
     }
-    const redacted: string = redactSensitiveText(raw).trim();
-    if (redacted === "") {
+    const wasBounded: boolean = raw.length > MAX_RAW_EVENT_MESSAGE_LENGTH;
+    const boundedRaw: string = wasBounded
+        ? raw.slice(0, MAX_RAW_EVENT_MESSAGE_LENGTH)
+        : raw;
+    let redacted: string = redactSensitiveText(boundedRaw);
+    if (wasBounded) {
+        redacted = redactTruncatedUrlAuthority(redacted);
+    }
+    const trimmed: string = redacted.trim();
+    if (trimmed === "") {
         return undefined;
     }
-    if (redacted.length > MAX_EVENT_MESSAGE_LENGTH) {
-        return `${redacted.slice(0, MAX_EVENT_MESSAGE_LENGTH - 3)}...`;
+    if (trimmed.length > MAX_EVENT_MESSAGE_LENGTH) {
+        return `${trimmed.slice(0, MAX_EVENT_MESSAGE_LENGTH - 3)}...`;
     }
-    return redacted;
+    return trimmed;
 }
 
 function sanitizeLogEvent(raw: unknown): SyncLogEvent | null {
@@ -400,7 +629,8 @@ function sanitizeLogEvent(raw: unknown): SyncLogEvent | null {
     if (
         typeof record.size === "number" &&
         Number.isFinite(record.size) &&
-        record.size >= 0
+        record.size >= 0 &&
+        record.size <= Number.MAX_SAFE_INTEGER
     ) {
         event.size = Math.floor(record.size);
     }
@@ -411,7 +641,8 @@ function sanitizeNonNegativeInt(value: unknown, fallback: number = 0): number {
     if (
         typeof value !== "number" ||
         !Number.isFinite(value) ||
-        value < 0
+        value < 0 ||
+        value > Number.MAX_SAFE_INTEGER
     ) {
         return fallback;
     }
@@ -468,15 +699,62 @@ function sanitizeRunRecord(raw: unknown): SyncRunRecord | null {
     const rawEvents: unknown[] = Array.isArray(candidate.events)
         ? candidate.events
         : [];
-    const validatedEvents: SyncLogEvent[] = [];
+    let orderedEvents: SyncLogEvent[] = [];
+    let buckets: SyncLogEvent[][] | null = null;
+    let validEventCount: number = 0;
+
     for (const item of rawEvents) {
-        const sanitizedEvent: SyncLogEvent | null = sanitizeLogEvent(item);
-        if (sanitizedEvent !== null) {
-            validatedEvents.push(sanitizedEvent);
+        if (typeof item !== "object" || item === null || Array.isArray(item)) {
+            continue;
+        }
+        const rawKind: unknown = (item as Record<string, unknown>).kind;
+        if (typeof rawKind !== "string" || !VALID_EVENT_KINDS.has(rawKind)) {
+            continue;
+        }
+        validEventCount += 1;
+        if (buckets === null) {
+            if (validEventCount <= MAX_EVENTS_PER_RUN) {
+                const sanitizedEvent: SyncLogEvent | null =
+                    sanitizeLogEvent(item);
+                if (sanitizedEvent !== null) {
+                    orderedEvents.push(sanitizedEvent);
+                }
+                continue;
+            }
+            buckets = [[], [], [], [], []];
+            for (const existing of orderedEvents) {
+                const existingBucket: SyncLogEvent[] | undefined =
+                    buckets[getEventPriority(existing.kind) - 1];
+                if (
+                    existingBucket !== undefined &&
+                    existingBucket.length < MAX_EVENTS_PER_RUN
+                ) {
+                    existingBucket.push(existing);
+                }
+            }
+            orderedEvents = [];
+        }
+        const priority: number = getEventPriority(rawKind);
+        const targetBucket: SyncLogEvent[] | undefined = buckets[priority - 1];
+        if (
+            targetBucket !== undefined &&
+            targetBucket.length < MAX_EVENTS_PER_RUN
+        ) {
+            const sanitizedEvent: SyncLogEvent | null = sanitizeLogEvent(item);
+            if (sanitizedEvent !== null) {
+                targetBucket.push(sanitizedEvent);
+            }
         }
     }
-    const capped: { events: SyncLogEvent[]; omittedEvents: number } =
-        capRunEvents(validatedEvents, MAX_EVENTS_PER_RUN);
+
+    const keptEvents: SyncLogEvent[] =
+        buckets === null
+            ? orderedEvents
+            : drainPriorityBuckets(buckets, MAX_EVENTS_PER_RUN);
+    const newlyOmitted: number = Math.max(
+        0,
+        validEventCount - keptEvents.length
+    );
     const existingOmitted: number = sanitizeNonNegativeInt(
         candidate.omittedEvents,
         0
@@ -493,10 +771,10 @@ function sanitizeRunRecord(raw: unknown): SyncRunRecord | null {
         collapsedCount,
         detailsPruned: Boolean(candidate.detailsPruned),
         durationMs,
-        events: capped.events,
+        events: keptEvents,
         finishedAt,
         id: rawId.slice(0, 64),
-        omittedEvents: existingOmitted + capped.omittedEvents,
+        omittedEvents: clampSafeNonNegativeAdd(existingOmitted, newlyOmitted),
         startedAt: safeStartedAt,
         status,
         summary,
@@ -534,6 +812,20 @@ function sanitizeRunSummary(raw: unknown): SyncRunSummary {
     };
 }
 
+function sortEventsByPriority(
+    events: ReadonlyArray<SyncLogEvent>
+): SyncLogEvent[] {
+    const buckets: SyncLogEvent[][] = [[], [], [], [], []];
+    for (const event of events) {
+        const priority: number = getEventPriority(event.kind);
+        const bucket: SyncLogEvent[] | undefined = buckets[priority - 1];
+        if (bucket !== undefined) {
+            bucket.push(cloneLogEvent(event));
+        }
+    }
+    return drainPriorityBuckets(buckets, events.length);
+}
+
 function stripNullPadding(raw: string): string {
     let start: number = 0;
     let end: number = raw.length;
@@ -551,13 +843,12 @@ function stripNullPadding(raw: string): string {
 
 export class SyncHistoryStore {
     private readonly adapter: DataAdapter;
-    private readonly configDir: string;
     private ensureParentDirPromise: Promise<void> | null = null;
     private readonly historyFilePath: string;
     private isLoaded: boolean = false;
     private isParentDirEnsured: boolean = false;
+    private operationPromise: Promise<void> = Promise.resolve();
     private runs: SyncRunRecord[] = [];
-    private savePromise: Promise<void> = Promise.resolve();
 
     public constructor(
         adapter: DataAdapter,
@@ -565,18 +856,27 @@ export class SyncHistoryStore {
         configDir: string = ""
     ) {
         this.adapter = adapter;
-        this.configDir =
-            configDir !== "" ? util.normalizeVaultPath(configDir) : "";
         this.historyFilePath = resolveHistoryFilePath(
             historyFilePath,
-            this.configDir
+            configDir
         );
     }
 
-    public async clear(): Promise<void> {
-        this.runs = [];
-        this.isLoaded = true;
-        await this.save();
+    public clear(): Promise<void> {
+        return this.enqueueOperation(async (): Promise<void> => {
+            this.runs = [];
+            this.isLoaded = true;
+            await this.writeSnapshotInternal([]);
+        });
+    }
+
+    private enqueueOperation<T>(task: () => Promise<T>): Promise<T> {
+        const nextPromise: Promise<T> = this.operationPromise.then(task, task);
+        this.operationPromise = nextPromise.then(
+            () => undefined,
+            () => undefined
+        );
+        return nextPromise;
     }
 
     public async ensureParentDirectory(): Promise<void> {
@@ -615,11 +915,19 @@ export class SyncHistoryStore {
         return this.runs.map((run: SyncRunRecord) => cloneRunRecord(run));
     }
 
-    public async load(
+    public load(
         retentionDays: number = DEFAULT_HISTORY_RETENTION_DAYS,
         now: number = Date.now()
     ): Promise<SyncHistoryData> {
-        await this.savePromise;
+        return this.enqueueOperation((): Promise<SyncHistoryData> =>
+            this.loadInternal(retentionDays, now)
+        );
+    }
+
+    private async loadInternal(
+        retentionDays: number,
+        now: number
+    ): Promise<SyncHistoryData> {
         const exists: boolean = await this.adapter.exists(this.historyFilePath);
         if (!exists) {
             this.runs = [];
@@ -630,6 +938,27 @@ export class SyncHistoryStore {
             };
         }
 
+        if (typeof this.adapter.stat === "function") {
+            const fileStat: Stat | null = await this.adapter.stat(
+                this.historyFilePath
+            );
+            if (
+                fileStat !== null &&
+                Number.isFinite(fileStat.size) &&
+                fileStat.size > MAX_HISTORY_FILE_BYTES
+            ) {
+                log.warn(
+                    "Sync history file exceeds maximum allowed size; resetting history."
+                );
+                this.runs = [];
+                this.isLoaded = true;
+                return {
+                    runs: [],
+                    version: CURRENT_HISTORY_VERSION
+                };
+            }
+        }
+
         const raw: string = await this.adapter
             .read(this.historyFilePath)
             .catch((err: unknown): never => {
@@ -637,7 +966,7 @@ export class SyncHistoryStore {
                 throw err;
             });
 
-        if (raw.length > MAX_FILE_SIZE_BYTES) {
+        if (raw.length > MAX_HISTORY_FILE_BYTES) {
             log.warn(
                 "Sync history file exceeds maximum allowed size; resetting history."
             );
@@ -656,22 +985,26 @@ export class SyncHistoryStore {
                 typeof parsed === "object" &&
                 parsed !== null &&
                 !Array.isArray(parsed) &&
-                "runs" in parsed &&
-                Array.isArray(parsed.runs)
+                Object.prototype.hasOwnProperty.call(parsed, "runs")
             ) {
-                const validated: SyncRunRecord[] = [];
-                for (const item of parsed.runs) {
-                    const run: SyncRunRecord | null = sanitizeRunRecord(item);
-                    if (run !== null) {
-                        validated.push(run);
+                const parsedRuns: unknown = (
+                    parsed as Record<string, unknown>
+                ).runs;
+                if (Array.isArray(parsedRuns)) {
+                    const validated: SyncRunRecord[] = [];
+                    for (const item of parsedRuns) {
+                        const run: SyncRunRecord | null = sanitizeRunRecord(item);
+                        if (run !== null) {
+                            validated.push(run);
+                        }
                     }
+                    this.runs = pruneHistoryRuns(validated, now, retentionDays);
+                    this.isLoaded = true;
+                    return {
+                        runs: this.getRuns(),
+                        version: CURRENT_HISTORY_VERSION
+                    };
                 }
-                this.runs = pruneHistoryRuns(validated, now, retentionDays);
-                this.isLoaded = true;
-                return {
-                    runs: this.getRuns(),
-                    version: CURRENT_HISTORY_VERSION
-                };
             }
         } catch (err: unknown) {
             log.warn(
@@ -688,61 +1021,67 @@ export class SyncHistoryStore {
         };
     }
 
-    public async recordRun(
+    public recordRun(
         run: SyncRunRecord,
         retentionDays: number = DEFAULT_HISTORY_RETENTION_DAYS,
         now: number = Date.now()
     ): Promise<SyncRunRecord[]> {
-        if (!this.isLoaded) {
-            await this.load(retentionDays, now);
-        }
-        const sanitized: SyncRunRecord | null = sanitizeRunRecord(run);
-        if (sanitized === null) {
-            return this.getRuns();
-        }
-        const latest: SyncRunRecord | undefined = this.runs[0];
-        if (
-            latest !== undefined &&
-            isNoopRun(sanitized) &&
-            isNoopRun(latest)
-        ) {
-            const folded: SyncRunRecord = {
-                ...cloneRunRecord(latest),
-                collapsedCount: latest.collapsedCount + sanitized.collapsedCount,
-                durationMs: sanitized.durationMs,
-                finishedAt: Math.max(latest.finishedAt, sanitized.finishedAt),
-                firstCollapsedAt:
-                    latest.firstCollapsedAt ??
-                    Math.min(latest.startedAt, sanitized.startedAt),
-                id: sanitized.id,
-                startedAt: sanitized.startedAt,
-                trigger: sanitized.trigger
-            };
-            this.runs = [folded, ...this.runs.slice(1)];
-        } else {
-            this.runs = [sanitized, ...this.runs];
-        }
+        return this.enqueueOperation(async (): Promise<SyncRunRecord[]> => {
+            if (!this.isLoaded) {
+                await this.loadInternal(retentionDays, now);
+            }
+            const sanitized: SyncRunRecord | null = sanitizeRunRecord(run);
+            if (sanitized === null) {
+                return this.getRuns();
+            }
+            const latest: SyncRunRecord | undefined = this.runs[0];
+            if (
+                latest !== undefined &&
+                isNoopRun(sanitized) &&
+                isNoopRun(latest)
+            ) {
+                const folded: SyncRunRecord = {
+                    ...cloneRunRecord(latest),
+                    collapsedCount: clampSafeNonNegativeAdd(
+                        latest.collapsedCount,
+                        sanitized.collapsedCount
+                    ),
+                    durationMs: sanitized.durationMs,
+                    finishedAt: Math.max(latest.finishedAt, sanitized.finishedAt),
+                    firstCollapsedAt:
+                        latest.firstCollapsedAt ??
+                        Math.min(latest.startedAt, sanitized.startedAt),
+                    id: sanitized.id,
+                    startedAt: sanitized.startedAt,
+                    trigger: sanitized.trigger
+                };
+                this.runs = [folded, ...this.runs.slice(1)];
+            } else {
+                this.runs = [sanitized, ...this.runs];
+            }
 
-        this.runs = pruneHistoryRuns(this.runs, now, retentionDays);
-        await this.save();
-        return this.getRuns();
+            this.runs = pruneHistoryRuns(this.runs, now, retentionDays);
+            const snapshot: SyncRunRecord[] = this.getRuns();
+            await this.writeSnapshotInternal(snapshot);
+            return snapshot;
+        });
     }
 
     public save(): Promise<void> {
-        const writeTask = async (): Promise<void> => {
-            await this.ensureParentDirectory();
-            const payload: SyncHistoryData = {
-                runs: this.runs,
-                version: CURRENT_HISTORY_VERSION
-            };
-            const serialized: string = JSON.stringify(payload);
-            await this.adapter.write(this.historyFilePath, serialized);
-        };
-        const nextPromise: Promise<void> = this.savePromise.then(
-            writeTask,
-            writeTask
+        return this.enqueueOperation((): Promise<void> =>
+            this.writeSnapshotInternal(this.getRuns())
         );
-        this.savePromise = nextPromise.catch(() => undefined);
-        return nextPromise;
+    }
+
+    private async writeSnapshotInternal(
+        runsSnapshot: SyncRunRecord[]
+    ): Promise<void> {
+        await this.ensureParentDirectory();
+        const payload: SyncHistoryData = {
+            runs: runsSnapshot,
+            version: CURRENT_HISTORY_VERSION
+        };
+        const serialized: string = JSON.stringify(payload);
+        await this.adapter.write(this.historyFilePath, serialized);
     }
 }

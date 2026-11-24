@@ -1,6 +1,6 @@
 import * as obsidian from "obsidian";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { formatTransferProgress, log } from "../src/log";
+import { formatTransferProgress, log, redactSensitiveText } from "../src/log";
 
 describe("log", () => {
     beforeEach(() => {
@@ -146,5 +146,34 @@ describe("log", () => {
                 Number.NaN
             )
         ).toBe("Uploading notes.md (file 1/1)");
+    });
+
+    it("neutralizes quadratic ReDoS payloads in redactSensitiveText() while preserving edge-case URL redaction", () => {
+        const redosPayload: string = "a".repeat(100_000);
+        const startMs: number = performance.now();
+        const redactedPlain: string = redactSensitiveText(redosPayload);
+        const elapsedMs: number = performance.now() - startMs;
+
+        expect(elapsedMs).toBeLessThan(200);
+        expect(redactedPlain).toBe(redosPayload);
+
+        const trailingUrlPayload: string = `${"a".repeat(60_000)} https://alice:secret@cloud.example.com/dav`;
+        const startUrlMs: number = performance.now();
+        const redactedTrailing: string = redactSensitiveText(trailingUrlPayload);
+        const elapsedUrlMs: number = performance.now() - startUrlMs;
+
+        expect(elapsedUrlMs).toBeLessThan(200);
+        expect(redactedTrailing).toContain("https://[REDACTED]@cloud.example.com/dav");
+        expect(redactedTrailing).not.toContain("secret");
+
+        expect(redactSensitiveText("https://@cloud.example.com/dav")).toBe(
+            "https://@cloud.example.com/dav"
+        );
+        expect(redactSensitiveText("https://foo:bar@baz://qux:pw@host/path")).toBe(
+            "https://[REDACTED]@baz://[REDACTED]@host/path"
+        );
+        expect(redactSensitiveText("123https://u:p@example.com/x")).toBe(
+            "123https://[REDACTED]@example.com/x"
+        );
     });
 });

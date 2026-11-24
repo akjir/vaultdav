@@ -10,6 +10,10 @@ All notable changes to this project will be documented in this file.
 - Capture per-file uploads, downloads, conflict resolution details (`keep_both`, `newest_wins_local`, `newest_wins_remote`, `identical`), deletions, folder creations, plan/walk warnings, and redacted errors on every sync run.
 - Show a clickable Desktop status bar error indicator when a sync completes with errors or fails.
 
+### Fixed
+- Harden `SyncHistoryStore` with a strict allowlist for history file paths, unified async serialization across `load()`, `recordRun()`, `clear()`, and `save()`, O(N) run/event retention with incremental UTF-8 byte tracking, `stat()` pre-read size checks, safe integer clamping, and `Map`-based event priority lookup.
+- Replace the backtracking URL userinfo redaction regex in `redactSensitiveText()` with a linear-time scanner and guard truncated authority prefixes in `sanitizeEventMessage()`.
+
 ## [1.2.0] - 2026-11-24
 
 ### Added
