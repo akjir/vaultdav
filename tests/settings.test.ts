@@ -1,8 +1,7 @@
-import * as obsidian from "obsidian";
 import type {
     App,
     PluginManifest,
-    SettingDefinitionControl,
+    Setting as ObsidianSetting,
     SettingDefinitionGroup,
     SettingDefinitionItem,
     SettingDefinitionRender,
@@ -11,7 +10,6 @@ import type {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import VaultDavPlugin from "../src/main";
 import {
-    createSettingGroup,
     DEFAULT_SETTINGS,
     hasEmbeddedUrlCredentials,
     MAX_CHUNK_SIZE_MB,
@@ -27,11 +25,15 @@ import {
     VaultDavSettingTab
 } from "../src/settings";
 import {
-    SecretComponent as MockSecretComponent,
     SecretStorage as MockSecretStorage,
     Setting as MockSetting,
     SettingGroup as MockSettingGroup
 } from "./obsidian_mock";
+
+interface RenderedDeclarativeTab {
+    cleanups: Array<() => void>;
+    groups: SettingDefinitionGroup[];
+}
 
 function createTestPlugin(
     configDir: string = ".obsidian"
@@ -56,7 +58,7 @@ function createTestPlugin(
         description: "Test",
         id: "vaultdav",
         isDesktopOnly: false,
-        minAppVersion: "1.11.4",
+        minAppVersion: "1.13.2",
         name: "VaultDAV",
         version: "0.1.0"
     };
@@ -75,9 +77,42 @@ function getSettingByName(name: string): MockSetting {
     return found;
 }
 
+function renderDeclarativeTab(tab: VaultDavSettingTab): RenderedDeclarativeTab {
+    const definitions: SettingDefinitionItem[] = tab.getSettingDefinitions();
+    const groups: SettingDefinitionGroup[] =
+        definitions as SettingDefinitionGroup[];
+    const cleanups: Array<() => void> = [];
+    const containerEl: HTMLElement = document.createElement("div");
+
+    for (const group of groups) {
+        const mockGroup: MockSettingGroup = new MockSettingGroup(containerEl);
+        if (group.heading !== undefined) {
+            mockGroup.setHeading(group.heading);
+        }
+        for (const item of group.items ?? []) {
+            if ("render" in item && typeof item.render === "function") {
+                const renderItem: SettingDefinitionRender = item;
+                const mockSetting: MockSetting = new MockSetting(mockGroup.listEl);
+                mockSetting.setName(renderItem.name);
+                if (typeof renderItem.desc === "string") {
+                    mockSetting.setDesc(renderItem.desc);
+                }
+                const cleanup = renderItem.render(
+                    mockSetting as unknown as ObsidianSetting,
+                    mockGroup as unknown as ObsidianSettingGroup
+                );
+                if (typeof cleanup === "function") {
+                    cleanups.push(cleanup);
+                }
+            }
+        }
+    }
+
+    return { cleanups, groups };
+}
+
 describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
     beforeEach(() => {
-        MockSecretComponent.instances.length = 0;
         MockSetting.instances.length = 0;
         MockSettingGroup.instances.length = 0;
     });
@@ -112,486 +147,12 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         }).toThrow();
     });
 
-    it("clears containerEl via empty() without touching innerHTML, and falls back to replaceChildren()", () => {
+    it("returns declarative SettingDefinitionItem groups with strict Obsidian Sentence case names, controls, and mobile input hygiene", () => {
         const { app, plugin } = createTestPlugin();
         const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
 
-        const emptySpy = vi.spyOn(tab.containerEl, "empty");
-        let innerHtmlTouched: boolean = false;
-        Object.defineProperty(tab.containerEl, "innerHTML", {
-            configurable: true,
-            get(): string {
-                return "";
-            },
-            set(): void {
-                innerHtmlTouched = true;
-                throw new Error("innerHTML must not be used");
-            }
-        });
-
-        tab.display();
-        expect(emptySpy).toHaveBeenCalledTimes(1);
-        expect(innerHtmlTouched).toBe(false);
-        expect(tab.containerEl.children.length).toBe(4);
-
-        const replaceChildrenSpy = vi.spyOn(tab.containerEl, "replaceChildren");
-        (tab.containerEl as Partial<HTMLElement>).empty = undefined;
-        tab.display();
-        expect(replaceChildrenSpy).toHaveBeenCalledTimes(1);
-        expect(tab.containerEl.children.length).toBe(4);
-    });
-
-    it("renders grouped settings with strict Obsidian Sentence case names and descriptions", () => {
-        const { app, plugin } = createTestPlugin();
-        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
-
-        tab.display();
-
-        expect(MockSettingGroup.instances.length).toBe(4);
-        expect(
-            MockSettingGroup.instances.map((group: MockSettingGroup) => ({
-                heading: group.heading,
-                names: group.settings.map((item: MockSetting): string => item.name)
-            }))
-        ).toEqual([
-            {
-                heading: "",
-                names: [
-                    "Server URL",
-                    "Username",
-                    "App password",
-                    "Remote base directory",
-                    "Resolved WebDAV URL"
-                ]
-            },
-            {
-                heading: "",
-                names: ["Sync interval", "Conflict strategy"]
-            },
-            {
-                heading: "",
-                names: ["Test connection"]
-            },
-            {
-                heading: "Advanced sync",
-                names: ["Chunking threshold", "Chunk size", "Sync log retention"]
-            }
-        ]);
-
-        const names: string[] = MockSetting.instances.map(
-            (item: MockSetting): string => item.name
-        );
-        expect(names).toEqual([
-            "Server URL",
-            "Username",
-            "App password",
-            "Remote base directory",
-            "Resolved WebDAV URL",
-            "Sync interval",
-            "Conflict strategy",
-            "Test connection",
-            "Chunking threshold",
-            "Chunk size",
-            "Sync log retention"
-        ]);
-
-        expect(getSettingByName("Server URL").desc).toBe(
-            "Nextcloud host or WebDAV URL (uses https:// if omitted; only http:// and https:// allowed)."
-        );
-        expect(getSettingByName("Username").desc).toBe("Nextcloud account username.");
-        expect(getSettingByName("Username").textComponent?.inputEl.placeholder).toBe(
-            "Enter username"
-        );
-        expect(getSettingByName("App password").desc).toBe(
-            "Select or create a secret for your Nextcloud app password."
-        );
-        expect(getSettingByName("App password").secretComponent).not.toBeNull();
-        expect(getSettingByName("App password").textComponent).toBeNull();
-        expect(getSettingByName("Remote base directory").desc).toBe(
-            "Target remote folder path inside the Nextcloud user files root."
-        );
-        expect(getSettingByName("Resolved WebDAV URL").desc).toBe(
-            "Full WebDAV endpoint constructed from server URL, username, and remote base directory."
-        );
-        expect(getSettingByName("Sync interval").desc).toBe(
-            "Automatic synchronization interval in minutes (0 to disable)."
-        );
-        expect(getSettingByName("Conflict strategy").desc).toBe(
-            "Resolution mode for concurrent edits (keep_both or newest_wins)."
-        );
-        expect(getSettingByName("Test connection").desc).toBe(
-            "Verify Nextcloud WebDAV credentials and remote directory access."
-        );
-        expect(
-            getSettingByName("Test connection").buttonComponent?.buttonEl.textContent
-        ).toBe("Test connection");
-        expect(getSettingByName("Chunking threshold").desc).toBe(
-            "Minimum file size in MB before switching to Nextcloud chunked uploads."
-        );
-        expect(getSettingByName("Chunk size").desc).toBe(
-            "Target chunk size in MB for chunked uploads and parallel range downloads."
-        );
-        expect(getSettingByName("Sync log retention").desc).toBe(
-            "Days to retain local sync history (1 to 365)."
-        );
-    });
-
-    it("falls back to flat Setting items when SettingGroup is unavailable or requireApiVersion('1.11.0') is false", () => {
-        const containerEl: HTMLElement = document.createElement("div");
-        createSettingGroup(containerEl, null)
-            .setHeading("Advanced sync")
-            .addSetting((setting) => {
-                setting.setName("Chunking threshold");
-            })
-            .addSetting((setting) => {
-                setting.setName("Chunk size");
-            });
-
-        expect(MockSetting.instances.length).toBe(3);
-        expect(MockSetting.instances[0]?.name).toBe("Advanced sync");
-        expect(MockSetting.instances[0]?.isHeading).toBe(true);
-        expect(MockSetting.instances[1]?.name).toBe("Chunking threshold");
-        expect(MockSetting.instances[2]?.name).toBe("Chunk size");
-
-        MockSetting.instances.length = 0;
-        MockSettingGroup.instances.length = 0;
-        const versionSpy = vi
-            .spyOn(obsidian, "requireApiVersion")
-            .mockReturnValueOnce(false);
-        const oldContainerEl: HTMLElement = document.createElement("div");
-        createSettingGroup(oldContainerEl)
-            .setHeading("Advanced sync")
-            .addSetting((setting) => {
-                setting.setName("Chunk size");
-            });
-        expect(versionSpy).toHaveBeenCalledWith("1.11.0");
-        expect(MockSettingGroup.instances.length).toBe(0);
-        expect(MockSetting.instances.length).toBe(2);
-        expect(MockSetting.instances[0]?.isHeading).toBe(true);
-        versionSpy.mockRestore();
-    });
-
-    it("configures mobile input hygiene, SecretComponent binding, and input types/bounds on controls", () => {
-        const { app, plugin } = createTestPlugin();
-        plugin.settings.appPasswordSecret = "vaultdav-app-password";
-        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
-
-        tab.display();
-
-        for (const label of ["Server URL", "Username", "Remote base directory"]) {
-            const setting: MockSetting = getSettingByName(label);
-            const inputEl: HTMLInputElement | undefined = setting.textComponent?.inputEl;
-            expect(inputEl).toBeDefined();
-            expect(inputEl?.autocapitalize).toBe("none");
-            expect(inputEl?.getAttribute("autocapitalize")).toBe("none");
-            expect(inputEl?.getAttribute("autocorrect")).toBe("off");
-            expect(inputEl?.autocomplete).toBe("off");
-            expect(inputEl?.spellcheck).toBe(false);
-        }
-        expect(
-            getSettingByName("Server URL").textComponent?.inputEl.getAttribute(
-                "inputmode"
-            )
-        ).toBe("url");
-
-        const appPasswordSetting: MockSetting = getSettingByName("App password");
-        expect(appPasswordSetting.textComponent).toBeNull();
-        expect(appPasswordSetting.secretComponent).not.toBeNull();
-        expect(appPasswordSetting.secretComponent?.value).toBe("vaultdav-app-password");
-
-        const intervalInput: HTMLInputElement | undefined =
-            getSettingByName("Sync interval").textComponent?.inputEl;
-        expect(intervalInput?.type).toBe("number");
-        expect(intervalInput?.min).toBe("0");
-        expect(intervalInput?.max).toBe(String(MAX_SYNC_INTERVAL_MINUTES));
-
-        const thresholdInput: HTMLInputElement | undefined =
-            getSettingByName("Chunking threshold").textComponent?.inputEl;
-        expect(thresholdInput?.type).toBe("number");
-        expect(thresholdInput?.min).toBe("1");
-        expect(thresholdInput?.max).toBe(String(MAX_CHUNKING_THRESHOLD_MB));
-
-        const chunkSizeInput: HTMLInputElement | undefined =
-            getSettingByName("Chunk size").textComponent?.inputEl;
-        expect(chunkSizeInput?.type).toBe("number");
-        expect(chunkSizeInput?.min).toBe("1");
-        expect(chunkSizeInput?.max).toBe(String(MAX_CHUNK_SIZE_MB));
-
-        const retentionInput: HTMLInputElement | undefined =
-            getSettingByName("Sync log retention").textComponent?.inputEl;
-        expect(retentionInput?.type).toBe("number");
-        expect(retentionInput?.min).toBe(String(MIN_SYNC_LOG_RETENTION_DAYS));
-        expect(retentionInput?.max).toBe(String(MAX_SYNC_LOG_RETENTION_DAYS));
-    });
-
-    it("fails closed without plaintext password input when Obsidian 1.11.4 SecretComponent API is unavailable", () => {
-        const { app, plugin } = createTestPlugin();
-        const versionSpy = vi
-            .spyOn(obsidian, "requireApiVersion")
-            .mockImplementation((version: string): boolean => version !== "1.11.4");
-        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
-
-        tab.display();
-
-        const appPasswordSetting: MockSetting = getSettingByName("App password");
-        expect(appPasswordSetting.secretComponent).toBeNull();
-        expect(appPasswordSetting.textComponent).toBeNull();
-        expect(appPasswordSetting.desc).toBe(
-            "Obsidian 1.11.4 or newer is required for secure password storage."
-        );
-        versionSpy.mockRestore();
-    });
-
-    it("normalizes and persists setting changes across all controls", async () => {
-        const { app, plugin } = createTestPlugin();
-        const saveSpy = vi.spyOn(plugin, "saveSettings").mockResolvedValue(undefined);
-        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
-
-        tab.display();
-
-        await getSettingByName("Server URL").textOnChange?.("  https://nc.example.com/  ");
-        expect(plugin.settings.url).toBe("https://nc.example.com/");
-
-        await getSettingByName("Username").textOnChange?.("  alice  ");
-        expect(plugin.settings.username).toBe("alice");
-
-        await getSettingByName("App password").secretComponent?.onChangeHandler?.(
-            "  vaultdav-app-password  "
-        );
-        expect(plugin.settings.appPasswordSecret).toBe("vaultdav-app-password");
-
-        await getSettingByName("App password").secretComponent?.onChangeHandler?.(null);
-        expect(plugin.settings.appPasswordSecret).toBe("");
-
-        await getSettingByName("Remote base directory").textOnChange?.(
-            "  /Notes//Subfolder/  "
-        );
-        expect(plugin.settings.remoteBaseDir).toBe("Notes/Subfolder");
-
-        const intervalSetting: MockSetting = getSettingByName("Sync interval");
-        await intervalSetting.textOnChange?.("15");
-        expect(plugin.settings.syncInterval).toBe(15);
-
-        await intervalSetting.textOnChange?.("15.8");
-        expect(plugin.settings.syncInterval).toBe(15);
-
-        await intervalSetting.textOnChange?.("15abc");
-        expect(plugin.settings.syncInterval).toBe(0);
-
-        await intervalSetting.textOnChange?.("-5");
-        expect(plugin.settings.syncInterval).toBe(0);
-
-        await intervalSetting.textOnChange?.("   ");
-        expect(plugin.settings.syncInterval).toBe(0);
-
-        const conflictSetting: MockSetting = getSettingByName("Conflict strategy");
-        await conflictSetting.dropdownOnChange?.("newest_wins");
-        expect(plugin.settings.conflictStrategy).toBe("newest_wins");
-
-        await conflictSetting.dropdownOnChange?.("invalid_value");
-        expect(plugin.settings.conflictStrategy).toBe("keep_both");
-
-        const thresholdSetting: MockSetting = getSettingByName("Chunking threshold");
-        await thresholdSetting.textOnChange?.("120.7");
-        expect(plugin.settings.chunkingThresholdMB).toBe(120);
-
-        await thresholdSetting.textOnChange?.("0");
-        expect(plugin.settings.chunkingThresholdMB).toBe(90);
-
-        await thresholdSetting.textOnChange?.("   ");
-        expect(plugin.settings.chunkingThresholdMB).toBe(90);
-
-        const chunkSizeSetting: MockSetting = getSettingByName("Chunk size");
-        await chunkSizeSetting.textOnChange?.("25.4");
-        expect(plugin.settings.chunkSizeMB).toBe(25);
-
-        await chunkSizeSetting.textOnChange?.("-2");
-        expect(plugin.settings.chunkSizeMB).toBe(10);
-
-        await chunkSizeSetting.textOnChange?.("   ");
-        expect(plugin.settings.chunkSizeMB).toBe(10);
-
-        expect(saveSpy).toHaveBeenCalledTimes(18);
-    });
-
-    it("blocks red-team exploit inputs (32-bit timer overflow, OOM chunk sizes, excluded remoteBaseDir, embedded URL credentials, and control/colon injection)", async () => {
-        const { app, plugin } = createTestPlugin();
-        vi.spyOn(plugin, "saveSettings").mockResolvedValue(undefined);
-        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
-
-        tab.display();
-
-        await getSettingByName("Sync interval").textOnChange?.("99999999");
-        expect(plugin.settings.syncInterval).toBe(MAX_SYNC_INTERVAL_MINUTES);
-        expect(plugin.settings.syncInterval * 60 * 1000).toBeLessThanOrEqual(
-            2_147_483_647
-        );
-
-        await getSettingByName("Chunking threshold").textOnChange?.("999999");
-        expect(MAX_CHUNKING_THRESHOLD_MB).toBe(512);
-        expect(plugin.settings.chunkingThresholdMB).toBe(MAX_CHUNKING_THRESHOLD_MB);
-
-        await getSettingByName("Chunk size").textOnChange?.("999999");
-        expect(plugin.settings.chunkSizeMB).toBe(MAX_CHUNK_SIZE_MB);
-
-        await getSettingByName("Remote base directory").textOnChange?.(
-            ".obsidian"
-        );
-        expect(plugin.settings.remoteBaseDir).toBe("");
-
-        await getSettingByName("Remote base directory").textOnChange?.(
-            ".obsidian/plugins/vaultdav"
-        );
-        expect(plugin.settings.remoteBaseDir).toBe("");
-
-        const { app: customApp, plugin: customPlugin } =
-            createTestPlugin("custom-config");
-        vi.spyOn(customPlugin, "saveSettings").mockResolvedValue(undefined);
-        MockSetting.instances.length = 0;
-        const customTab: VaultDavSettingTab = new VaultDavSettingTab(
-            customApp,
-            customPlugin
-        );
-        customTab.display();
-        await getSettingByName("Remote base directory").textOnChange?.(
-            "custom-config"
-        );
-        expect(customPlugin.settings.remoteBaseDir).toBe("");
-        await getSettingByName("Remote base directory").textOnChange?.(
-            "custom-config/plugins/vaultdav"
-        );
-        expect(customPlugin.settings.remoteBaseDir).toBe("");
-        MockSetting.instances.length = 0;
-        tab.display();
-
-        await getSettingByName("Remote base directory").textOnChange?.(".trash");
-        expect(plugin.settings.remoteBaseDir).toBe("");
-
-        await getSettingByName("Remote base directory").textOnChange?.(".git/hooks");
-        expect(plugin.settings.remoteBaseDir).toBe("");
-
-        await getSettingByName("Server URL").textOnChange?.(
-            "  https://alice:super-secret@cloud.example.com/remote.php/dav  "
-        );
-        expect(plugin.settings.url).toBe(
-            "https://cloud.example.com/remote.php/dav"
-        );
-
-        await getSettingByName("Server URL").textOnChange?.(
-            "  https://alice@domain.com:p@ss@cloud.example.com/remote.php/dav  "
-        );
-        expect(plugin.settings.url).toBe(
-            "https://cloud.example.com/remote.php/dav"
-        );
-
-        await getSettingByName("Server URL").textOnChange?.(
-            "https://cloud.example.com?email=user@example.org"
-        );
-        expect(plugin.settings.url).toBe(
-            "https://cloud.example.com?email=user@example.org"
-        );
-
-        await getSettingByName("Server URL").textOnChange?.(
-            "https://cloud.example.com\r\nX-Injected: true"
-        );
-        expect(plugin.settings.url).toBe("");
-
-        await getSettingByName("Username").textOnChange?.("alice:injected");
-        expect(plugin.settings.username).toBe("");
-
-        await getSettingByName("Username").textOnChange?.("alice/../../root");
-        expect(plugin.settings.username).toBe("");
-
-        await getSettingByName("Username").textOnChange?.("alice\x00admin");
-        expect(plugin.settings.username).toBe("");
-
-        await getSettingByName("App password").secretComponent?.onChangeHandler?.(
-            "token\r\ninjected"
-        );
-        expect(plugin.settings.appPasswordSecret).toBe("");
-
-        for (const badSecretId of [
-            "",
-            "   ",
-            "UPPERCASE",
-            "has spaces",
-            "bad_underscore",
-            "../traversal",
-            "a".repeat(MAX_SECRET_ID_LENGTH + 1),
-            null,
-            123
-        ]) {
-            expect(sanitizeSecretId(badSecretId)).toBe("");
-        }
-        expect(sanitizeSecretId("  vaultdav-app-password-2  ")).toBe(
-            "vaultdav-app-password-2"
-        );
-        expect(
-            hasEmbeddedUrlCredentials(
-                "https://alice:secret@cloud.example.com/remote.php/dav"
-            )
-        ).toBe(true);
-        expect(
-            hasEmbeddedUrlCredentials(
-                "https://alice:secret@cloud.example.com\r\nX-Injected: true"
-            )
-        ).toBe(true);
-        expect(
-            hasEmbeddedUrlCredentials(
-                "https://cloud.example.com?email=user@example.org"
-            )
-        ).toBe(false);
-    });
-
-    it("disables Test connection button during execution and restores state in finally", async () => {
-        const { app, plugin } = createTestPlugin();
-        let resolveTest: (value: boolean) => void = (): void => undefined;
-        vi.spyOn(plugin, "testConnection").mockImplementation(
-            (): Promise<boolean> =>
-                new Promise<boolean>((resolve: (value: boolean) => void) => {
-                    resolveTest = resolve;
-                })
-        );
-
-        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
-        tab.display();
-
-        const testSetting: MockSetting = getSettingByName("Test connection");
-        const buttonComp = testSetting.buttonComponent;
-        expect(buttonComp).not.toBeNull();
-        expect(buttonComp?.disabled).toBe(false);
-        expect(buttonComp?.buttonEl.textContent).toBe("Test connection");
-
-        const clickPromise: Promise<unknown> = Promise.resolve(
-            testSetting.buttonOnClick?.()
-        );
-        expect(buttonComp?.disabled).toBe(true);
-        expect(buttonComp?.buttonEl.textContent).toBe("Testing...");
-
-        resolveTest(true);
-        await clickPromise;
-
-        expect(buttonComp?.disabled).toBe(false);
-        expect(buttonComp?.buttonEl.textContent).toBe("Test connection");
-
-        vi.spyOn(plugin, "testConnection").mockRejectedValueOnce(
-            new Error("Network error")
-        );
-        await expect(
-            Promise.resolve(testSetting.buttonOnClick?.())
-        ).rejects.toThrow("Network error");
-        expect(buttonComp?.disabled).toBe(false);
-        expect(buttonComp?.buttonEl.textContent).toBe("Test connection");
-    });
-
-    it("returns declarative SettingDefinitionItem groups matching display() for Obsidian 1.13+ settings search", () => {
-        const { app, plugin } = createTestPlugin();
-        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
-
-        const definitions: SettingDefinitionItem[] = tab.getSettingDefinitions();
-        expect(definitions.length).toBe(4);
-
-        const groups: SettingDefinitionGroup[] = definitions as SettingDefinitionGroup[];
+        const { cleanups, groups } = renderDeclarativeTab(tab);
+        expect(groups.length).toBe(4);
         expect(
             groups.map((group: SettingDefinitionGroup) => ({
                 heading: group.heading ?? "",
@@ -673,40 +234,11 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         );
         expect(typeof previewItem?.render).toBe("function");
 
-        // Verify Obsidian 1.13+ declarative render callbacks configure mobile lowercase input attributes and live endpoint preview
-        const renderContainer: HTMLElement = document.createElement("div");
-        const mockGroup: ObsidianSettingGroup = new MockSettingGroup(
-            renderContainer
-        ) as unknown as ObsidianSettingGroup;
-        const renderedUrlSetting: MockSetting = new MockSetting(renderContainer);
-        const renderedUserSetting: MockSetting = new MockSetting(renderContainer);
-        const renderedDirSetting: MockSetting = new MockSetting(renderContainer);
-        const renderedPreviewSetting: MockSetting = new MockSetting(renderContainer);
-
-        const cleanupUrl = urlItem?.render(
-            renderedUrlSetting as unknown as obsidian.Setting,
-            mockGroup
-        );
-        const cleanupUser = usernameItem?.render(
-            renderedUserSetting as unknown as obsidian.Setting,
-            mockGroup
-        );
-        const cleanupDir = remoteDirItem?.render(
-            renderedDirSetting as unknown as obsidian.Setting,
-            mockGroup
-        );
-        const cleanupPreview = previewItem?.render(
-            renderedPreviewSetting as unknown as obsidian.Setting,
-            mockGroup
-        );
-
-        for (const rendered of [
-            renderedUrlSetting,
-            renderedUserSetting,
-            renderedDirSetting
-        ]) {
+        for (const label of ["Server URL", "Username", "Remote base directory"]) {
+            const setting: MockSetting = getSettingByName(label);
             const inputEl: HTMLInputElement | undefined =
-                rendered.textComponent?.inputEl;
+                setting.textComponent?.inputEl;
+            expect(inputEl).toBeDefined();
             expect(inputEl?.autocapitalize).toBe("none");
             expect(inputEl?.getAttribute("autocapitalize")).toBe("none");
             expect(inputEl?.getAttribute("autocorrect")).toBe("off");
@@ -714,38 +246,27 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             expect(inputEl?.spellcheck).toBe(false);
         }
         expect(
-            renderedUrlSetting.textComponent?.inputEl.getAttribute("inputmode")
+            getSettingByName("Server URL").textComponent?.inputEl.getAttribute(
+                "inputmode"
+            )
         ).toBe("url");
-        expect(renderedUrlSetting.textComponent?.inputEl.placeholder).toBe(
-            "https://cloud.example.com"
-        );
-        expect(renderedUserSetting.textComponent?.inputEl.placeholder).toBe(
-            "Enter username"
-        );
-        expect(renderedDirSetting.textComponent?.inputEl.placeholder).toBe(
-            "MyVault"
-        );
+        expect(
+            getSettingByName("Server URL").textComponent?.inputEl.placeholder
+        ).toBe("https://cloud.example.com");
+        expect(
+            getSettingByName("Username").textComponent?.inputEl.placeholder
+        ).toBe("Enter username");
+        expect(
+            getSettingByName("Remote base directory").textComponent?.inputEl
+                .placeholder
+        ).toBe("MyVault");
 
-        const previewEl: HTMLElement | null =
-            renderedPreviewSetting.descEl.querySelector(
-                ".vaultdav-settings-endpoint-preview"
-            );
+        const previewEl: HTMLElement | null = getSettingByName(
+            "Resolved WebDAV URL"
+        ).descEl.querySelector(".vaultdav-settings-endpoint-preview");
         expect(previewEl?.textContent).toBe(
             "Enter server URL and username to preview the WebDAV URL."
         );
-
-        if (typeof cleanupUrl === "function") {
-            cleanupUrl();
-        }
-        if (typeof cleanupUser === "function") {
-            cleanupUser();
-        }
-        if (typeof cleanupDir === "function") {
-            cleanupDir();
-        }
-        if (typeof cleanupPreview === "function") {
-            cleanupPreview();
-        }
 
         const syncItems = groups[1]?.items ?? [];
         expect(syncItems[0]).toEqual({
@@ -774,6 +295,17 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             desc: "Resolution mode for concurrent edits (keep_both or newest_wins).",
             name: "Conflict strategy"
         });
+
+        const testItem: SettingDefinitionRender | undefined = groups[2]
+            ?.items?.[0] as SettingDefinitionRender | undefined;
+        expect(testItem?.name).toBe("Test connection");
+        expect(testItem?.desc).toBe(
+            "Verify Nextcloud WebDAV credentials and remote directory access."
+        );
+        expect(
+            getSettingByName("Test connection").buttonComponent?.buttonEl
+                .textContent
+        ).toBe("Test connection");
 
         const advancedItems = groups[3]?.items ?? [];
         expect(advancedItems[0]).toEqual({
@@ -815,83 +347,21 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             desc: "Days to retain local sync history (1 to 365).",
             name: "Sync log retention"
         });
+
+        expect(cleanups.length).toBe(4);
+        for (const cleanup of cleanups) {
+            cleanup();
+        }
     });
 
-    it("falls back to SecretComponent render callback for App password on Obsidian 1.13.0-1.13.1 and renders Test connection declaratively", async () => {
-        const { app, plugin } = createTestPlugin();
-        plugin.settings.appPasswordSecret = "vaultdav-app-password";
-        const saveSpy = vi.spyOn(plugin, "saveSettings").mockResolvedValue(undefined);
-        const versionSpy = vi
-            .spyOn(obsidian, "requireApiVersion")
-            .mockImplementation((version: string): boolean => version !== "1.13.2");
-
-        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
-        const groups: SettingDefinitionGroup[] =
-            tab.getSettingDefinitions() as SettingDefinitionGroup[];
-
-        const appPasswordItem: SettingDefinitionRender | undefined = groups[0]
-            ?.items?.[2] as SettingDefinitionRender | undefined;
-        expect(appPasswordItem?.name).toBe("App password");
-        expect(typeof appPasswordItem?.render).toBe("function");
-        expect(
-            (appPasswordItem as unknown as SettingDefinitionControl).control
-        ).toBeUndefined();
-
-        const containerEl: HTMLElement = document.createElement("div");
-        const mockGroup: ObsidianSettingGroup = new MockSettingGroup(
-            containerEl
-        ) as unknown as ObsidianSettingGroup;
-        const appPasswordSetting: MockSetting = new MockSetting(containerEl);
-        appPasswordItem?.render(
-            appPasswordSetting as unknown as obsidian.Setting,
-            mockGroup
-        );
-        expect(appPasswordSetting.secretComponent).not.toBeNull();
-        expect(appPasswordSetting.secretComponent?.value).toBe(
-            "vaultdav-app-password"
-        );
-        await appPasswordSetting.secretComponent?.onChangeHandler?.(
-            "  vaultdav-next-secret  "
-        );
-        expect(plugin.settings.appPasswordSecret).toBe("vaultdav-next-secret");
-        expect(saveSpy).toHaveBeenCalledTimes(1);
-
-        versionSpy.mockRestore();
-
-        let resolveTest: (value: boolean) => void = (): void => undefined;
-        vi.spyOn(plugin, "testConnection").mockImplementation(
-            (): Promise<boolean> =>
-                new Promise<boolean>((resolve: (value: boolean) => void) => {
-                    resolveTest = resolve;
-                })
-        );
-        const testItem: SettingDefinitionRender | undefined = groups[2]
-            ?.items?.[0] as SettingDefinitionRender | undefined;
-        expect(testItem?.name).toBe("Test connection");
-        expect(testItem?.desc).toBe(
-            "Verify Nextcloud WebDAV credentials and remote directory access."
-        );
-        const testSetting: MockSetting = new MockSetting(containerEl);
-        testItem?.render(testSetting as unknown as obsidian.Setting, mockGroup);
-        const buttonComp = testSetting.buttonComponent;
-        expect(buttonComp).not.toBeNull();
-        expect(buttonComp?.buttonEl.textContent).toBe("Test connection");
-
-        const clickPromise: Promise<unknown> = Promise.resolve(
-            testSetting.buttonOnClick?.()
-        );
-        expect(buttonComp?.disabled).toBe(true);
-        expect(buttonComp?.buttonEl.textContent).toBe("Testing...");
-        resolveTest(true);
-        await clickPromise;
-        expect(buttonComp?.disabled).toBe(false);
-        expect(buttonComp?.buttonEl.textContent).toBe("Test connection");
-    });
-
-    it("reads and sanitizes all setting values through getControlValue() and setControlValue()", async () => {
+    it("normalizes and persists setting changes across rendered controls and getControlValue/setControlValue", async () => {
         const { app, plugin } = createTestPlugin("custom-config");
-        const saveSpy = vi.spyOn(plugin, "saveSettings").mockResolvedValue(undefined);
+        const saveSpy = vi
+            .spyOn(plugin, "saveSettings")
+            .mockResolvedValue(undefined);
         const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
+
+        renderDeclarativeTab(tab);
 
         expect(tab.getControlValue("url")).toBe("");
         expect(tab.getControlValue("username")).toBe("");
@@ -906,53 +376,59 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         expect(tab.getControlValue("__proto__")).toBeUndefined();
         expect(tab.getControlValue("constructor")).toBeUndefined();
 
-        await tab.setControlValue(
-            "url",
-            "  https://alice:secret@cloud.example.com/remote.php/dav  "
+        await getSettingByName("Server URL").textOnChange?.(
+            "  https://nc.example.com/  "
         );
-        expect(tab.getControlValue("url")).toBe(
-            "https://cloud.example.com/remote.php/dav"
-        );
+        expect(tab.getControlValue("url")).toBe("https://nc.example.com/");
 
-        await tab.setControlValue("username", "  alice  ");
+        await getSettingByName("Username").textOnChange?.("  alice  ");
         expect(tab.getControlValue("username")).toBe("alice");
-        await tab.setControlValue("username", "alice:bad");
-        expect(tab.getControlValue("username")).toBe("");
 
-        await tab.setControlValue("appPasswordSecret", "  vaultdav-secret-1  ");
-        expect(tab.getControlValue("appPasswordSecret")).toBe("vaultdav-secret-1");
-        await tab.setControlValue("appPasswordSecret", "INVALID_SECRET");
+        await tab.setControlValue(
+            "appPasswordSecret",
+            "  vaultdav-app-password  "
+        );
+        expect(tab.getControlValue("appPasswordSecret")).toBe(
+            "vaultdav-app-password"
+        );
+        await tab.setControlValue("appPasswordSecret", null);
         expect(tab.getControlValue("appPasswordSecret")).toBe("");
 
-        await tab.setControlValue("remoteBaseDir", "  /Notes//Sub/  ");
-        expect(tab.getControlValue("remoteBaseDir")).toBe("Notes/Sub");
-        await tab.setControlValue("remoteBaseDir", "custom-config/plugins/vaultdav");
-        expect(tab.getControlValue("remoteBaseDir")).toBe("");
+        await getSettingByName("Remote base directory").textOnChange?.(
+            "  /Notes//Subfolder/  "
+        );
+        expect(tab.getControlValue("remoteBaseDir")).toBe("Notes/Subfolder");
 
+        await tab.setControlValue("syncInterval", "15");
+        expect(tab.getControlValue("syncInterval")).toBe(15);
         await tab.setControlValue("syncInterval", 15.9);
         expect(tab.getControlValue("syncInterval")).toBe(15);
-        await tab.setControlValue("syncInterval", 99999999);
-        expect(tab.getControlValue("syncInterval")).toBe(MAX_SYNC_INTERVAL_MINUTES);
+        await tab.setControlValue("syncInterval", "15abc");
+        expect(tab.getControlValue("syncInterval")).toBe(0);
+        await tab.setControlValue("syncInterval", "-5");
+        expect(tab.getControlValue("syncInterval")).toBe(0);
+        await tab.setControlValue("syncInterval", "   ");
+        expect(tab.getControlValue("syncInterval")).toBe(0);
         await tab.setControlValue("syncInterval", Number.NaN);
         expect(tab.getControlValue("syncInterval")).toBe(0);
 
         await tab.setControlValue("conflictStrategy", "newest_wins");
         expect(tab.getControlValue("conflictStrategy")).toBe("newest_wins");
-        await tab.setControlValue("conflictStrategy", "invalid");
+        await tab.setControlValue("conflictStrategy", "invalid_value");
         expect(tab.getControlValue("conflictStrategy")).toBe("keep_both");
 
-        await tab.setControlValue("chunkingThresholdMB", 150.4);
-        expect(tab.getControlValue("chunkingThresholdMB")).toBe(150);
-        await tab.setControlValue("chunkingThresholdMB", 9999);
-        expect(tab.getControlValue("chunkingThresholdMB")).toBe(
-            MAX_CHUNKING_THRESHOLD_MB
-        );
+        await tab.setControlValue("chunkingThresholdMB", 120.7);
+        expect(tab.getControlValue("chunkingThresholdMB")).toBe(120);
         await tab.setControlValue("chunkingThresholdMB", 0);
         expect(tab.getControlValue("chunkingThresholdMB")).toBe(90);
+        await tab.setControlValue("chunkingThresholdMB", "   ");
+        expect(tab.getControlValue("chunkingThresholdMB")).toBe(90);
 
-        await tab.setControlValue("chunkSizeMB", 20.8);
-        expect(tab.getControlValue("chunkSizeMB")).toBe(20);
-        await tab.setControlValue("chunkSizeMB", -4);
+        await tab.setControlValue("chunkSizeMB", 25.4);
+        expect(tab.getControlValue("chunkSizeMB")).toBe(25);
+        await tab.setControlValue("chunkSizeMB", -2);
+        expect(tab.getControlValue("chunkSizeMB")).toBe(10);
+        await tab.setControlValue("chunkSizeMB", "   ");
         expect(tab.getControlValue("chunkSizeMB")).toBe(10);
 
         await tab.setControlValue("syncLogRetentionDays", 45.7);
@@ -965,9 +441,182 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         expect(tab.getControlValue("syncLogRetentionDays")).toBe(30);
 
         const saveCountBeforeUnknown: number = saveSpy.mock.calls.length;
+        expect(saveCountBeforeUnknown).toBe(22);
         await tab.setControlValue("unknown", "ignored");
         await tab.setControlValue("__proto__", "polluted");
         expect(saveSpy.mock.calls.length).toBe(saveCountBeforeUnknown);
+    });
+
+    it("blocks red-team exploit inputs (32-bit timer overflow, OOM chunk sizes, excluded remoteBaseDir, embedded URL credentials, and control/colon injection)", async () => {
+        const { app, plugin } = createTestPlugin();
+        vi.spyOn(plugin, "saveSettings").mockResolvedValue(undefined);
+        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
+
+        renderDeclarativeTab(tab);
+
+        await tab.setControlValue("syncInterval", "99999999");
+        expect(plugin.settings.syncInterval).toBe(MAX_SYNC_INTERVAL_MINUTES);
+        expect(plugin.settings.syncInterval * 60 * 1000).toBeLessThanOrEqual(
+            2_147_483_647
+        );
+
+        await tab.setControlValue("chunkingThresholdMB", "999999");
+        expect(MAX_CHUNKING_THRESHOLD_MB).toBe(512);
+        expect(plugin.settings.chunkingThresholdMB).toBe(
+            MAX_CHUNKING_THRESHOLD_MB
+        );
+
+        await tab.setControlValue("chunkSizeMB", "999999");
+        expect(plugin.settings.chunkSizeMB).toBe(MAX_CHUNK_SIZE_MB);
+
+        await getSettingByName("Remote base directory").textOnChange?.(
+            ".obsidian"
+        );
+        expect(plugin.settings.remoteBaseDir).toBe("");
+
+        await getSettingByName("Remote base directory").textOnChange?.(
+            ".obsidian/plugins/vaultdav"
+        );
+        expect(plugin.settings.remoteBaseDir).toBe("");
+
+        const { app: customApp, plugin: customPlugin } =
+            createTestPlugin("custom-config");
+        vi.spyOn(customPlugin, "saveSettings").mockResolvedValue(undefined);
+        MockSetting.instances.length = 0;
+        const customTab: VaultDavSettingTab = new VaultDavSettingTab(
+            customApp,
+            customPlugin
+        );
+        renderDeclarativeTab(customTab);
+        await getSettingByName("Remote base directory").textOnChange?.(
+            "custom-config"
+        );
+        expect(customPlugin.settings.remoteBaseDir).toBe("");
+        await getSettingByName("Remote base directory").textOnChange?.(
+            "custom-config/plugins/vaultdav"
+        );
+        expect(customPlugin.settings.remoteBaseDir).toBe("");
+        MockSetting.instances.length = 0;
+        renderDeclarativeTab(tab);
+
+        await getSettingByName("Remote base directory").textOnChange?.(".trash");
+        expect(plugin.settings.remoteBaseDir).toBe("");
+
+        await getSettingByName("Remote base directory").textOnChange?.(
+            ".git/hooks"
+        );
+        expect(plugin.settings.remoteBaseDir).toBe("");
+
+        await getSettingByName("Server URL").textOnChange?.(
+            "  https://alice:super-secret@cloud.example.com/remote.php/dav  "
+        );
+        expect(plugin.settings.url).toBe(
+            "https://cloud.example.com/remote.php/dav"
+        );
+
+        await getSettingByName("Server URL").textOnChange?.(
+            "  https://alice@domain.com:p@ss@cloud.example.com/remote.php/dav  "
+        );
+        expect(plugin.settings.url).toBe(
+            "https://cloud.example.com/remote.php/dav"
+        );
+
+        await getSettingByName("Server URL").textOnChange?.(
+            "https://cloud.example.com?email=user@example.org"
+        );
+        expect(plugin.settings.url).toBe(
+            "https://cloud.example.com?email=user@example.org"
+        );
+
+        await getSettingByName("Server URL").textOnChange?.(
+            "https://cloud.example.com\r\nX-Injected: true"
+        );
+        expect(plugin.settings.url).toBe("");
+
+        await getSettingByName("Username").textOnChange?.("alice:injected");
+        expect(plugin.settings.username).toBe("");
+
+        await getSettingByName("Username").textOnChange?.("alice/../../root");
+        expect(plugin.settings.username).toBe("");
+
+        await getSettingByName("Username").textOnChange?.("alice\x00admin");
+        expect(plugin.settings.username).toBe("");
+
+        await tab.setControlValue("appPasswordSecret", "token\r\ninjected");
+        expect(plugin.settings.appPasswordSecret).toBe("");
+
+        for (const badSecretId of [
+            "",
+            "   ",
+            "UPPERCASE",
+            "has spaces",
+            "bad_underscore",
+            "../traversal",
+            "a".repeat(MAX_SECRET_ID_LENGTH + 1),
+            null,
+            123
+        ]) {
+            expect(sanitizeSecretId(badSecretId)).toBe("");
+        }
+        expect(sanitizeSecretId("  vaultdav-app-password-2  ")).toBe(
+            "vaultdav-app-password-2"
+        );
+        expect(
+            hasEmbeddedUrlCredentials(
+                "https://alice:secret@cloud.example.com/remote.php/dav"
+            )
+        ).toBe(true);
+        expect(
+            hasEmbeddedUrlCredentials(
+                "https://alice:secret@cloud.example.com\r\nX-Injected: true"
+            )
+        ).toBe(true);
+        expect(
+            hasEmbeddedUrlCredentials(
+                "https://cloud.example.com?email=user@example.org"
+            )
+        ).toBe(false);
+    });
+
+    it("disables Test connection button during execution and restores state in finally", async () => {
+        const { app, plugin } = createTestPlugin();
+        let resolveTest: (value: boolean) => void = (): void => undefined;
+        vi.spyOn(plugin, "testConnection").mockImplementation(
+            (): Promise<boolean> =>
+                new Promise<boolean>((resolve: (value: boolean) => void) => {
+                    resolveTest = resolve;
+                })
+        );
+
+        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
+        renderDeclarativeTab(tab);
+
+        const testSetting: MockSetting = getSettingByName("Test connection");
+        const buttonComp = testSetting.buttonComponent;
+        expect(buttonComp).not.toBeNull();
+        expect(buttonComp?.disabled).toBe(false);
+        expect(buttonComp?.buttonEl.textContent).toBe("Test connection");
+
+        const clickPromise: Promise<unknown> = Promise.resolve(
+            testSetting.buttonOnClick?.()
+        );
+        expect(buttonComp?.disabled).toBe(true);
+        expect(buttonComp?.buttonEl.textContent).toBe("Testing...");
+
+        resolveTest(true);
+        await clickPromise;
+
+        expect(buttonComp?.disabled).toBe(false);
+        expect(buttonComp?.buttonEl.textContent).toBe("Test connection");
+
+        vi.spyOn(plugin, "testConnection").mockRejectedValueOnce(
+            new Error("Network error")
+        );
+        await expect(
+            Promise.resolve(testSetting.buttonOnClick?.())
+        ).rejects.toThrow("Network error");
+        expect(buttonComp?.disabled).toBe(false);
+        expect(buttonComp?.buttonEl.textContent).toBe("Test connection");
     });
 
     it("auto-prepends https:// for bare hosts, allows only http:// and https://, updates the resolved WebDAV URL preview live, and normalizes on blur", async () => {
@@ -1119,9 +768,9 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             text: "Remote base directory cannot use excluded or invalid paths."
         });
 
-        // Live UI updates in display()
+        // Live UI updates in declarative render callbacks
         const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
-        tab.display();
+        const { cleanups } = renderDeclarativeTab(tab);
 
         const urlSetting: MockSetting = getSettingByName("Server URL");
         const userSetting: MockSetting = getSettingByName("Username");
@@ -1187,7 +836,15 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         urlSetting.textComponent?.inputEl.dispatchEvent(new Event("blur"));
         expect(urlSetting.textComponent?.inputEl.value).toBe("ftp://example.com");
 
-        // Hiding tab clears transient drafts and DOM reference safely
+        // Cleanup callbacks detach blur listener and hide() clears transient state safely
+        for (const cleanup of cleanups) {
+            cleanup();
+        }
+        if (urlSetting.textComponent !== null) {
+            urlSetting.textComponent.inputEl.value = "example.org";
+            urlSetting.textComponent.inputEl.dispatchEvent(new Event("blur"));
+            expect(urlSetting.textComponent.inputEl.value).toBe("example.org");
+        }
         tab.hide();
         await tab.setControlValue("url", "example.org");
         expect(plugin.settings.url).toBe("https://example.org");

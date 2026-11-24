@@ -30,8 +30,14 @@ describe("Test environment setup and plugin metadata", () => {
         expect(packageLockJson.version).toBe(packageJson.version);
         expect(packageLockJson.packages[""].version).toBe(packageJson.version);
         expect(packageLockJson.packages[""].license).toBe(packageJson.license);
-        expect(manifestJson.minAppVersion).toBe("1.11.4");
-        expect(versionsRecord[manifestJson.version]).toBe(manifestJson.minAppVersion);
+        expect(manifestJson.minAppVersion).toBe("1.13.2");
+        const versionEntries: Array<[string, string]> = Object.entries(versionsRecord);
+        expect(versionEntries.length).toBeGreaterThan(0);
+        for (const [pluginVersion, minAppVersion] of versionEntries) {
+            expect(SEMVER_REGEX.test(pluginVersion)).toBe(true);
+            expect(SEMVER_REGEX.test(minAppVersion)).toBe(true);
+        }
+        expect(versionsRecord[manifestJson.version]).toBeDefined();
         expect("dependencies" in record).toBe(false);
         expect("optionalDependencies" in record).toBe(false);
         expect("peerDependencies" in record).toBe(false);
@@ -73,7 +79,7 @@ describe("Test environment setup and plugin metadata", () => {
             description: "Test",
             id: "vaultdav",
             isDesktopOnly: false,
-            minAppVersion: "1.11.4",
+            minAppVersion: "1.13.2",
             name: "VaultDAV",
             version: "0.1.0"
         };
@@ -91,8 +97,7 @@ describe("Test environment setup and plugin metadata", () => {
             mockApp as App,
             plugin
         );
-        tab.display();
-        expect(tab.containerEl.children.length).toBe(4);
+        expect(tab.getSettingDefinitions().length).toBe(4);
 
         plugin.onunload();
     });

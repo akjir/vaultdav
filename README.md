@@ -57,7 +57,7 @@ Synchronize Obsidian vaults bidirectionally with Nextcloud via WebDAV.
 
 ## Compatibility & Privacy
 
-- **Desktop & Mobile:** Supports Desktop, Android, and iOS (`isDesktopOnly: false`) on Obsidian 1.11.4 or newer with zero runtime dependencies.
+- **Desktop & Mobile:** Supports Desktop, Android, and iOS (`isDesktopOnly: false`) on Obsidian 1.13.2 or newer with zero runtime dependencies.
 - **iOS TLS requirement:** Apple iOS blocks self-signed TLS certificates in Obsidian. Use a valid CA-signed HTTPS certificate (for example, Let's Encrypt) on your Nextcloud server when syncing from iOS.
 - **Network & privacy:** VaultDAV communicates only with the Nextcloud server that you configure (`https://` by default, or `http://` when explicitly specified). It sends no telemetry or requests to third-party servers. Your Nextcloud app password is stored in Obsidian SecretStorage (local to each device), while `<config-dir>/plugins/vaultdav/data.json` stores only the secret reference ID (`appPasswordSecret`) and remains excluded from synchronization. Legacy plaintext `appPassword` entries in `data.json` are migrated automatically into SecretStorage and removed from `data.json` on load.
 

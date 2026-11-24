@@ -57,6 +57,9 @@ const SET_DESC_REGEX: RegExp = /\.setDesc\(\s*["']([^"']+)["']\s*\)/g;
 const SET_HEADING_REGEX: RegExp = /\.setHeading\(\s*["']([^"']+)["']\s*\)/g;
 const SET_NAME_REGEX: RegExp = /\.setName\(\s*["']([^"']+)["']\s*\)/g;
 const SET_PLACEHOLDER_REGEX: RegExp = /\.setPlaceholder\(\s*["']([^"']+)["']\s*\)/g;
+const SETTING_DEF_DESC_REGEX: RegExp = /\bdesc:\s*["']([^"']+)["']/g;
+const SETTING_DEF_HEADING_REGEX: RegExp = /\bheading:\s*["']([^"']+)["']/g;
+const SETTING_DEF_NAME_REGEX: RegExp = /\bname:\s*["']([^"']+)["']/g;
 const TS_IGNORE_REGEX: RegExp = /@ts-ignore\b/;
 const WHILE_TRUE_REGEX: RegExp = /\bwhile\s*\(\s*true\s*\)/;
 const WHITESPACE_SPLIT_REGEX: RegExp = /\s+/;
@@ -199,15 +202,17 @@ describe("Obsidian Plugin Linter static guard (eslint-plugin-obsidianmd)", () =>
                 DIRECT_CALL_SET_HEADING_REGEX.test(file.content),
                 `${file.relativePath} must not chain .setHeading() directly on a function call`
             ).toBe(false);
-            SET_HEADING_REGEX.lastIndex = 0;
-            let match: RegExpExecArray | null = SET_HEADING_REGEX.exec(file.content);
-            while (match !== null) {
-                const heading: string = match[1] ?? "";
-                expect(
-                    PROBLEMATIC_HEADING_REGEX.test(heading),
-                    `${file.relativePath} contains problematic settings heading: "${heading}"`
-                ).toBe(false);
-                match = SET_HEADING_REGEX.exec(file.content);
+            for (const headingRegex of [SET_HEADING_REGEX, SETTING_DEF_HEADING_REGEX]) {
+                headingRegex.lastIndex = 0;
+                let match: RegExpExecArray | null = headingRegex.exec(file.content);
+                while (match !== null) {
+                    const heading: string = match[1] ?? "";
+                    expect(
+                        PROBLEMATIC_HEADING_REGEX.test(heading),
+                        `${file.relativePath} contains problematic settings heading: "${heading}"`
+                    ).toBe(false);
+                    match = headingRegex.exec(file.content);
+                }
             }
         }
     });
@@ -280,7 +285,7 @@ describe("Obsidian Plugin Linter static guard (eslint-plugin-obsidianmd)", () =>
         }
     });
 
-    it("guards SettingGroup, SecretComponent, and SecretStorage usage behind requireApiVersion and stores secrets outside data.json", () => {
+    it("enforces Obsidian 1.13.2 declarative settings without pre-1.13.2 fallbacks and stores secrets outside data.json", () => {
         const settingsFile: SourceFileEntry | undefined = sourceFiles.find(
             (file: SourceFileEntry): boolean => file.relativePath === "src/settings.ts"
         );
@@ -297,22 +302,20 @@ describe("Obsidian Plugin Linter static guard (eslint-plugin-obsidianmd)", () =>
         const mainContent: string = mainFile?.content ?? "";
         const typesContent: string = typesFile?.content ?? "";
 
-        expect(manifestJson.minAppVersion).toBe("1.11.4");
-        expect(settingsContent).toContain('requireApiVersion("1.11.0")');
-        expect(settingsContent).toContain('requireApiVersion("1.11.4")');
-        expect(settingsContent).toContain('requireApiVersion("1.13.2")');
-        expect(settingsContent).toContain("public display(): void");
+        expect(manifestJson.minAppVersion).toBe("1.13.2");
         expect(settingsContent).toContain(
             "public getSettingDefinitions(): SettingDefinitionItem[]"
         );
+        expect(settingsContent).toContain('type: "secret"');
+        expect(settingsContent).not.toContain("public display(");
         expect(settingsContent).not.toContain("super.getSettingDefinitions");
         expect(settingsContent).not.toContain("this.display()");
-        expect(settingsContent).toContain("new SecretComponent(this.app");
+        expect(settingsContent).not.toContain("SecretComponent");
+        expect(settingsContent).not.toContain("SettingGroup");
+        expect(settingsContent).not.toContain("requireApiVersion");
         expect(settingsContent).not.toMatch(/inputEl\.type\s*=\s*["']password["']/);
-        expect(settingsContent).not.toMatch(/=\s*SettingGroup\b/);
-        expect(settingsContent).not.toMatch(/typeof\s+SettingGroup\s*\|/);
-        expect(mainContent).toContain('requireApiVersion("1.11.4")');
         expect(mainContent).toContain("secretStorage");
+        expect(mainContent).not.toContain("requireApiVersion");
 
         const settingsInterfaceMatch: RegExpExecArray | null =
             /export interface VaultDavSettings\s*\{([\s\S]*?)\}/.exec(typesContent);
@@ -390,7 +393,10 @@ describe("Obsidian Plugin Linter static guard (eslint-plugin-obsidianmd)", () =>
             SET_BUTTON_TEXT_REGEX,
             SET_DESC_REGEX,
             SET_HEADING_REGEX,
-            SET_NAME_REGEX
+            SET_NAME_REGEX,
+            SETTING_DEF_DESC_REGEX,
+            SETTING_DEF_HEADING_REGEX,
+            SETTING_DEF_NAME_REGEX
         ];
         const extractedLiterals: string[] = [];
         for (const file of sourceFiles) {
@@ -438,7 +444,7 @@ describe("Obsidian Plugin Linter static guard (eslint-plugin-obsidianmd)", () =>
             "Select or create a secret for your Nextcloud app password."
         );
         expect(extractedLiterals).toContain(
-            "Obsidian 1.11.4 or newer is required for secure password storage."
+            "Obsidian 1.13.2 or newer is required for secure password storage."
         );
         expect(extractedLiterals).toContain(
             "App password secret was not found in secret storage."

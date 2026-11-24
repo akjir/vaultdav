@@ -9,7 +9,7 @@
 - **Version Control:** NEVER commit changes unless the user explicitly instructs you to do so.
 - **Language & Tone:** Write all responses, code, comments, documentation, tests, skills, and commits in English. Follow ASD-STE100 (80%). Be concise and precise. Do not use emojis.
 - **Style:** Indent with 4 spaces. Remove trailing spaces. Sort functions and methods alphabetically. Avoid globals. Initialize all variables explicitly (do not leave them implicitly `undefined`). Prohibit the `any` type. Define static `Set`, `Map`, and `RegExp` instances at module top-level (`UPPER_SNAKE_CASE`), never inside functions called per-file or per-request.
-- **Reqs:** TypeScript 5.x (`strict: true`, `noImplicitAny: true`, `strictNullChecks: true`), ESBuild, Obsidian API (`>=1.11.4`).
+- **Reqs:** TypeScript 5.x (`strict: true`, `noImplicitAny: true`, `strictNullChecks: true`), ESBuild, Obsidian API (`>=1.13.2`).
 - **Testing (TDD):** Write comprehensive tests in `tests/` for every new feature, logic branch, XML parser routine, sync state transition, or bug fix.
 - **Docs & Metadata:** Keep `README.md`, `manifest.json`, and `versions.json` in sync with code changes per **`update-documentation`**.
 - **Changelog:** Follow **`vaultdav-dev-workflow`** rules for `CHANGELOG.md`.
@@ -17,7 +17,7 @@
 
 ## Architecture & Naming
 - `src/main.ts`: Plugin lifecycle (`onload`, `onunload`), commands, ribbon icons (sync and sync log), status bar progress and error-only idle indicator (`ProgressReporter`), `SyncLogView` registration, auto-sync interval registration.
-- `src/settings.ts`: `VaultDavSettingTab` (dual declarative `getSettingDefinitions()` for Obsidian `>=1.13.0` and `display()` fallback for `1.11.4`–`1.12.x`), live resolved WebDAV URL preview, mobile lowercase input attributes, and settings persistence (`url` with auto-`https://` and `http`/`https`-only validation, `username`, `appPasswordSecret` via `SecretComponent` / declarative `secret` control, `remoteBaseDir`, `syncInterval`, `conflictStrategy`, `chunkingThresholdMB`, `chunkSizeMB`, `syncLogRetentionDays`).
+- `src/settings.ts`: `VaultDavSettingTab` (declarative `getSettingDefinitions()` for Obsidian `>=1.13.2`), live resolved WebDAV URL preview, mobile lowercase input attributes, and settings persistence (`url` with auto-`https://` and `http`/`https`-only validation, `username`, `appPasswordSecret` via declarative `secret` control, `remoteBaseDir`, `syncInterval`, `conflictStrategy`, `chunkingThresholdMB`, `chunkSizeMB`, `syncLogRetentionDays`).
 - `src/types.ts`: Strict TypeScript interfaces and type definitions (`VaultDavSettings`, `WebDavClientConfig`, `ProgressReporter`, `RemoteItem`, `SyncStateRecord`, `SyncAction`, `SyncPlan`, `SyncResult`, `SyncLogEvent`, `SyncRunSummary`, `SyncRunRecord`, `SyncHistoryData`).
 - `src/log.ts`: `log.*` logging utilities (includes `log.debugEnabled`), `formatTransferProgress`, and user notifications via Obsidian `Notice`.
 - `src/utilities.ts`: `util.*` helper functions (server URL normalization/validation, path normalization via Obsidian `normalizePath`, conflict copy path generation/parsing, byte-size formatting, Base64 encoding, concurrency queue).
@@ -42,11 +42,11 @@
 ## Obsidian Plugin Linter Rules (eslint-plugin-obsidianmd)
 - **`validate-manifest`:** Keep required `id`, `name`, `version`, `minAppVersion`, `description`, and `author` fields valid (`description` <= 250 chars, starts with an action verb, ends with `.`, no `"Obsidian"`/`"plugin"`/emojis; omit `fundingUrl` when unused).
 - **`hardcoded-config-path`:** Never hardcode `.obsidian` in `src/`. Always derive config paths dynamically from `Vault#configDir`.
-- **`no-unsupported-api`:** Guard APIs newer than `minAppVersion` (such as `SettingGroup` `@since 1.11.0`) behind `requireApiVersion("X.Y.Z")`.
+- **`no-unsupported-api`:** Guard APIs newer than `minAppVersion` (`1.13.2`) behind `requireApiVersion("X.Y.Z")`.
 - **`no-inner-html`:** Never use `innerHTML`, `outerHTML`, or `insertAdjacentHTML`. Always use Obsidian's `containerEl.empty()`, `createEl()`, `createDiv()`, or `Setting`.
 - **`no-console`, `no-control-regex`, `no-constant-condition`, `regex-lookbehind`, `platform`:** Prohibit `console.log`/`console.info` (allow only `warn`, `error`, `debug`), control-character regex literals, `while (true)`, regex lookbehinds, and `navigator.platform`/`navigator.userAgent` in `src/`.
 - **`ui/sentence-case`:** Use strict Sentence case for all UI strings (`Setting.setName`, `Setting.setDesc`, `setButtonText`, `setPlaceholder`, `addOption`, command `name`, ribbon tooltip, `Notice`). Capitalize only the first word and proper nouns/acronyms (`Nextcloud`, `WebDAV`, `HTTP`, `URL`, `MB`). Never use Title Case (write `"App password"`, `"Remote base directory"`, `"Sync interval"`, `"Conflict strategy"`, `"Test connection"`).
-- **`settings-tab/*`:** Implement dual support (`getSettingDefinitions()` for Obsidian `>=1.13.0` and `display()` fallback while `minAppVersion < 1.13.0`) to satisfy `prefer-setting-definitions` and `require-display`. Never create `<h1..h6>` elements manually in `PluginSettingTab`. If headings are needed, use `new Setting(containerEl).setName("...").setHeading()` and never include `"VaultDAV"`, `"general"`, `"options"`, or `"settings"` in the heading text.
+- **`settings-tab/*`:** Use declarative `getSettingDefinitions()` (no deprecated `display()` fallback, since `minAppVersion >= 1.13.2`). Never create `<h1..h6>` elements manually in `PluginSettingTab`, and never include `"VaultDAV"`, `"general"`, `"options"`, or `"settings"` in setting group headings.
 - **`commands/no-plugin-id-in-command-id` & `no-plugin-name-in-command-name` & `no-default-hotkeys`:** Never prefix command `id` with `vaultdav`, never include `VaultDAV` in command `name`, and never define default `hotkeys`.
 - **`detach-leaves` & Lifecycle Hygiene:** Never call `detachLeavesOfType` in `onunload()`. Always wrap intervals in `this.registerInterval(window.setInterval(...))` and events in `this.registerEvent(...)`.
 

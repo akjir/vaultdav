@@ -1,4 +1,3 @@
-import * as obsidian from "obsidian";
 import type { App, Command, PluginManifest } from "obsidian";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { log } from "../src/log";
@@ -60,7 +59,7 @@ function createTestPlugin(
         description: "Test",
         id: "vaultdav",
         isDesktopOnly: false,
-        minAppVersion: "1.11.4",
+        minAppVersion: "1.13.2",
         name: "VaultDAV",
         version: "0.1.0"
     };
@@ -457,15 +456,23 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
             "App password secret was not found in secret storage."
         );
 
-        const versionSpy = vi
-            .spyOn(obsidian, "requireApiVersion")
-            .mockReturnValueOnce(false);
-        const unsupportedResult: boolean = await plugin.testConnection();
+        const { plugin: noSecretPlugin } = createTestPlugin(
+            "MyVault",
+            ".obsidian",
+            false
+        );
+        noSecretPlugin.settings = createConfiguredSettings();
+        const unsupportedResult: boolean = await noSecretPlugin.testConnection();
         expect(unsupportedResult).toBe(false);
         expect(notifySpy).toHaveBeenLastCalledWith(
-            "Obsidian 1.11.4 or newer is required for secure password storage."
+            "Obsidian 1.13.2 or newer is required for secure password storage."
         );
-        versionSpy.mockRestore();
+        const unsupportedSyncResult: SyncResult | null =
+            await noSecretPlugin.triggerSync();
+        expect(unsupportedSyncResult).toBeNull();
+        expect(notifySpy).toHaveBeenLastCalledWith(
+            "Obsidian 1.13.2 or newer is required for secure password storage."
+        );
 
         secretStorage.setSecret(DEFAULT_APP_PASSWORD_SECRET_ID, "app-password-123");
         let capturedBaseUrl: string = "";

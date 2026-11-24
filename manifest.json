@@ -2,7 +2,7 @@
     "id": "vaultdav",
     "name": "VaultDAV",
     "version": "1.2.0",
-    "minAppVersion": "1.11.4",
+    "minAppVersion": "1.13.2",
     "description": "Synchronize your vault bidirectionally with Nextcloud via WebDAV.",
     "author": "Stefan Stark",
     "authorUrl": "https://github.com/akjir",

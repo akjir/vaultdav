@@ -1,6 +1,5 @@
 import {
     Plugin,
-    requireApiVersion,
     type SecretStorage,
     type WorkspaceLeaf
 } from "obsidian";
@@ -178,9 +177,6 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
     }
 
     private getSecretStorage(): SecretStorage | null {
-        if (!requireApiVersion("1.11.4")) {
-            return null;
-        }
         const storage: SecretStorage | undefined = this.app.secretStorage;
         if (
             storage === undefined ||
@@ -316,7 +312,7 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
         const storage: SecretStorage | null = this.getSecretStorage();
         if (storage === null) {
             log.warn(
-                "Obsidian 1.11.4 or newer is required to migrate the stored app password into secret storage."
+                "Obsidian 1.13.2 or newer is required to migrate the stored app password into secret storage."
             );
             return null;
         }
@@ -601,7 +597,7 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
     public async testConnection(): Promise<boolean> {
         if (!this.hasSecretStorage()) {
             log.notify(
-                "Obsidian 1.11.4 or newer is required for secure password storage."
+                "Obsidian 1.13.2 or newer is required for secure password storage."
             );
             return false;
         }
@@ -654,7 +650,7 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
         }
         if (!this.hasSecretStorage()) {
             log.notify(
-                "Obsidian 1.11.4 or newer is required for secure password storage."
+                "Obsidian 1.13.2 or newer is required for secure password storage."
             );
             return null;
         }

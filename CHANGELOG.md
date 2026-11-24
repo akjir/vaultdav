@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 - Show the full resolved Nextcloud WebDAV URL live in plugin settings.
 
 ### Changed
+- Require Obsidian 1.13.2 or newer and use declarative plugin settings exclusively.
 - Synchronize vault content only by excluding the Obsidian configuration directory and hidden files without deleting existing files.
 - Assume `https://` automatically for bare server hostnames and allow only `http://` and `https://` URLs.
 - Disable mobile auto-capitalization on text and search inputs.
