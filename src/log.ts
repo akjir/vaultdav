@@ -212,13 +212,10 @@ function sanitizeLogValue(
                 typeof arg.stack === "string"
                     ? redactSensitiveText(arg.stack)
                     : undefined;
-            const errorWithCause: Error & { cause?: unknown } = arg as Error & {
-                cause?: unknown;
-            };
             const hasCause: boolean =
-                "cause" in errorWithCause && errorWithCause.cause !== undefined;
+                "cause" in arg && arg.cause !== undefined;
             const sanitizedCause: { changed: boolean; value: unknown } = hasCause
-                ? sanitizeLogValue(errorWithCause.cause, seen, depth + 1)
+                ? sanitizeLogValue(arg.cause, seen, depth + 1)
                 : { changed: false, value: undefined };
 
             let ownPropsChanged: boolean = false;

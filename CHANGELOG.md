@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.3.0] - 2026-11-24
 
 ### Added
 - Add a dockable sync log view with run history, upload/download byte totals, file-level sync events, active conflicts, and Markdown export.

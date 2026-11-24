@@ -304,10 +304,7 @@ export class SyncStateStore {
                 parsed.records !== null &&
                 !Array.isArray(parsed.records)
             ) {
-                const parsedObj: Record<string, unknown> = parsed as Record<
-                    string,
-                    unknown
-                >;
+                const parsedObj: Record<string, unknown> = parsed;
                 const rawRecords: Record<string, unknown> =
                     parsedObj.records as Record<string, unknown>;
                 const validatedTarget: string = sanitizeRemoteTarget(
