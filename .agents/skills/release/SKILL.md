@@ -15,7 +15,7 @@ Execute this end-to-end workflow autonomously whenever the user invokes `/releas
    - Remote tags: `git ls-remote --tags origin "refs/tags/X.Y.Z" "refs/tags/vX.Y.Z"` must return empty.
    - GitHub Releases: `gh release view X.Y.Z` and `gh release view vX.Y.Z` must report not found.
    Abort immediately on any conflict.
-4. **Repository, Workflow, & Documentation Check:** Verify that required root files exist (`README.md`, `LICENSE`, `manifest.json`, `versions.json`), `.github/workflows/release.yml` includes the zero-warning `eslint-plugin-obsidianmd` scan, `actions/attest-build-provenance`, and `gh release create` with `main.js` and `manifest.json`, `README.md` and `AGENTS.md` match `src/` (per `update-documentation`), and implemented proposals in `.agents/proposals/` have `- **Status:** Implemented`.
+4. **Repository, Workflow, & Documentation Check:** Verify that required root files exist (`README.md`, `LICENSE`, `manifest.json`, `styles.css`, `versions.json`), `.github/workflows/release.yml` includes the zero-warning `eslint-plugin-obsidianmd` scan, `actions/attest-build-provenance`, and `gh release create` with `main.js`, `manifest.json`, and `styles.css`, `README.md` and `AGENTS.md` match `src/` (per `update-documentation`), and implemented proposals in `.agents/proposals/` have `- **Status:** Implemented`.
 
 ## 2. Pre-Release Verification Gate
 Run the full verification suite before modifying metadata:
@@ -45,10 +45,10 @@ Set all version-bearing files to `"X.Y.Z"` (4-space indentation):
 
 ## 5. Post-Bump Verification & Production Build
 1. Re-run `npm run typecheck`, `npm test`, `npm run build`, and the Section 2 `eslint-plugin-obsidianmd` scanner check to confirm all checks pass with the updated `manifest.json` and `package.json`.
-2. Verify `main.js`, `manifest.json`, `versions.json`, `README.md`, and `LICENSE` exist and are non-empty.
+2. Verify `main.js`, `manifest.json`, `styles.css`, `versions.json`, `README.md`, and `LICENSE` exist and are non-empty.
 
 ## 6. Git Commit, Tag (`X.Y.Z`), & Push
-1. Stage all changes (`git add -A`) and inspect `git status --short` to ensure no ignored or sensitive files (`main.js`, `main.js.map`, `data.json`, `sync-state.json`) are staged.
+1. Stage all changes (`git add -A`) and inspect `git status --short` to ensure no ignored or sensitive files (`main.js`, `main.js.map`, `data.json`, `sync-history.json`, `sync-state.json`) are staged.
 2. Commit: `git commit -m "Release X.Y.Z"`
 3. Create an annotated tag without a `v` prefix: `git tag -a X.Y.Z -m "Release X.Y.Z"`
 4. Push branch and tag to `origin` to trigger `.github/workflows/release.yml`:
@@ -65,11 +65,12 @@ GitHub build provenance attestations (`actions/attest-build-provenance`) require
 3. Verify the published GitHub Release via `gh release view X.Y.Z --json tagName,isDraft,isPrerelease,url,assets`:
    - `tagName` equals `"X.Y.Z"` (no leading `v`).
    - `isDraft` is `false` and `isPrerelease` is `false`.
-   - `assets` includes both `main.js` and `manifest.json` with `size > 0` (`styles.css` is not required).
+   - `assets` includes `main.js`, `manifest.json`, and `styles.css` with `size > 0`.
 4. Download the published assets into a temporary directory `$TMP_VERIFY` and verify provenance attestations and byte-for-byte parity:
-   - `gh release download X.Y.Z -p main.js -p manifest.json -D "$TMP_VERIFY"`
+   - `gh release download X.Y.Z -p main.js -p manifest.json -p styles.css -D "$TMP_VERIFY"`
    - `gh attestation verify "$TMP_VERIFY/main.js" --repo "$REPO" --signer-workflow "$REPO/.github/workflows/release.yml"`
    - `gh attestation verify "$TMP_VERIFY/manifest.json" --repo "$REPO" --signer-workflow "$REPO/.github/workflows/release.yml"`
-   - `cmp -s main.js "$TMP_VERIFY/main.js"` and `cmp -s manifest.json "$TMP_VERIFY/manifest.json"`
+   - `gh attestation verify "$TMP_VERIFY/styles.css" --repo "$REPO" --signer-workflow "$REPO/.github/workflows/release.yml"`
+   - `cmp -s main.js "$TMP_VERIFY/main.js"`, `cmp -s manifest.json "$TMP_VERIFY/manifest.json"`, and `cmp -s styles.css "$TMP_VERIFY/styles.css"`
    - Remove `$TMP_VERIFY` on exit.
-5. Report the final release summary: commit SHA, tag `X.Y.Z`, workflow run URL, GitHub Release URL, verified assets (`main.js`, `manifest.json`), attestation verification status, and byte-for-byte parity check.
+5. Report the final release summary: commit SHA, tag `X.Y.Z`, workflow run URL, GitHub Release URL, verified assets (`main.js`, `manifest.json`, `styles.css`), attestation verification status, and byte-for-byte parity check.

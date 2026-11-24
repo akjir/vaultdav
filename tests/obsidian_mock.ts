@@ -1,11 +1,150 @@
 import type { RequestUrlParam, RequestUrlResponse, RequestUrlResponsePromise } from "obsidian";
 
+interface DomElementOptions {
+    cls?: string | string[];
+    text?: string;
+}
+
+function attachDomHelpers<T extends HTMLElement>(el: T): T {
+    const target: HTMLElement & {
+        addClass?: (...classes: string[]) => void;
+        createDiv?: (opts?: DomElementOptions | string) => HTMLDivElement;
+        createEl?: <K extends keyof HTMLElementTagNameMap>(
+            tag: K,
+            opts?: DomElementOptions | string
+        ) => HTMLElementTagNameMap[K];
+        createSpan?: (opts?: DomElementOptions | string) => HTMLSpanElement;
+        empty?: () => void;
+        removeClass?: (...classes: string[]) => void;
+    } = el;
+
+    if (typeof target.empty !== "function") {
+        target.empty = (): void => {
+            target.replaceChildren();
+        };
+    }
+    if (typeof target.addClass !== "function") {
+        target.addClass = (...classes: string[]): void => {
+            for (const cls of classes) {
+                for (const token of cls.split(/\s+/)) {
+                    if (token !== "") {
+                        target.classList.add(token);
+                    }
+                }
+            }
+        };
+    }
+    if (typeof target.removeClass !== "function") {
+        target.removeClass = (...classes: string[]): void => {
+            for (const cls of classes) {
+                for (const token of cls.split(/\s+/)) {
+                    if (token !== "") {
+                        target.classList.remove(token);
+                    }
+                }
+            }
+        };
+    }
+    if (typeof target.createEl !== "function") {
+        target.createEl = <K extends keyof HTMLElementTagNameMap>(
+            tag: K,
+            opts?: DomElementOptions | string
+        ): HTMLElementTagNameMap[K] => {
+            const child: HTMLElementTagNameMap[K] = attachDomHelpers(
+                document.createElement(tag)
+            );
+            if (typeof opts === "string") {
+                child.classList.add(...opts.split(/\s+/).filter(Boolean));
+            } else if (opts !== undefined) {
+                if (typeof opts.cls === "string") {
+                    child.classList.add(...opts.cls.split(/\s+/).filter(Boolean));
+                } else if (Array.isArray(opts.cls)) {
+                    for (const token of opts.cls) {
+                        if (token !== "") {
+                            child.classList.add(token);
+                        }
+                    }
+                }
+                if (opts.text !== undefined) {
+                    child.textContent = opts.text;
+                }
+            }
+            target.appendChild(child);
+            return child;
+        };
+    }
+    if (typeof target.createDiv !== "function") {
+        target.createDiv = (opts?: DomElementOptions | string): HTMLDivElement =>
+            target.createEl!("div", opts);
+    }
+    if (typeof target.createSpan !== "function") {
+        target.createSpan = (
+            opts?: DomElementOptions | string
+        ): HTMLSpanElement => target.createEl!("span", opts);
+    }
+    return el;
+}
+
 export class BaseComponent {
     public disabled: boolean = false;
 
     public setDisabled(disabled: boolean): this {
         this.disabled = disabled;
         return this;
+    }
+}
+
+export class WorkspaceLeaf {
+    public app: unknown;
+    public view: unknown = null;
+    public viewState: unknown = null;
+
+    public constructor(app?: unknown) {
+        this.app = app;
+    }
+
+    public async setViewState(state: unknown): Promise<void> {
+        this.viewState = state;
+        await Promise.resolve();
+    }
+}
+
+export abstract class ItemView {
+    public app: unknown;
+    public containerEl: HTMLElement;
+    public contentEl: HTMLElement;
+    public leaf: WorkspaceLeaf;
+
+    public constructor(leaf: WorkspaceLeaf) {
+        this.leaf = leaf;
+        this.app = leaf.app;
+        this.containerEl = attachDomHelpers(document.createElement("div"));
+        this.contentEl = attachDomHelpers(document.createElement("div"));
+        this.containerEl.appendChild(this.contentEl);
+    }
+
+    public addAction(
+        _icon: string,
+        _title: string,
+        _callback: (evt: MouseEvent) => unknown
+    ): HTMLElement {
+        return attachDomHelpers(document.createElement("button"));
+    }
+
+    public abstract getDisplayText(): string;
+
+    public getIcon(): string {
+        return "document";
+    }
+
+    public abstract getViewType(): string;
+
+    public async onClose(): Promise<void> {
+        await Promise.resolve();
+    }
+
+    public async onOpen(): Promise<void> {
+        await Promise.resolve();
     }
 }
 
@@ -56,8 +195,23 @@ export class Plugin {
         return {};
     }
 
+    public registerDomEvent(
+        el: HTMLElement,
+        type: string,
+        callback: (evt: Event) => unknown
+    ): void {
+        el.addEventListener(type, callback);
+    }
+
     public registerInterval(id: number): number {
         return id;
+    }
+
+    public registerView(
+        _type: string,
+        _viewCreator: (leaf: WorkspaceLeaf) => unknown
+    ): void {
+        // Mock implementation.
     }
 
     public async saveData(_data: unknown): Promise<void> {

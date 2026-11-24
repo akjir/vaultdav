@@ -752,4 +752,78 @@ describe("utilities and logging", () => {
         expect(activeAtReject).toBe(0);
         expect(started).toEqual([0, 1, 2]);
     });
+
+    it("resolves and excludes sync-history.json, parses conflict copy paths, and formats byte sizes", () => {
+        expect(util.getSyncHistoryFilePath(".obsidian")).toBe(
+            ".obsidian/plugins/vaultdav/sync-history.json"
+        );
+        expect(util.getSyncHistoryFilePath(".custom-cfg")).toBe(
+            ".custom-cfg/plugins/vaultdav/sync-history.json"
+        );
+        expect(() => util.getSyncHistoryFilePath("..")).toThrow(
+            "Invalid Obsidian configDir"
+        );
+
+        expect(
+            util.isExcludedPath(
+                ".obsidian/plugins/vaultdav/sync-history.json",
+                ".obsidian"
+            )
+        ).toBe(true);
+        expect(
+            util.isExcludedPath(
+                "custom-cfg/plugins/vaultdav/sync-history.json",
+                "custom-cfg"
+            )
+        ).toBe(true);
+        expect(
+            util.isExcludedPath(
+                ".custom/plugins/other/sync-history.json",
+                ".custom"
+            )
+        ).toBe(true);
+
+        expect(
+            util.parseConflictCopyPath("Notes/Daily.conflict-20261124-173500.md")
+        ).toEqual({
+            originalPath: "Notes/Daily.md",
+            timestampUtc: "2026-11-24 17:35:00 UTC"
+        });
+        expect(
+            util.parseConflictCopyPath(
+                "Notes/Daily.conflict-20261124-173500-2.md"
+            )
+        ).toEqual({
+            originalPath: "Notes/Daily.md",
+            timestampUtc: "2026-11-24 17:35:00 UTC"
+        });
+        expect(
+            util.parseConflictCopyPath("archive.tar.conflict-20261124-010203.gz")
+        ).toEqual({
+            originalPath: "archive.tar.gz",
+            timestampUtc: "2026-11-24 01:02:03 UTC"
+        });
+        expect(
+            util.parseConflictCopyPath("README.conflict-20261124-000000")
+        ).toEqual({
+            originalPath: "README",
+            timestampUtc: "2026-11-24 00:00:00 UTC"
+        });
+        expect(
+            util.parseConflictCopyPath(".env.conflict-20261124-000000")
+        ).toEqual({
+            originalPath: ".env",
+            timestampUtc: "2026-11-24 00:00:00 UTC"
+        });
+        expect(util.parseConflictCopyPath("Notes/Daily.md")).toBeNull();
+        expect(util.parseConflictCopyPath("../bad.conflict-20261124-000000.md")).toBeNull();
+
+        expect(util.formatByteSize(0)).toBe("0 B");
+        expect(util.formatByteSize(-10)).toBe("0 B");
+        expect(util.formatByteSize(Number.NaN)).toBe("0 B");
+        expect(util.formatByteSize(512)).toBe("512 B");
+        expect(util.formatByteSize(1536)).toBe("1.5 KB");
+        expect(util.formatByteSize(2 * 1024 * 1024)).toBe("2.0 MB");
+        expect(util.formatByteSize(1.5 * 1024 * 1024 * 1024)).toBe("1.50 GB");
+    });
 });

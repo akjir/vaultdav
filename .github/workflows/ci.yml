@@ -45,6 +45,7 @@ jobs:
         run: |
           test -s main.js
           test -s manifest.json
+          test -s styles.css
           test -s versions.json
           test -s README.md
           test -s LICENSE

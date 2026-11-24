@@ -16,15 +16,17 @@
 - **Efficiency:** Optimize for token efficiency. Avoid redundant information across code, docs, rules, and skills.
 
 ## Architecture & Naming
-- `src/main.ts`: Plugin lifecycle (`onload`, `onunload`), commands, ribbon icon, status bar progress (`ProgressReporter`), auto-sync interval registration.
-- `src/settings.ts`: `VaultDavSettingTab` (dual declarative `getSettingDefinitions()` for Obsidian `>=1.13.0` and `display()` fallback for `1.11.4`–`1.12.x`) and settings persistence (`url`, `username`, `appPasswordSecret` via `SecretComponent` / declarative `secret` control, `remoteBaseDir`, `syncInterval`, `conflictStrategy`, `chunkingThresholdMB`, `chunkSizeMB`).
-- `src/types.ts`: Strict TypeScript interfaces and type definitions (`VaultDavSettings`, `WebDavClientConfig`, `ProgressReporter`, `RemoteItem`, `SyncStateRecord`, `SyncAction`, `SyncPlan`).
+- `src/main.ts`: Plugin lifecycle (`onload`, `onunload`), commands, ribbon icons (sync and sync log), status bar progress and error-only idle indicator (`ProgressReporter`), `SyncLogView` registration, auto-sync interval registration.
+- `src/settings.ts`: `VaultDavSettingTab` (dual declarative `getSettingDefinitions()` for Obsidian `>=1.13.0` and `display()` fallback for `1.11.4`–`1.12.x`) and settings persistence (`url`, `username`, `appPasswordSecret` via `SecretComponent` / declarative `secret` control, `remoteBaseDir`, `syncInterval`, `conflictStrategy`, `chunkingThresholdMB`, `chunkSizeMB`, `syncLogRetentionDays`).
+- `src/types.ts`: Strict TypeScript interfaces and type definitions (`VaultDavSettings`, `WebDavClientConfig`, `ProgressReporter`, `RemoteItem`, `SyncStateRecord`, `SyncAction`, `SyncPlan`, `SyncResult`, `SyncLogEvent`, `SyncRunSummary`, `SyncRunRecord`, `SyncHistoryData`).
 - `src/log.ts`: `log.*` logging utilities (includes `log.debugEnabled`), `formatTransferProgress`, and user notifications via Obsidian `Notice`.
-- `src/utilities.ts`: `util.*` helper functions (path normalization via Obsidian `normalizePath`, Base64 encoding, concurrency queue).
+- `src/utilities.ts`: `util.*` helper functions (path normalization via Obsidian `normalizePath`, conflict copy path generation/parsing, byte-size formatting, Base64 encoding, concurrency queue).
 - `src/webdav/client.ts`: WebDAV protocol client (`PROPFIND`, `GET`, `PUT`, `MKCOL`, `MOVE`, `DELETE`, Nextcloud OC-Chunked uploads, parallel `Range` downloads).
 - `src/webdav/xml_parser.ts`: Native `DOMParser` routines for WebDAV `207 Multi-Status` XML responses (`d:href`, `d:getlastmodified`, `d:getcontentlength`, `d:getetag`, `d:resourcetype`).
 - `src/sync/state.ts`: Local metadata index persistence (`localMtime`, `remoteMtime`, `etag`, `size`, `lastSyncTime`) to track deletions (tombstones) and modifications.
-- `src/sync/engine.ts`: Bidirectional delta calculation, conflict resolution (`keep_both` or `newest_wins`), threshold-based chunked transfer routing, and rate-limited execution queue.
+- `src/sync/history.ts`: Device-local sync history store (`<config-dir>/plugins/vaultdav/sync-history.json`) with Hybrid Tiered Retention (consecutive no-op folding, 500-event priority cap per run, configurable TTL, 100-run critical-preserving cap, 1 MB compaction ceiling).
+- `src/sync/engine.ts`: Bidirectional delta calculation, conflict resolution (`keep_both` or `newest_wins`), threshold-based chunked transfer routing, structured sync event capture, and rate-limited execution queue.
+- `src/ui/sync_log_view.ts` & `styles.css`: Dockable Obsidian `ItemView` displaying latest sync overview, live active `.conflict-*` files, chronological run history, category/path filters, copyable Markdown summary, and two-step clear history.
 
 ## Technical Constraints
 - **Network & CORS:** Execute all HTTP/WebDAV requests exclusively via Obsidian `requestUrl`. Do not use `fetch`, `XMLHttpRequest`, or external HTTP libraries.
@@ -32,7 +34,7 @@
 - **File System:** Execute all local file operations via `app.vault.adapter` (`DataAdapter`) and `app.vault`.
 - **Authentication:** Use HTTP Basic Auth (`Authorization: Basic <base64>`) with Nextcloud username and an App Password retrieved on demand from Obsidian `SecretStorage` (`app.secretStorage`, never persisted in plaintext in `data.json`) against `https://<domain>/remote.php/dav/files/<user>/<remote-base-dir>/`.
 - **Concurrency & Locks:** Limit parallel WebDAV transfers (max 3-5 concurrent requests) to prevent Nextcloud rate limits and `423 Locked` (`Sabre\DAV\Exception\Locked`) errors.
-- **Exclusions:** Exclude the local sync state file, plugin data file, `<config-dir>/workspace*.json`, and `.trash/` from synchronization (using `Vault#configDir`, never hardcoding `.obsidian`) to prevent infinite sync loops.
+- **Exclusions:** Exclude the local sync state file, local sync history file, plugin data file, `<config-dir>/workspace*.json`, and `.trash/` from synchronization (using `Vault#configDir`, never hardcoding `.obsidian`) to prevent infinite sync loops.
 - **Zero Hot-Path Allocations:** Define static `Set`, `Map`, and `RegExp` instances at module top-level (`UPPER_SNAKE_CASE`), never inside functions called per-file or per-request.
 - **Strict Path Boundary & Traversal Safety:** Always verify `/` or end-of-string boundaries when stripping URL/path prefixes. Reject any path containing `.` or `..` segments.
 - **Defensive Numeric Guards:** Validate numeric inputs (`timestamp`, `mtime`, `size`, `concurrency`) with `Number.isFinite()` before arithmetic or `Date` construction.

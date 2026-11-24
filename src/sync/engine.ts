@@ -1,17 +1,21 @@
 import type { DataWriteOptions, ListedFiles, Stat, Vault } from "obsidian";
-import { formatTransferProgress, log } from "../log";
+import { formatTransferProgress, log, redactSensitiveText } from "../log";
 import type {
+    ConflictOutcome,
     LocalItem,
     ProgressReporter,
     RemoteItem,
     SyncAction,
+    SyncLogEvent,
     SyncPlan,
     SyncResult,
+    SyncRunSummary,
     SyncStateRecord,
     VaultDavSettings
 } from "../types";
 import { util } from "../utilities";
 import type { WebDavClient } from "../webdav/client";
+import { createEmptyRunSummary } from "./history";
 import type { SyncStateStore } from "./state";
 
 export const MAX_FILE_SIZE_BYTES: number = util.MAX_FILE_SIZE_BYTES;
@@ -54,6 +58,7 @@ export function buildSyncPlan(
     const stateMap: Map<string, SyncStateRecord> = new Map<string, SyncStateRecord>();
     const directoryPaths: Set<string> = new Set<string>();
     const allPathsSet: Set<string> = new Set<string>();
+    const warnings: SyncLogEvent[] = [];
 
     for (const item of localItems) {
         const norm: string = util.normalizeVaultPath(item.path);
@@ -64,9 +69,14 @@ export function buildSyncPlan(
         const existingLocalPath: string | undefined = localLowerMap.get(lowerNorm);
         if (existingLocalPath !== undefined) {
             if (existingLocalPath !== norm) {
-                log.warn(
-                    `Skipping case-colliding local path: ${norm} (collides with ${existingLocalPath})`
-                );
+                const msg: string = `Skipping case-colliding local path: ${norm} (collides with ${existingLocalPath})`;
+                log.warn(msg);
+                warnings.push({
+                    isDirectory: item.isDirectory,
+                    kind: "warning",
+                    message: msg,
+                    path: norm
+                });
             }
             continue;
         }
@@ -94,9 +104,14 @@ export function buildSyncPlan(
         const existingRemotePath: string | undefined = remoteLowerMap.get(lowerNorm);
         if (existingRemotePath !== undefined) {
             if (existingRemotePath !== norm) {
-                log.warn(
-                    `Skipping case-colliding remote path: ${norm} (collides with ${existingRemotePath})`
-                );
+                const msg: string = `Skipping case-colliding remote path: ${norm} (collides with ${existingRemotePath})`;
+                log.warn(msg);
+                warnings.push({
+                    isDirectory: item.isDirectory,
+                    kind: "warning",
+                    message: msg,
+                    path: norm
+                });
             }
             continue;
         }
@@ -104,9 +119,14 @@ export function buildSyncPlan(
         const existingCanonical: string | undefined =
             canonicalPathByLower.get(lowerNorm);
         if (existingCanonical !== undefined && existingCanonical !== norm) {
-            log.warn(
-                `Case mismatch detected between local "${existingCanonical}" and remote "${norm}"`
-            );
+            const msg: string = `Case mismatch detected between local "${existingCanonical}" and remote "${norm}"`;
+            log.warn(msg);
+            warnings.push({
+                isDirectory: item.isDirectory,
+                kind: "warning",
+                message: msg,
+                path: existingCanonical
+            });
         }
         const canonical: string = resolveCanonicalPath(norm, canonicalPathByLower);
         remoteMap.set(canonical, { ...item, path: norm });
@@ -180,7 +200,14 @@ export function buildSyncPlan(
             (local !== undefined && !local.isDirectory && directoryPaths.has(path)) ||
             (remote !== undefined && !remote.isDirectory && directoryPaths.has(path))
         ) {
-            log.warn(`Skipping path with file/directory type conflict: ${path}`);
+            const msg: string = `Skipping path with file/directory type conflict: ${path}`;
+            log.warn(msg);
+            warnings.push({
+                isDirectory: Boolean(local?.isDirectory || remote?.isDirectory),
+                kind: "warning",
+                message: msg,
+                path
+            });
             markParentKept(path);
             actions.push({
                 depth,
@@ -371,7 +398,8 @@ export function buildSyncPlan(
 
     return {
         actions,
-        timestamp: safeTimestamp
+        timestamp: safeTimestamp,
+        warnings
     };
 }
 
@@ -790,7 +818,7 @@ export class SyncEngine {
         remoteDirCasingByLower?: ReadonlyMap<string, string>,
         localDirFsPathByLower?: ReadonlyMap<string, string>,
         existingLowerPaths?: Set<string>
-    ): Promise<void> {
+    ): Promise<ConflictOutcome | null> {
         const normalizedPath: string = util.normalizeVaultPath(action.path);
         if (normalizedPath === "" || util.isExcludedPath(normalizedPath, this.configDir)) {
             throw new Error(
@@ -800,7 +828,7 @@ export class SyncEngine {
         const local: LocalItem | undefined = localMap.get(normalizedPath);
         const remote: RemoteItem | undefined = remoteMap.get(normalizedPath);
         if (local === undefined || remote === undefined) {
-            return;
+            return null;
         }
         if (local.isDirectory || remote.isDirectory) {
             throw new Error(
@@ -813,7 +841,7 @@ export class SyncEngine {
                 util.toSecondPrecision(local.mtime) >=
                 util.toSecondPrecision(remote.mtime)
             ) {
-                await this.executeUpload(
+                const uploadedSize: number = await this.executeUpload(
                     normalizedPath,
                     localMap,
                     now,
@@ -822,8 +850,12 @@ export class SyncEngine {
                     remoteMap,
                     remoteDirCasingByLower
                 );
+                return {
+                    resolution: "newest_wins_local",
+                    size: uploadedSize
+                };
             } else {
-                await this.executeDownload(
+                const downloadedSize: number = await this.executeDownload(
                     normalizedPath,
                     remoteMap,
                     now,
@@ -832,8 +864,11 @@ export class SyncEngine {
                     localMap,
                     localDirFsPathByLower
                 );
+                return {
+                    resolution: "newest_wins_remote",
+                    size: downloadedSize
+                };
             }
-            return;
         }
 
         if (
@@ -892,7 +927,10 @@ export class SyncEngine {
                 remoteMtime: util.toSecondPrecision(remote.mtime),
                 size: remoteBuffer.byteLength
             });
-            return;
+            return {
+                resolution: "identical",
+                size: remoteBuffer.byteLength
+            };
         }
 
         existingPaths.add(normalizedPath);
@@ -1000,6 +1038,11 @@ export class SyncEngine {
             remoteMtime: safeRemoteMtime,
             size: remoteBuffer.byteLength
         });
+        return {
+            conflictCopyPath: conflictPath,
+            resolution: "keep_both",
+            size: localBuffer.byteLength
+        };
     }
 
     public async executeDownload(
@@ -1010,7 +1053,7 @@ export class SyncEngine {
         totalFiles: number = 1,
         localMap?: ReadonlyMap<string, LocalItem>,
         localDirFsPathByLower?: ReadonlyMap<string, string>
-    ): Promise<void> {
+    ): Promise<number> {
         const normalizedPath: string = util.normalizeVaultPath(path);
         if (normalizedPath === "" || util.isExcludedPath(normalizedPath, this.configDir)) {
             throw new Error(`Download refused on invalid or excluded path: ${path}`);
@@ -1069,12 +1112,14 @@ export class SyncEngine {
             remoteMtime: targetMtime,
             size: content.byteLength
         });
+        return content.byteLength;
     }
 
     public async executePlan(
         plan: SyncPlan,
         localItems: ReadonlyArray<LocalItem>,
-        remoteItems: ReadonlyArray<RemoteItem>
+        remoteItems: ReadonlyArray<RemoteItem>,
+        initialWarnings: ReadonlyArray<SyncLogEvent> = []
     ): Promise<SyncResult> {
         const now: number =
             Number.isFinite(plan.timestamp) && plan.timestamp > 0
@@ -1185,12 +1230,26 @@ export class SyncEngine {
             }
         }
 
+        const summary: SyncRunSummary = createEmptyRunSummary();
+        const events: SyncLogEvent[] = [];
+        for (const warning of initialWarnings) {
+            events.push({ ...warning });
+            summary.warnings += 1;
+        }
+        if (Array.isArray(plan.warnings)) {
+            for (const warning of plan.warnings) {
+                events.push({ ...warning });
+                summary.warnings += 1;
+            }
+        }
         const result: SyncResult = {
             conflictsResolved: 0,
             deletedLocal: 0,
             deletedRemote: 0,
             downloaded: 0,
             errors: [],
+            events,
+            summary,
             timestamp: now,
             uploaded: 0
         };
@@ -1314,6 +1373,12 @@ export class SyncEngine {
                                     localDirWritePath
                                 );
                             }
+                            summary.dirsCreatedLocal += 1;
+                            events.push({
+                                isDirectory: true,
+                                kind: "create_local_dir",
+                                path: normalizedDir
+                            });
                         } else {
                             const remoteDirPath: string = resolveRemotePathCasing(
                                 normalizedDir,
@@ -1321,6 +1386,12 @@ export class SyncEngine {
                                 remoteDirCasingByLower
                             );
                             await this.client.createDirectory(remoteDirPath);
+                            summary.dirsCreatedRemote += 1;
+                            events.push({
+                                isDirectory: true,
+                                kind: "create_remote_dir",
+                                path: normalizedDir
+                            });
                         }
                         this.stateStore.upsertRecord({
                             etag: "",
@@ -1336,6 +1407,13 @@ export class SyncEngine {
                             err instanceof Error ? err.message : String(err);
                         log.error(`Directory creation failed for ${action.path}: ${msg}`);
                         result.errors.push(`${action.path}: ${msg}`);
+                        summary.errors += 1;
+                        events.push({
+                            isDirectory: true,
+                            kind: "error",
+                            message: redactSensitiveText(msg),
+                            path: util.normalizeVaultPath(action.path) || action.path
+                        });
                     }
                 }
             );
@@ -1367,6 +1445,12 @@ export class SyncEngine {
                             localMap.get(normalizedPath)?.fsPath
                         );
                         result.deletedLocal += 1;
+                        summary.deletedLocal += 1;
+                        events.push({
+                            isDirectory: false,
+                            kind: "delete_local",
+                            path: normalizedPath
+                        });
                     } else {
                         const remoteDeletePath: string = resolveRemotePathCasing(
                             normalizedPath,
@@ -1375,6 +1459,12 @@ export class SyncEngine {
                         );
                         await this.client.deleteItem(remoteDeletePath, false);
                         result.deletedRemote += 1;
+                        summary.deletedRemote += 1;
+                        events.push({
+                            isDirectory: false,
+                            kind: "delete_remote",
+                            path: normalizedPath
+                        });
                     }
                     this.stateStore.removeRecord(normalizedPath);
                 } catch (err: unknown) {
@@ -1385,6 +1475,13 @@ export class SyncEngine {
                         err instanceof Error ? err.message : String(err);
                     log.error(`File deletion failed for ${action.path}: ${msg}`);
                     result.errors.push(`${action.path}: ${msg}`);
+                    summary.errors += 1;
+                    events.push({
+                        isDirectory: false,
+                        kind: "error",
+                        message: redactSensitiveText(msg),
+                        path: normalizedPath || action.path
+                    });
                 }
             }
         );
@@ -1448,6 +1545,12 @@ export class SyncEngine {
                                 true,
                                 localMap.get(normalizedDir)?.fsPath
                             );
+                            summary.deletedLocalDirs += 1;
+                            events.push({
+                                isDirectory: true,
+                                kind: "delete_local",
+                                path: normalizedDir
+                            });
                         } else {
                             const remoteDeleteDir: string = resolveRemotePathCasing(
                                 normalizedDir,
@@ -1455,6 +1558,12 @@ export class SyncEngine {
                                 remoteDirCasingByLower
                             );
                             await this.client.deleteItem(remoteDeleteDir, true);
+                            summary.deletedRemoteDirs += 1;
+                            events.push({
+                                isDirectory: true,
+                                kind: "delete_remote",
+                                path: normalizedDir
+                            });
                         }
                         this.stateStore.removeRecord(normalizedDir);
                     } catch (err: unknown) {
@@ -1465,6 +1574,13 @@ export class SyncEngine {
                             err instanceof Error ? err.message : String(err);
                         log.error(`Directory deletion failed for ${action.path}: ${msg}`);
                         result.errors.push(`${action.path}: ${msg}`);
+                        summary.errors += 1;
+                        events.push({
+                            isDirectory: true,
+                            kind: "error",
+                            message: redactSensitiveText(msg),
+                            path: normalizedDir || action.path
+                        });
                     }
                 }
             );
@@ -1483,8 +1599,10 @@ export class SyncEngine {
             (action: SyncAction, index: number) => async (): Promise<void> => {
                 const fileIndex: number = index + 1;
                 try {
+                    const normalizedTransferPath: string =
+                        util.normalizeVaultPath(action.path) || action.path;
                     if (action.type === "upload") {
-                        await this.executeUpload(
+                        const uploadedSize: number = await this.executeUpload(
                             action.path,
                             localMap,
                             now,
@@ -1494,8 +1612,15 @@ export class SyncEngine {
                             remoteDirCasingByLower
                         );
                         result.uploaded += 1;
+                        summary.uploaded += 1;
+                        events.push({
+                            isDirectory: false,
+                            kind: "upload",
+                            path: normalizedTransferPath,
+                            size: uploadedSize
+                        });
                     } else if (action.type === "download") {
-                        await this.executeDownload(
+                        const downloadedSize: number = await this.executeDownload(
                             action.path,
                             remoteMap,
                             now,
@@ -1505,26 +1630,63 @@ export class SyncEngine {
                             localDirFsPathByLower
                         );
                         result.downloaded += 1;
+                        summary.downloaded += 1;
+                        events.push({
+                            isDirectory: false,
+                            kind: "download",
+                            path: normalizedTransferPath,
+                            size: downloadedSize
+                        });
                     } else if (action.type === "conflict") {
-                        await this.executeConflict(
-                            action,
-                            localMap,
-                            remoteMap,
-                            existingPaths,
-                            now,
-                            fileIndex,
-                            totalFiles,
-                            remoteDirCasingByLower,
-                            localDirFsPathByLower,
-                            existingPathsLower
-                        );
+                        const outcome: ConflictOutcome | null =
+                            await this.executeConflict(
+                                action,
+                                localMap,
+                                remoteMap,
+                                existingPaths,
+                                now,
+                                fileIndex,
+                                totalFiles,
+                                remoteDirCasingByLower,
+                                localDirFsPathByLower,
+                                existingPathsLower
+                            );
                         result.conflictsResolved += 1;
+                        summary.conflictsResolved += 1;
+                        if (outcome !== null) {
+                            if (outcome.resolution === "keep_both") {
+                                summary.conflictsKeepBoth += 1;
+                            } else if (outcome.resolution === "identical") {
+                                summary.conflictsIdentical += 1;
+                            } else {
+                                summary.conflictsNewestWins += 1;
+                            }
+                            const conflictEvent: SyncLogEvent = {
+                                isDirectory: false,
+                                kind: "conflict",
+                                path: normalizedTransferPath,
+                                resolution: outcome.resolution,
+                                size: outcome.size
+                            };
+                            if (outcome.conflictCopyPath !== undefined) {
+                                conflictEvent.conflictCopyPath =
+                                    outcome.conflictCopyPath;
+                            }
+                            events.push(conflictEvent);
+                        }
                     }
                 } catch (err: unknown) {
                     const msg: string =
                         err instanceof Error ? err.message : String(err);
                     log.error(`Transfer failed for ${action.path}: ${msg}`);
                     result.errors.push(`${action.path}: ${msg}`);
+                    summary.errors += 1;
+                    events.push({
+                        isDirectory: false,
+                        kind: "error",
+                        message: redactSensitiveText(msg),
+                        path: util.normalizeVaultPath(action.path) || action.path
+                    });
                 }
             }
         );
@@ -1544,7 +1706,7 @@ export class SyncEngine {
         totalFiles: number = 1,
         remoteMap?: ReadonlyMap<string, RemoteItem>,
         remoteDirCasingByLower?: ReadonlyMap<string, string>
-    ): Promise<void> {
+    ): Promise<number> {
         const normalizedPath: string = util.normalizeVaultPath(path);
         if (normalizedPath === "" || util.isExcludedPath(normalizedPath, this.configDir)) {
             throw new Error(`Upload refused on invalid or excluded path: ${path}`);
@@ -1587,6 +1749,7 @@ export class SyncEngine {
             remoteMtime: util.toSecondPrecision(remoteItem.mtime),
             size: content.byteLength
         });
+        return content.byteLength;
     }
 
     private getChunkingThresholdBytes(): number {
@@ -1603,6 +1766,7 @@ export class SyncEngine {
 
     public async runSync(): Promise<SyncResult> {
         await this.client.ensureRemoteBaseDir();
+        const walkWarnings: SyncLogEvent[] = [];
         const [stateData, remoteItems, localItems]: [
             { records: Record<string, SyncStateRecord> },
             RemoteItem[],
@@ -1610,7 +1774,7 @@ export class SyncEngine {
         ] = await Promise.all([
             this.stateStore.load(),
             this.client.walkRemote(),
-            this.walkLocal()
+            this.walkLocal(walkWarnings)
         ]);
 
         const plan: SyncPlan = buildSyncPlan(
@@ -1620,7 +1784,7 @@ export class SyncEngine {
             Date.now(),
             this.configDir
         );
-        return await this.executePlan(plan, localItems, remoteItems);
+        return await this.executePlan(plan, localItems, remoteItems, walkWarnings);
     }
 
     private async uploadContent(
@@ -1670,7 +1834,7 @@ export class SyncEngine {
         return await this.client.uploadFile(normalizedPath, content, localMtime);
     }
 
-    public async walkLocal(): Promise<LocalItem[]> {
+    public async walkLocal(warnings?: SyncLogEvent[]): Promise<LocalItem[]> {
         const discovered: LocalItem[] = [];
         const seenLowerPaths: Map<string, string> = new Map<string, string>();
         const visitedLowerDirs: Set<string> = new Set<string>([""]);
@@ -1711,9 +1875,14 @@ export class SyncEngine {
                         seenLowerPaths.get(lowerFolder);
                     if (existingFolder !== undefined) {
                         if (existingFolder !== folderPath) {
-                            log.warn(
-                                `Skipping case-colliding local folder: ${folderPath} (collides with ${existingFolder})`
-                            );
+                            const msg: string = `Skipping case-colliding local folder: ${folderPath} (collides with ${existingFolder})`;
+                            log.warn(msg);
+                            warnings?.push({
+                                isDirectory: true,
+                                kind: "warning",
+                                message: msg,
+                                path: folderPath
+                            });
                         }
                         continue;
                     }
@@ -1742,9 +1911,14 @@ export class SyncEngine {
                         seenLowerPaths.get(lowerFile);
                     if (existingFile !== undefined) {
                         if (existingFile !== filePath) {
-                            log.warn(
-                                `Skipping case-colliding local file: ${filePath} (collides with ${existingFile})`
-                            );
+                            const msg: string = `Skipping case-colliding local file: ${filePath} (collides with ${existingFile})`;
+                            log.warn(msg);
+                            warnings?.push({
+                                isDirectory: false,
+                                kind: "warning",
+                                message: msg,
+                                path: filePath
+                            });
                         }
                         continue;
                     }
@@ -1825,9 +1999,14 @@ export class SyncEngine {
                     );
                     if (existingFile !== undefined) {
                         if (existingFile !== candidate.normalizedPath) {
-                            log.warn(
-                                `Skipping case-colliding local file: ${candidate.normalizedPath} (collides with ${existingFile})`
-                            );
+                            const msg: string = `Skipping case-colliding local file: ${candidate.normalizedPath} (collides with ${existingFile})`;
+                            log.warn(msg);
+                            warnings?.push({
+                                isDirectory: false,
+                                kind: "warning",
+                                message: msg,
+                                path: candidate.normalizedPath
+                            });
                         }
                         continue;
                     }

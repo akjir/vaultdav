@@ -9,9 +9,14 @@ import {
     VaultDavSettingTab
 } from "../src/settings";
 import { SyncEngine } from "../src/sync/engine";
+import { createEmptyRunSummary, SyncHistoryStore } from "../src/sync/history";
 import type { SyncResult, VaultDavSettings } from "../src/types";
+import { SYNC_LOG_VIEW_TYPE, SyncLogView } from "../src/ui/sync_log_view";
 import { WebDavClient } from "../src/webdav/client";
-import { SecretStorage as MockSecretStorage } from "./obsidian_mock";
+import {
+    SecretStorage as MockSecretStorage,
+    WorkspaceLeaf as MockWorkspaceLeaf
+} from "./obsidian_mock";
 
 function createConfiguredSettings(
     overrides: Partial<VaultDavSettings> = {}
@@ -130,6 +135,7 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
             conflictStrategy: "newest_wins",
             remoteBaseDir: "",
             syncInterval: 0,
+            syncLogRetentionDays: 30,
             url: "https://nc.example.com",
             username: "bob"
         });
@@ -315,34 +321,57 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         const testConnectionSpy = vi
             .spyOn(plugin, "testConnection")
             .mockResolvedValue(true);
+        const openSyncLogSpy = vi
+            .spyOn(plugin, "openSyncLogView")
+            .mockResolvedValue(undefined);
+        const registerViewSpy = vi.spyOn(plugin, "registerView");
 
         await plugin.onload();
 
-        expect(ribbonSpy).toHaveBeenCalledWith(
+        expect(registerViewSpy).toHaveBeenCalledWith(
+            SYNC_LOG_VIEW_TYPE,
+            expect.any(Function)
+        );
+        expect(ribbonSpy).toHaveBeenCalledTimes(2);
+        expect(ribbonSpy).toHaveBeenNthCalledWith(
+            1,
             "refresh-cw",
             "Synchronize with Nextcloud",
+            expect.any(Function)
+        );
+        expect(ribbonSpy).toHaveBeenNthCalledWith(
+            2,
+            "history",
+            "Open sync log",
             expect.any(Function)
         );
         expect(statusBarSpy).toHaveBeenCalledTimes(1);
         plugin.reportProgress("Uploading notes.md (3/12 · file 5/18)");
         expect(setTextSpy).toHaveBeenCalledWith("Uploading notes.md (3/12 · file 5/18)");
-        expect(commandSpy).toHaveBeenCalledTimes(2);
+        expect(commandSpy).toHaveBeenCalledTimes(3);
         expect(registeredCommands.map((cmd: Command) => cmd.id)).toEqual([
             "sync-now",
-            "test-connection"
+            "test-connection",
+            "open-sync-log"
         ]);
         expect(registeredCommands.map((cmd: Command) => cmd.name)).toEqual([
             "Synchronize now",
-            "Test Nextcloud WebDAV connection"
+            "Test Nextcloud WebDAV connection",
+            "Open sync log"
         ]);
         expect(settingTabSpy).toHaveBeenCalledTimes(1);
         expect(settingTabSpy.mock.calls[0]?.[0]).toBeInstanceOf(VaultDavSettingTab);
         expect(registerIntervalSpy).toHaveBeenCalledTimes(1);
 
-        const ribbonCallback: ((evt: MouseEvent) => unknown) | undefined =
+        const syncRibbonCallback: ((evt: MouseEvent) => unknown) | undefined =
             ribbonSpy.mock.calls[0]?.[2];
-        ribbonCallback?.(new MouseEvent("click"));
-        expect(triggerSyncSpy).toHaveBeenCalledTimes(1);
+        syncRibbonCallback?.(new MouseEvent("click"));
+        expect(triggerSyncSpy).toHaveBeenCalledWith("manual");
+
+        const logRibbonCallback: ((evt: MouseEvent) => unknown) | undefined =
+            ribbonSpy.mock.calls[1]?.[2];
+        logRibbonCallback?.(new MouseEvent("click"));
+        expect(openSyncLogSpy).toHaveBeenCalledTimes(1);
 
         registeredCommands[0]?.callback?.();
         expect(triggerSyncSpy).toHaveBeenCalledTimes(2);
@@ -350,7 +379,14 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         registeredCommands[1]?.callback?.();
         expect(testConnectionSpy).toHaveBeenCalledTimes(1);
 
+        registeredCommands[2]?.callback?.();
+        expect(openSyncLogSpy).toHaveBeenCalledTimes(2);
+
+        statusBarEl.dispatchEvent(new MouseEvent("click"));
+        expect(openSyncLogSpy).toHaveBeenCalledTimes(3);
+
         vi.advanceTimersByTime(10 * 60 * 1000);
+        expect(triggerSyncSpy).toHaveBeenCalledWith("auto");
         expect(triggerSyncSpy).toHaveBeenCalledTimes(3);
 
         plugin.onunload();
@@ -510,6 +546,11 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
 
     it("guards concurrent runs, checks configuration, updates and clears status bar, reports SyncResult summaries, and resets isSyncing in triggerSync()", async () => {
         const { plugin, secretStorage } = createTestPlugin("MyVault");
+        const statusBarEl: HTMLElement = document.createElement("div");
+        statusBarEl.setText = (val: string): void => {
+            statusBarEl.textContent = val;
+        };
+        vi.spyOn(plugin, "addStatusBarItem").mockReturnValue(statusBarEl);
         await plugin.onload();
         const notifySpy = vi.spyOn(log, "notify").mockImplementation((): void => undefined);
         const errorSpy = vi.spyOn(log, "error").mockImplementation((): void => undefined);
@@ -544,6 +585,25 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
             deletedRemote: 3,
             downloaded: 4,
             errors: [],
+            events: [
+                {
+                    conflictCopyPath: "Doc.conflict-20261124-120000.md",
+                    isDirectory: false,
+                    kind: "conflict",
+                    path: "Doc.md",
+                    resolution: "keep_both",
+                    size: 128
+                }
+            ],
+            summary: {
+                ...createEmptyRunSummary(),
+                conflictsKeepBoth: 1,
+                conflictsResolved: 1,
+                deletedLocal: 2,
+                deletedRemote: 3,
+                downloaded: 4,
+                uploaded: 5
+            },
             timestamp: 1700000000000,
             uploaded: 5
         };
@@ -562,6 +622,10 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
             "Uploading notes.md (3/12 · file 5/18)"
         );
         expect(progressSpy).toHaveBeenLastCalledWith("");
+        expect(statusBarEl.textContent).toBe("");
+        expect(statusBarEl.classList.contains("vaultdav-status-error")).toBe(false);
+        expect(plugin.getSyncHistoryRuns().length).toBe(1);
+        expect(plugin.getSyncHistoryRuns()[0]?.status).toBe("success");
         expect(notifySpy).toHaveBeenCalledWith("Starting synchronization...");
         expect(notifySpy).toHaveBeenLastCalledWith(
             "Sync complete (up: 5, down: 4, conflicts: 1, del: 5)."
@@ -573,6 +637,20 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
             deletedRemote: 0,
             downloaded: 1,
             errors: ["Failed to upload note.md"],
+            events: [
+                {
+                    isDirectory: false,
+                    kind: "error",
+                    message: "Failed to upload note.md",
+                    path: "note.md"
+                }
+            ],
+            summary: {
+                ...createEmptyRunSummary(),
+                downloaded: 1,
+                errors: 1,
+                uploaded: 2
+            },
             timestamp: 1700000001000,
             uploaded: 2
         };
@@ -581,6 +659,9 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         const secondResult: SyncResult | null = await plugin.triggerSync();
         expect(secondResult).toEqual(partialErrorResult);
         expect(plugin.isSyncing).toBe(false);
+        expect(statusBarEl.textContent).toBe("VaultDAV: 1 sync error");
+        expect(statusBarEl.classList.contains("vaultdav-status-error")).toBe(true);
+        expect(plugin.getSyncHistoryRuns()[0]?.status).toBe("partial");
         expect(notifySpy).toHaveBeenLastCalledWith(
             "Sync completed with 1 error(s). Uploaded 2, downloaded 1."
         );
@@ -592,7 +673,9 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         const thrownResult: SyncResult | null = await plugin.triggerSync();
         expect(thrownResult).toBeNull();
         expect(plugin.isSyncing).toBe(false);
-        expect(progressSpy).toHaveBeenLastCalledWith("");
+        expect(statusBarEl.textContent).toBe("VaultDAV: sync failed");
+        expect(statusBarEl.classList.contains("vaultdav-status-error")).toBe(true);
+        expect(plugin.getSyncHistoryRuns()[0]?.status).toBe("failed");
         expect(errorSpy).toHaveBeenCalledWith(
             "Synchronization failed:",
             expect.any(Error)
@@ -606,6 +689,13 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         expect(notifySpy).toHaveBeenLastCalledWith(
             "Sync failed: unexpected string error"
         );
+        expect(statusBarEl.textContent).toBe("VaultDAV: sync failed");
+
+        // Subsequent clean sync clears the error indicator from status bar
+        runSyncSpy.mockResolvedValueOnce(cleanSyncResult);
+        await plugin.triggerSync();
+        expect(statusBarEl.textContent).toBe("");
+        expect(statusBarEl.classList.contains("vaultdav-status-error")).toBe(false);
     });
 
     it("clamps and sanitizes loaded settings, scrubs embedded URL credentials and invalid legacy passwords from data.json, guards 32-bit auto-sync timer overflow, handles undefined statusBarItem on mobile, and serializes saveSettings()", async () => {
@@ -741,5 +831,76 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         await loadPromise;
 
         expect(setIntervalSpy).not.toHaveBeenCalled();
+    });
+
+    it("opens and reveals SyncLogView and isolates history storage write failures from triggerSync()", async () => {
+        const { app, plugin, secretStorage } = createTestPlugin("MyVault");
+        const revealLeafSpy = vi.fn().mockResolvedValue(undefined);
+        const createdLeaf: MockWorkspaceLeaf = new MockWorkspaceLeaf(app);
+        const existingLeaves: MockWorkspaceLeaf[] = [];
+        const getRightLeafSpy = vi.fn(() => {
+            existingLeaves.push(createdLeaf);
+            return createdLeaf;
+        });
+        Object.assign(app, {
+            workspace: {
+                getLeavesOfType: (): MockWorkspaceLeaf[] => existingLeaves,
+                getRightLeaf: getRightLeafSpy,
+                revealLeaf: revealLeafSpy
+            }
+        });
+
+        await plugin.openSyncLogView();
+        expect(getRightLeafSpy).toHaveBeenCalledWith(false);
+        expect(createdLeaf.viewState).toEqual({
+            active: true,
+            type: SYNC_LOG_VIEW_TYPE
+        });
+        expect(revealLeafSpy).toHaveBeenCalledWith(createdLeaf);
+
+        // Second call reuses existing leaf instead of creating another
+        await plugin.openSyncLogView();
+        expect(getRightLeafSpy).toHaveBeenCalledTimes(1);
+        expect(revealLeafSpy).toHaveBeenCalledTimes(2);
+
+        // Refreshing calls refresh() on mounted SyncLogView instances
+        const mountedView: SyncLogView = new SyncLogView(
+            createdLeaf as unknown as import("obsidian").WorkspaceLeaf,
+            plugin
+        );
+        const refreshSpy = vi.spyOn(mountedView, "refresh").mockImplementation(
+            (): void => undefined
+        );
+        createdLeaf.view = mountedView;
+        plugin.refreshSyncLogViews();
+        expect(refreshSpy).toHaveBeenCalledTimes(1);
+
+        // History persistence error must not abort or fail triggerSync()
+        const warnSpy = vi.spyOn(log, "warn").mockImplementation((): void => undefined);
+        vi.spyOn(log, "notify").mockImplementation((): void => undefined);
+        secretStorage.setSecret(DEFAULT_APP_PASSWORD_SECRET_ID, "app-password-123");
+        plugin.settings = createConfiguredSettings();
+        vi.spyOn(SyncHistoryStore.prototype, "recordRun").mockRejectedValueOnce(
+            new Error("Disk full")
+        );
+        const okResult: SyncResult = {
+            conflictsResolved: 0,
+            deletedLocal: 0,
+            deletedRemote: 0,
+            downloaded: 0,
+            errors: [],
+            events: [],
+            summary: createEmptyRunSummary(),
+            timestamp: 1700000002000,
+            uploaded: 0
+        };
+        vi.spyOn(SyncEngine.prototype, "runSync").mockResolvedValueOnce(okResult);
+
+        const syncOut: SyncResult | null = await plugin.triggerSync();
+        expect(syncOut).toEqual(okResult);
+        expect(warnSpy).toHaveBeenCalledWith(
+            "Failed to save sync history entry:",
+            expect.any(Error)
+        );
     });
 });

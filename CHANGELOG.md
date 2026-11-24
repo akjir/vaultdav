@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- Add a dockable Sync log view (`vaultdav:open-sync-log` command and `history` ribbon icon) showing latest sync overview metrics, live active `.conflict-*` files with clickable links, chronological run history, category and path filters, copyable Markdown summaries, and two-step history clearing.
+- Add device-local sync history persistence (`<config-dir>/plugins/vaultdav/sync-history.json`) with Hybrid Tiered Retention (consecutive no-op run folding, 500-event priority cap per run, configurable `Sync log retention` days from `1` to `365`, 100-run critical-preserving ceiling, and 1 MB storage compaction).
+- Capture per-file uploads, downloads, conflict resolution details (`keep_both`, `newest_wins_local`, `newest_wins_remote`, `identical`), deletions, folder creations, plan/walk warnings, and redacted errors on every sync run.
+- Show a clickable Desktop status bar error indicator when a sync completes with errors or fails.
+
 ## [1.2.0] - 2026-11-24
 
 ### Added

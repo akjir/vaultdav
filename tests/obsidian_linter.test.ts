@@ -38,6 +38,8 @@ const EXPLICIT_ANY_REGEX: RegExp = /(:\s*any\b|\bas\s+any\b|<any>)/;
 const FORBIDDEN_CONSOLE_REGEX: RegExp = /\bconsole\.(log|info)\s*\(/;
 const FORBIDDEN_DOM_HTML_REGEX: RegExp = /\.(innerHTML|outerHTML|insertAdjacentHTML)\b/;
 const FORBIDDEN_GLOBAL_NETWORK_REGEX: RegExp = /\b(fetch\s*\(|XMLHttpRequest\b)/;
+const FORBIDDEN_INLINE_STYLE_REGEX: RegExp =
+    /(\.style\.[a-zA-Z_$][a-zA-Z0-9_$]*\s*=|\.setAttribute\(\s*["']style["']|\.setAttr\(\s*["']style["'])/;
 const FORBIDDEN_NODE_IMPORT_REGEX: RegExp =
     /from\s+["'](node:|fs\b|path\b|http\b|https\b|crypto\b)/;
 const FORBIDDEN_PLATFORM_REGEX: RegExp = /\bnavigator\.(platform|userAgent)\b/;
@@ -159,11 +161,15 @@ describe("Obsidian Plugin Linter static guard (eslint-plugin-obsidianmd)", () =>
         }
     });
 
-    it("prohibits innerHTML, outerHTML, and insertAdjacentHTML (no-inner-html)", () => {
+    it("prohibits innerHTML, outerHTML, insertAdjacentHTML, and inline style assignments (no-inner-html, no-static-styles-assignment)", () => {
         for (const file of sourceFiles) {
             expect(
                 FORBIDDEN_DOM_HTML_REGEX.test(file.content),
                 `${file.relativePath} must not use innerHTML, outerHTML, or insertAdjacentHTML`
+            ).toBe(false);
+            expect(
+                FORBIDDEN_INLINE_STYLE_REGEX.test(file.content),
+                `${file.relativePath} must not assign inline styles (use CSS classes in styles.css)`
             ).toBe(false);
         }
     });
@@ -419,6 +425,11 @@ describe("Obsidian Plugin Linter static guard (eslint-plugin-obsidianmd)", () =>
         }
         expect(extractedLiterals).toContain("Synchronize with Nextcloud");
         expect(extractedLiterals).toContain("Synchronize now");
+        expect(extractedLiterals).toContain("Open sync log");
+        expect(extractedLiterals).toContain("Sync log retention");
+        expect(extractedLiterals).toContain(
+            "Days to retain local sync history (1 to 365)."
+        );
         expect(extractedLiterals).toContain("Test Nextcloud WebDAV connection");
         expect(extractedLiterals).toContain(
             "Configure server URL, username, and app password first."

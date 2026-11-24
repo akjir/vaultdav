@@ -320,6 +320,7 @@ describe("SyncEngine delta calculation and execution", () => {
             conflictStrategy: "keep_both",
             remoteBaseDir: "Vault",
             syncInterval: 0,
+            syncLogRetentionDays: 30,
             url: "https://cloud.example.com",
             username: "alice"
         };
@@ -473,6 +474,7 @@ describe("SyncEngine delta calculation and execution", () => {
             conflictStrategy: "newest_wins",
             remoteBaseDir: "Vault",
             syncInterval: 0,
+            syncLogRetentionDays: 30,
             url: "https://cloud.example.com",
             username: "alice"
         };
@@ -552,6 +554,7 @@ describe("SyncEngine delta calculation and execution", () => {
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
+                syncLogRetentionDays: 30,
                 url: "https://cloud.example.com",
                 username: "alice"
             }
@@ -632,6 +635,7 @@ describe("SyncEngine delta calculation and execution", () => {
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
+                syncLogRetentionDays: 30,
                 url: "https://cloud.example.com",
                 username: "alice"
             }
@@ -651,7 +655,7 @@ describe("SyncEngine delta calculation and execution", () => {
         expect(transferOnlyActions.length).toBe(10);
 
         await engine.executePlan(
-            { actions: transferOnlyActions, timestamp: t0 },
+            { actions: transferOnlyActions, timestamp: t0, warnings: [] },
             localItems,
             remoteItems
         );
@@ -711,6 +715,7 @@ describe("SyncEngine delta calculation and execution", () => {
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
+                syncLogRetentionDays: 30,
                 url: "https://cloud.example.com",
                 username: "alice"
             }
@@ -765,6 +770,7 @@ describe("SyncEngine delta calculation and execution", () => {
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
+                syncLogRetentionDays: 30,
                 url: "https://cloud.example.com",
                 username: "alice"
             }
@@ -811,6 +817,7 @@ describe("SyncEngine delta calculation and execution", () => {
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
+                syncLogRetentionDays: 30,
                 url: "https://cloud.example.com",
                 username: "alice"
             }
@@ -845,6 +852,7 @@ describe("SyncEngine delta calculation and execution", () => {
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
+                syncLogRetentionDays: 30,
                 url: "https://cloud.example.com",
                 username: "alice"
             }
@@ -895,6 +903,7 @@ describe("SyncEngine delta calculation and execution", () => {
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
+                syncLogRetentionDays: 30,
                 url: "https://cloud.example.com",
                 username: "alice"
             }
@@ -1020,6 +1029,7 @@ describe("SyncEngine delta calculation and execution", () => {
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
+                syncLogRetentionDays: 30,
                 url: "https://cloud.example.com",
                 username: "alice"
             }
@@ -1034,11 +1044,11 @@ describe("SyncEngine delta calculation and execution", () => {
                 remoteMap: ReadonlyMap<string, RemoteItem>,
                 existingPaths: Set<string>,
                 now: number
-            ): Promise<void> => {
+            ) => {
                 if (existingPaths.has(reservedConflictPath)) {
                     initialHasReservedPath = true;
                 }
-                await originalExecuteConflict(
+                return await originalExecuteConflict(
                     action,
                     localMap,
                     remoteMap,
@@ -1165,6 +1175,7 @@ describe("SyncEngine delta calculation and execution", () => {
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
+                syncLogRetentionDays: 30,
                 url: "https://cloud.example.com",
                 username: "alice"
             },
@@ -1242,6 +1253,7 @@ describe("SyncEngine delta calculation and execution", () => {
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
+                syncLogRetentionDays: 30,
                 url: "https://cloud.example.com",
                 username: "alice"
             }
@@ -1434,6 +1446,7 @@ describe("SyncEngine delta calculation and execution", () => {
                     conflictStrategy: "keep_both",
                     remoteBaseDir: "Vault",
                     syncInterval: 0,
+                    syncLogRetentionDays: 30,
                     url: "https://cloud.example.com",
                     username: "alice"
                 }
@@ -1509,6 +1522,7 @@ describe("SyncEngine delta calculation and execution", () => {
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
+                syncLogRetentionDays: 30,
                 url: "https://cloud.example.com",
                 username: "alice"
             }
@@ -1588,7 +1602,8 @@ describe("SyncEngine delta calculation and execution", () => {
                     type: "conflict"
                 }
             ],
-            timestamp: t1
+            timestamp: t1,
+            warnings: []
         };
 
         await engine.executePlan(customPlan, localItems, remoteItems);
@@ -1658,6 +1673,7 @@ describe("SyncEngine delta calculation and execution", () => {
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
+                syncLogRetentionDays: 30,
                 url: "https://cloud.example.com",
                 username: "alice"
             }
@@ -1757,6 +1773,7 @@ describe("SyncEngine delta calculation and execution", () => {
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
+                syncLogRetentionDays: 30,
                 url: "https://cloud.example.com",
                 username: "alice"
             }
@@ -1830,7 +1847,8 @@ describe("SyncEngine delta calculation and execution", () => {
                         type: "delete_remote"
                     }
                 ],
-                timestamp: Number.NaN
+                timestamp: Number.NaN,
+                warnings: []
             };
 
             const result = await engine.executePlan(
@@ -1906,6 +1924,7 @@ describe("SyncEngine delta calculation and execution", () => {
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
+                syncLogRetentionDays: 30,
                 url: "https://cloud.example.com",
                 username: "alice"
             }
@@ -2045,6 +2064,7 @@ describe("SyncEngine delta calculation and execution", () => {
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
+                syncLogRetentionDays: 30,
                 url: "https://cloud.example.com",
                 username: "alice"
             }
@@ -2243,6 +2263,7 @@ describe("SyncEngine delta calculation and execution", () => {
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
+                syncLogRetentionDays: 30,
                 url: "https://cloud.example.com",
                 username: "alice"
             }
@@ -2381,6 +2402,7 @@ describe("SyncEngine delta calculation and execution", () => {
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
+                syncLogRetentionDays: 30,
                 url: "https://cloud.example.com",
                 username: "alice"
             }
@@ -2509,6 +2531,7 @@ describe("SyncEngine delta calculation and execution", () => {
                 conflictStrategy: "keep_both",
                 remoteBaseDir: "Vault",
                 syncInterval: 0,
+                syncLogRetentionDays: 30,
                 url: "https://cloud.example.com",
                 username: "alice"
             }
@@ -2517,6 +2540,152 @@ describe("SyncEngine delta calculation and execution", () => {
         const walked: LocalItem[] = await engine.walkLocal();
         expect(maxActiveStats).toBeGreaterThan(1);
         expect(walked.map((item: LocalItem) => item.path)).toEqual(fileNames);
+    });
+
+    it("captures structured SyncResult events, conflict resolution outcomes, directory counts, and plan warnings", async () => {
+        const t1: number = Date.UTC(2026, 10, 24, 12, 0, 0);
+        const t2: number = Date.UTC(2026, 10, 24, 13, 0, 0);
+        const warnSpy = vi.spyOn(log, "warn").mockImplementation((): void => undefined);
+        const errorSpy = vi.spyOn(log, "error").mockImplementation((): void => undefined);
+
+        const localData: Map<string, ArrayBuffer> = new Map<string, ArrayBuffer>([
+            ["KeepBoth.md", new Uint8Array([1, 2, 3]).buffer],
+            ["Identical.md", new Uint8Array([7, 7]).buffer],
+            ["NewUpload.md", new Uint8Array([9, 8, 7, 6]).buffer],
+            ["UploadFail.md", new Uint8Array([5]).buffer]
+        ]);
+        const remoteData: Map<string, ArrayBuffer> = new Map<string, ArrayBuffer>([
+            ["KeepBoth.md", new Uint8Array([4, 5, 6, 7]).buffer],
+            ["Identical.md", new Uint8Array([7, 7]).buffer],
+            ["NewDownload.md", new Uint8Array([1, 1, 1]).buffer]
+        ]);
+
+        const adapter: Partial<DataAdapter> = {
+            exists: async (): Promise<boolean> => false,
+            mkdir: async (): Promise<void> => undefined,
+            read: async (): Promise<string> => "{}",
+            readBinary: async (path: string): Promise<ArrayBuffer> => {
+                const buf: ArrayBuffer | undefined = localData.get(path);
+                if (buf === undefined) {
+                    throw new Error(`Missing local file: ${path}`);
+                }
+                return buf;
+            },
+            stat: async (path: string) => ({
+                ctime: t2,
+                mtime: t2,
+                size: localData.get(path)?.byteLength ?? 0,
+                type: "file" as const
+            }),
+            write: async (): Promise<void> => undefined,
+            writeBinary: async (path: string, data: ArrayBuffer): Promise<void> => {
+                localData.set(path, data);
+            }
+        };
+
+        const client: Partial<WebDavClient> = {
+            createDirectory: async (): Promise<void> => undefined,
+            downloadFile: async (path: string): Promise<ArrayBuffer> => {
+                const buf: ArrayBuffer | undefined = remoteData.get(path);
+                if (buf === undefined) {
+                    throw new Error(`Missing remote file: ${path}`);
+                }
+                return buf;
+            },
+            uploadFile: async (path: string, data: ArrayBuffer): Promise<RemoteItem> => {
+                if (path === "UploadFail.md") {
+                    throw new Error("HTTP 503 with Basic dXNlcjpwYXNz");
+                }
+                remoteData.set(path, data);
+                return makeRemote(path, t2, data.byteLength, `etag-${path}`, false);
+            }
+        };
+
+        const stateStore: SyncStateStore = new SyncStateStore(
+            adapter as DataAdapter,
+            `${TEST_CONFIG_DIR}/plugins/vaultdav/sync-state.json`,
+            TEST_CONFIG_DIR
+        );
+
+        const localItems: LocalItem[] = [
+            makeLocal("KeepBoth.md", t2, 3, false),
+            makeLocal("Identical.md", t2, 2, false),
+            makeLocal("NewUpload.md", t2, 4, false),
+            makeLocal("UploadFail.md", t2, 1, false),
+            makeLocal("TypeConflict", t2, 5, false),
+            makeLocal("LocalOnlyDir", t2, 0, true)
+        ];
+        const remoteItems: RemoteItem[] = [
+            makeRemote("KeepBoth.md", t1, 4, "etag-kb-r", false),
+            makeRemote("Identical.md", t1, 2, "etag-id-r", false),
+            makeRemote("NewDownload.md", t2, 3, "etag-dl-r", false),
+            makeRemote("TypeConflict", t2, 0, "etag-tc-dir", true)
+        ];
+
+        const plan: SyncPlan = buildSyncPlan(
+            localItems,
+            remoteItems,
+            {},
+            t2,
+            TEST_CONFIG_DIR
+        );
+        expect(plan.warnings.length).toBe(1);
+        expect(plan.warnings[0]?.path).toBe("TypeConflict");
+
+        const engine: SyncEngine = new SyncEngine(
+            { adapter: adapter as DataAdapter, configDir: TEST_CONFIG_DIR } as Vault,
+            client as WebDavClient,
+            stateStore,
+            {
+                appPasswordSecret: "vaultdav-app-password",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                syncLogRetentionDays: 30,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        const result: SyncResult = await engine.executePlan(
+            plan,
+            localItems,
+            remoteItems
+        );
+
+        expect(result.summary.uploaded).toBe(1);
+        expect(result.summary.downloaded).toBe(1);
+        expect(result.summary.conflictsResolved).toBe(2);
+        expect(result.summary.conflictsKeepBoth).toBe(1);
+        expect(result.summary.conflictsIdentical).toBe(1);
+        expect(result.summary.dirsCreatedRemote).toBe(1);
+        expect(result.summary.warnings).toBe(1);
+        expect(result.summary.errors).toBe(1);
+
+        const kbEvent = result.events.find(
+            (e) => e.kind === "conflict" && e.path === "KeepBoth.md"
+        );
+        expect(kbEvent?.resolution).toBe("keep_both");
+        expect(kbEvent?.conflictCopyPath).toBe(
+            "KeepBoth.conflict-20261124-130000.md"
+        );
+
+        const identicalEvent = result.events.find(
+            (e) => e.kind === "conflict" && e.path === "Identical.md"
+        );
+        expect(identicalEvent?.resolution).toBe("identical");
+        expect(identicalEvent?.conflictCopyPath).toBeUndefined();
+
+        const failEvent = result.events.find(
+            (e) => e.kind === "error" && e.path === "UploadFail.md"
+        );
+        expect(failEvent?.message).toContain("Basic [REDACTED]");
+        expect(failEvent?.message).not.toContain("dXNlcjpwYXNz");
+
+        warnSpy.mockRestore();
+        errorSpy.mockRestore();
     });
 });
 

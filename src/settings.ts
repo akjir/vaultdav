@@ -30,6 +30,7 @@ export const DEFAULT_SETTINGS: Readonly<VaultDavSettings> =
         conflictStrategy: "keep_both",
         remoteBaseDir: "",
         syncInterval: 0,
+        syncLogRetentionDays: 30,
         url: "",
         username: ""
     });
@@ -37,6 +38,8 @@ export const MAX_CHUNK_SIZE_MB: number = 512;
 export const MAX_CHUNKING_THRESHOLD_MB: number = 512;
 export const MAX_SECRET_ID_LENGTH: number = 64;
 export const MAX_SYNC_INTERVAL_MINUTES: number = 10080;
+export const MAX_SYNC_LOG_RETENTION_DAYS: number = 365;
+export const MIN_SYNC_LOG_RETENTION_DAYS: number = 1;
 
 const SECRET_ID_REGEX: RegExp = /^[a-z0-9-]+$/;
 const URL_USERINFO_REGEX: RegExp = /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/\s?#]+@/i;
@@ -150,6 +153,17 @@ export function sanitizeSyncInterval(value: unknown): number {
         return Math.min(MAX_SYNC_INTERVAL_MINUTES, Math.floor(value));
     }
     return DEFAULT_SETTINGS.syncInterval;
+}
+
+export function sanitizeSyncLogRetentionDays(value: unknown): number {
+    if (
+        typeof value === "number" &&
+        Number.isFinite(value) &&
+        value >= MIN_SYNC_LOG_RETENTION_DAYS
+    ) {
+        return Math.min(MAX_SYNC_LOG_RETENTION_DAYS, Math.floor(value));
+    }
+    return DEFAULT_SETTINGS.syncLogRetentionDays;
 }
 
 export function sanitizeUsername(value: string): string {
@@ -399,6 +413,30 @@ export class VaultDavSettingTab extends PluginSettingTab {
                                 );
                             });
                     });
+            })
+            .addSetting((setting: Setting): void => {
+                setting
+                    .setName("Sync log retention")
+                    .setDesc("Days to retain local sync history (1 to 365).")
+                    .addText((text) => {
+                        text.inputEl.type = "number";
+                        text.inputEl.min = String(MIN_SYNC_LOG_RETENTION_DAYS);
+                        text.inputEl.max = String(MAX_SYNC_LOG_RETENTION_DAYS);
+                        return text
+                            .setPlaceholder("30")
+                            .setValue(
+                                String(
+                                    this.pluginInstance.settings
+                                        .syncLogRetentionDays
+                                )
+                            )
+                            .onChange(async (value: string): Promise<void> => {
+                                await this.setControlValue(
+                                    "syncLogRetentionDays",
+                                    value
+                                );
+                            });
+                    });
             });
     }
 
@@ -416,6 +454,8 @@ export class VaultDavSettingTab extends PluginSettingTab {
                 return this.pluginInstance.settings.remoteBaseDir;
             case "syncInterval":
                 return this.pluginInstance.settings.syncInterval;
+            case "syncLogRetentionDays":
+                return this.pluginInstance.settings.syncLogRetentionDays;
             case "url":
                 return this.pluginInstance.settings.url;
             case "username":
@@ -553,6 +593,19 @@ export class VaultDavSettingTab extends PluginSettingTab {
                         },
                         desc: "Target chunk size in MB for chunked uploads and parallel range downloads.",
                         name: "Chunk size"
+                    },
+                    {
+                        control: {
+                            defaultValue: DEFAULT_SETTINGS.syncLogRetentionDays,
+                            key: "syncLogRetentionDays",
+                            max: MAX_SYNC_LOG_RETENTION_DAYS,
+                            min: MIN_SYNC_LOG_RETENTION_DAYS,
+                            placeholder: "30",
+                            step: 1,
+                            type: "number"
+                        },
+                        desc: "Days to retain local sync history (1 to 365).",
+                        name: "Sync log retention"
                     }
                 ],
                 type: "group"
@@ -593,6 +646,10 @@ export class VaultDavSettingTab extends PluginSettingTab {
             case "syncInterval":
                 this.pluginInstance.settings.syncInterval =
                     sanitizeSyncInterval(parseNumericInput(value));
+                break;
+            case "syncLogRetentionDays":
+                this.pluginInstance.settings.syncLogRetentionDays =
+                    sanitizeSyncLogRetentionDays(parseNumericInput(value));
                 break;
             case "url":
                 this.pluginInstance.settings.url = sanitizeServerUrl(

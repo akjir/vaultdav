@@ -1,0 +1,282 @@
+.vaultdav-log {
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-4-3);
+    padding: var(--size-4-3);
+    overflow-y: auto;
+}
+
+.vaultdav-log-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--size-4-2);
+    align-items: center;
+}
+
+.vaultdav-log-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-4-2);
+    padding: var(--size-4-3);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-m);
+    background-color: var(--background-secondary);
+}
+
+.vaultdav-log-section-title {
+    font-size: var(--font-ui-medium);
+    font-weight: var(--font-semibold);
+    color: var(--text-normal);
+}
+
+.vaultdav-log-status-line,
+.vaultdav-log-detail-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--size-4-2);
+    align-items: center;
+}
+
+.vaultdav-log-meta {
+    font-size: var(--font-ui-smaller);
+    color: var(--text-muted);
+    word-break: break-word;
+}
+
+.vaultdav-log-stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+    gap: var(--size-4-2);
+}
+
+.vaultdav-log-stat-card {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    padding: var(--size-4-2);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-s);
+    background-color: var(--background-primary);
+}
+
+.vaultdav-log-stat-value {
+    font-size: var(--font-ui-large);
+    font-weight: var(--font-semibold);
+    color: var(--text-normal);
+    line-height: 1.2;
+}
+
+.vaultdav-log-stat-label {
+    font-size: var(--font-ui-smaller);
+    color: var(--text-muted);
+}
+
+.vaultdav-log-stat-warn .vaultdav-log-stat-value {
+    color: var(--text-warning);
+}
+
+.vaultdav-log-stat-error .vaultdav-log-stat-value {
+    color: var(--text-error);
+}
+
+.vaultdav-log-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 7px;
+    border-radius: var(--radius-s);
+    font-size: var(--font-ui-smaller);
+    font-weight: var(--font-medium);
+    line-height: 1.3;
+    white-space: nowrap;
+}
+
+.vaultdav-log-badge-success {
+    background-color: var(--background-primary);
+    color: var(--text-success);
+    border: 1px solid var(--background-modifier-border);
+}
+
+.vaultdav-log-badge-info {
+    background-color: var(--background-primary);
+    color: var(--text-accent);
+    border: 1px solid var(--background-modifier-border);
+}
+
+.vaultdav-log-badge-warning {
+    background-color: var(--background-primary);
+    color: var(--text-warning);
+    border: 1px solid var(--background-modifier-border);
+}
+
+.vaultdav-log-badge-danger {
+    background-color: var(--background-primary);
+    color: var(--text-error);
+    border: 1px solid var(--background-modifier-border);
+}
+
+.vaultdav-log-badge-muted {
+    background-color: var(--background-primary);
+    color: var(--text-muted);
+    border: 1px solid var(--background-modifier-border);
+}
+
+.vaultdav-log-conflict-list,
+.vaultdav-log-run-list,
+.vaultdav-log-events {
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-4-2);
+}
+
+.vaultdav-log-run-list {
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+.vaultdav-log-conflict-item,
+.vaultdav-log-event-row {
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-4-1);
+    padding: var(--size-4-2);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-s);
+    background-color: var(--background-primary);
+}
+
+.vaultdav-log-conflict-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--size-4-2);
+    margin-top: var(--size-4-1);
+}
+
+.vaultdav-log-mini-btn {
+    font-size: var(--font-ui-smaller);
+    padding: 2px 8px;
+    height: auto;
+}
+
+.vaultdav-log-run-item {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--size-4-1);
+    width: 100%;
+    height: auto;
+    padding: var(--size-4-2);
+    text-align: left;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-s);
+    background-color: var(--background-primary);
+    cursor: pointer;
+}
+
+.vaultdav-log-run-item:hover {
+    background-color: var(--background-modifier-hover);
+}
+
+.vaultdav-log-run-item.is-selected {
+    border-color: var(--interactive-accent);
+}
+
+.vaultdav-log-run-top {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--size-4-2);
+}
+
+.vaultdav-log-run-time,
+.vaultdav-log-run-summary,
+.vaultdav-log-size {
+    font-size: var(--font-ui-smaller);
+    color: var(--text-muted);
+}
+
+.vaultdav-log-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--size-4-1);
+}
+
+.vaultdav-log-chip {
+    font-size: var(--font-ui-smaller);
+    padding: 2px 8px;
+    height: auto;
+    border-radius: var(--radius-s);
+    cursor: pointer;
+}
+
+.vaultdav-log-chip.is-active {
+    background-color: var(--interactive-accent);
+    color: var(--text-on-accent);
+}
+
+.vaultdav-log-search-wrap {
+    display: flex;
+}
+
+.vaultdav-log-search-input {
+    width: 100%;
+}
+
+.vaultdav-log-event-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--size-4-2);
+}
+
+.vaultdav-log-path-link {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    padding: 0;
+    height: auto;
+    color: var(--text-accent);
+    font-family: var(--font-monospace);
+    font-size: var(--font-ui-smaller);
+    text-align: left;
+    word-break: break-all;
+    cursor: pointer;
+}
+
+.vaultdav-log-path-link:hover {
+    text-decoration: underline;
+    background: transparent;
+}
+
+.vaultdav-log-path-text {
+    font-family: var(--font-monospace);
+    font-size: var(--font-ui-smaller);
+    color: var(--text-normal);
+    word-break: break-all;
+}
+
+.vaultdav-log-event-detail,
+.vaultdav-log-event-message {
+    font-size: var(--font-ui-smaller);
+    color: var(--text-muted);
+    word-break: break-word;
+}
+
+.vaultdav-log-notice-box {
+    padding: var(--size-4-2);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-s);
+    background-color: var(--background-primary);
+    font-size: var(--font-ui-smaller);
+    color: var(--text-muted);
+}
+
+.vaultdav-log-empty {
+    font-size: var(--font-ui-small);
+    color: var(--text-muted);
+}
+
+.vaultdav-status-error {
+    color: var(--text-error);
+    cursor: pointer;
+}

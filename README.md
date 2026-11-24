@@ -6,9 +6,9 @@ Synchronize Obsidian vaults bidirectionally with Nextcloud via WebDAV.
 
 ### Manual Installation
 
-1. Download `main.js` and `manifest.json` from the latest [GitHub Release](https://github.com/akjir/vaultdav/releases/latest).
+1. Download `main.js`, `manifest.json`, and `styles.css` from the latest [GitHub Release](https://github.com/akjir/vaultdav/releases/latest).
 2. Create the folder `<vault>/<config-dir>/plugins/vaultdav/` (where `<config-dir>` is your Obsidian configuration folder).
-3. Copy `main.js` and `manifest.json` into that folder.
+3. Copy `main.js`, `manifest.json`, and `styles.css` into that folder.
 4. Reload Obsidian and enable **VaultDAV** under **Settings > Community plugins**.
 
 ### Beta Installation (BRAT)
@@ -37,6 +37,7 @@ Synchronize Obsidian vaults bidirectionally with Nextcloud via WebDAV.
 | Conflict strategy | `conflictStrategy` | Resolution mode for concurrent edits (`keep_both` or `newest_wins`). |
 | Chunking threshold | `chunkingThresholdMB` | File size threshold in MB (`1` to `512`, default `90`) above which uploads use Nextcloud OC-Chunked transfers. |
 | Chunk size | `chunkSizeMB` | Individual chunk size in MB (`1` to `512`, default `10`) for chunked uploads and parallel HTTP `Range` downloads. |
+| Sync log retention | `syncLogRetentionDays` | Days to retain local sync history (`1` to `365`, default `30`). |
 
 ## Commands
 
@@ -44,13 +45,15 @@ Synchronize Obsidian vaults bidirectionally with Nextcloud via WebDAV.
 | :--- | :--- | :--- |
 | `vaultdav:sync-now` | Synchronize now | Execute a bidirectional synchronization cycle immediately. |
 | `vaultdav:test-connection` | Test Nextcloud WebDAV connection | Verify Nextcloud credentials and remote base directory access. |
+| `vaultdav:open-sync-log` | Open sync log | Open the Sync log pane with run summaries, detailed transfer events, and active conflict copies. |
 
 ## Sync Behavior
 
 - Transfers files as binary payloads (`ArrayBuffer`) over Obsidian `requestUrl`, using Nextcloud OC-Chunked uploads (`MKCOL` / `PUT` / `MOVE`) for files exceeding `chunkingThresholdMB` and parallel HTTP `Range` downloads (`Uint8Array.set()`) for remote files larger than 5 MB.
-- Displays real-time transfer and chunk progress in the Obsidian status bar during synchronization.
+- Displays real-time transfer and chunk progress in the Obsidian status bar during synchronization, and shows a clickable error indicator when a sync finishes with errors or fails.
+- Records per-file sync activity (uploads, downloads, conflicts with copy paths and resolution modes, deletions, folder creations, warnings, and redacted errors) in a device-local history file (`<config-dir>/plugins/vaultdav/sync-history.json`) with hybrid tiered retention (consecutive no-op folding, 500-event priority cap per run, configurable day TTL, 100-run critical-preserving cap, and a 1 MB size ceiling).
 - Tracks local and remote modification times and ETags to detect creations, modifications, and deletions (tombstones).
-- Excludes the local sync state file (`<config-dir>/plugins/vaultdav/sync-state.json`), plugin configuration (`<config-dir>/plugins/vaultdav/data.json`), `<config-dir>/workspace*.json`, `.trash/`, `.git/`, `.svn/`, `node_modules/`, and OS metadata files (`.DS_Store`, `Thumbs.db`, `desktop.ini`), respecting custom `Vault#configDir` names to prevent sync loops.
+- Excludes the local sync state file (`<config-dir>/plugins/vaultdav/sync-state.json`), local sync history file (`<config-dir>/plugins/vaultdav/sync-history.json`), plugin configuration (`<config-dir>/plugins/vaultdav/data.json`), `<config-dir>/workspace*.json`, `.trash/`, `.git/`, `.svn/`, `node_modules/`, and OS metadata files (`.DS_Store`, `Thumbs.db`, `desktop.ini`), respecting custom `Vault#configDir` names to prevent sync loops.
 
 ## Compatibility & Privacy
 

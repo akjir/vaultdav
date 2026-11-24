@@ -18,6 +18,8 @@ import {
     MAX_CHUNKING_THRESHOLD_MB,
     MAX_SECRET_ID_LENGTH,
     MAX_SYNC_INTERVAL_MINUTES,
+    MAX_SYNC_LOG_RETENTION_DAYS,
+    MIN_SYNC_LOG_RETENTION_DAYS,
     sanitizeSecretId,
     VaultDavSettingTab
 } from "../src/settings";
@@ -85,6 +87,7 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             "conflictStrategy",
             "remoteBaseDir",
             "syncInterval",
+            "syncLogRetentionDays",
             "url",
             "username"
         ]);
@@ -95,6 +98,7 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             conflictStrategy: "keep_both",
             remoteBaseDir: "",
             syncInterval: 0,
+            syncLogRetentionDays: 30,
             url: "",
             username: ""
         });
@@ -166,7 +170,7 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             },
             {
                 heading: "Advanced sync",
-                names: ["Chunking threshold", "Chunk size"]
+                names: ["Chunking threshold", "Chunk size", "Sync log retention"]
             }
         ]);
 
@@ -182,7 +186,8 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             "Conflict strategy",
             "Test connection",
             "Chunking threshold",
-            "Chunk size"
+            "Chunk size",
+            "Sync log retention"
         ]);
 
         expect(getSettingByName("Server URL").desc).toBe(
@@ -217,6 +222,9 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         );
         expect(getSettingByName("Chunk size").desc).toBe(
             "Target chunk size in MB for chunked uploads and parallel range downloads."
+        );
+        expect(getSettingByName("Sync log retention").desc).toBe(
+            "Days to retain local sync history (1 to 365)."
         );
     });
 
@@ -292,6 +300,12 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         expect(chunkSizeInput?.type).toBe("number");
         expect(chunkSizeInput?.min).toBe("1");
         expect(chunkSizeInput?.max).toBe(String(MAX_CHUNK_SIZE_MB));
+
+        const retentionInput: HTMLInputElement | undefined =
+            getSettingByName("Sync log retention").textComponent?.inputEl;
+        expect(retentionInput?.type).toBe("number");
+        expect(retentionInput?.min).toBe(String(MIN_SYNC_LOG_RETENTION_DAYS));
+        expect(retentionInput?.max).toBe(String(MAX_SYNC_LOG_RETENTION_DAYS));
     });
 
     it("fails closed without plaintext password input when Obsidian 1.11.4 SecretComponent API is unavailable", () => {
@@ -582,7 +596,11 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             },
             {
                 heading: "Advanced sync",
-                names: ["Chunking threshold", "Chunk size"],
+                names: [
+                    "Chunking threshold",
+                    "Chunk size",
+                    "Sync log retention"
+                ],
                 type: "group"
             }
         ]);
@@ -683,6 +701,19 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             desc: "Target chunk size in MB for chunked uploads and parallel range downloads.",
             name: "Chunk size"
         });
+        expect(advancedItems[2]).toEqual({
+            control: {
+                defaultValue: 30,
+                key: "syncLogRetentionDays",
+                max: MAX_SYNC_LOG_RETENTION_DAYS,
+                min: MIN_SYNC_LOG_RETENTION_DAYS,
+                placeholder: "30",
+                step: 1,
+                type: "number"
+            },
+            desc: "Days to retain local sync history (1 to 365).",
+            name: "Sync log retention"
+        });
     });
 
     it("falls back to SecretComponent render callback for App password on Obsidian 1.13.0-1.13.1 and renders Test connection declaratively", async () => {
@@ -769,6 +800,7 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         expect(tab.getControlValue("conflictStrategy")).toBe("keep_both");
         expect(tab.getControlValue("chunkingThresholdMB")).toBe(90);
         expect(tab.getControlValue("chunkSizeMB")).toBe(10);
+        expect(tab.getControlValue("syncLogRetentionDays")).toBe(30);
         expect(tab.getControlValue("unknown")).toBeUndefined();
         expect(tab.getControlValue("__proto__")).toBeUndefined();
         expect(tab.getControlValue("constructor")).toBeUndefined();
@@ -821,6 +853,15 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         expect(tab.getControlValue("chunkSizeMB")).toBe(20);
         await tab.setControlValue("chunkSizeMB", -4);
         expect(tab.getControlValue("chunkSizeMB")).toBe(10);
+
+        await tab.setControlValue("syncLogRetentionDays", 45.7);
+        expect(tab.getControlValue("syncLogRetentionDays")).toBe(45);
+        await tab.setControlValue("syncLogRetentionDays", 999);
+        expect(tab.getControlValue("syncLogRetentionDays")).toBe(
+            MAX_SYNC_LOG_RETENTION_DAYS
+        );
+        await tab.setControlValue("syncLogRetentionDays", 0);
+        expect(tab.getControlValue("syncLogRetentionDays")).toBe(30);
 
         const saveCountBeforeUnknown: number = saveSpy.mock.calls.length;
         await tab.setControlValue("unknown", "ignored");

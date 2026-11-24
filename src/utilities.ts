@@ -3,10 +3,13 @@ import { normalizePath } from "obsidian";
 export const MAX_FILE_SIZE_BYTES: number = 50 * 1024 * 1024;
 export const MAX_WALK_DEPTH: number = 64;
 export const PLUGIN_DATA_RELATIVE_PATH: string = "plugins/vaultdav/data.json";
+export const SYNC_HISTORY_RELATIVE_PATH: string = "plugins/vaultdav/sync-history.json";
 export const SYNC_STATE_RELATIVE_PATH: string = "plugins/vaultdav/sync-state.json";
 
 const BACKSLASH_REGEX: RegExp = /\\/g;
 const BASE64_CHARS: string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const CONFLICT_COPY_FILENAME_REGEX: RegExp =
+    /^(.+)\.conflict-(\d{8}-\d{6})(?:-\d+)?(\.[^./]+)?$/i;
 const DOTS_ONLY_REGEX: RegExp = /^\.+$/;
 const FORBIDDEN_OBJECT_KEYS: ReadonlySet<string> = new Set<string>([
     "__proto__",
@@ -322,6 +325,25 @@ export function encodeWebDavPath(path: string): string {
         .join("/");
 }
 
+export function formatByteSize(bytes: number): string {
+    if (!Number.isFinite(bytes) || bytes <= 0) {
+        return "0 B";
+    }
+    const kb: number = 1024;
+    const mb: number = kb * 1024;
+    const gb: number = mb * 1024;
+    if (bytes < kb) {
+        return `${Math.floor(bytes)} B`;
+    }
+    if (bytes < mb) {
+        return `${(bytes / kb).toFixed(1)} KB`;
+    }
+    if (bytes < gb) {
+        return `${(bytes / mb).toFixed(1)} MB`;
+    }
+    return `${(bytes / gb).toFixed(2)} GB`;
+}
+
 export function getConflictPath(
     path: string,
     timestamp: number,
@@ -455,6 +477,14 @@ export function getPluginDataFilePath(configDir: string): string {
     return `${normalizedConfigDir}/${PLUGIN_DATA_RELATIVE_PATH}`;
 }
 
+export function getSyncHistoryFilePath(configDir: string): string {
+    const normalizedConfigDir: string = normalizeVaultPath(configDir);
+    if (normalizedConfigDir === "") {
+        throw new Error(`Invalid Obsidian configDir: ${configDir}`);
+    }
+    return `${normalizedConfigDir}/${SYNC_HISTORY_RELATIVE_PATH}`;
+}
+
 export function getSyncStateFilePath(configDir: string): string {
     const normalizedConfigDir: string = normalizeVaultPath(configDir);
     if (normalizedConfigDir === "") {
@@ -476,6 +506,7 @@ export function hasControlChars(value: string): boolean {
 function isExcludedConfigRelativePath(relativeLower: string): boolean {
     if (
         relativeLower === SYNC_STATE_RELATIVE_PATH ||
+        relativeLower === SYNC_HISTORY_RELATIVE_PATH ||
         relativeLower === PLUGIN_DATA_RELATIVE_PATH ||
         relativeLower === PLUGIN_DIR_RELATIVE_PATH ||
         relativeLower.startsWith(PLUGIN_DIR_RELATIVE_PREFIX)
@@ -485,6 +516,7 @@ function isExcludedConfigRelativePath(relativeLower: string): boolean {
     if (
         relativeLower.startsWith(PLUGINS_RELATIVE_PREFIX) &&
         (relativeLower.endsWith("/data.json") ||
+            relativeLower.endsWith("/sync-history.json") ||
             relativeLower.endsWith("/sync-state.json"))
     ) {
         return true;
@@ -626,6 +658,44 @@ export function normalizeVaultPath(path: string): string {
     return normalized;
 }
 
+export function parseConflictCopyPath(
+    path: string
+): { originalPath: string; timestampUtc: string } | null {
+    const normalized: string = normalizeVaultPath(path);
+    if (normalized === "") {
+        return null;
+    }
+    const parent: string = getParentPath(normalized);
+    const lastSlash: number = normalized.lastIndexOf("/");
+    const fileName: string =
+        lastSlash === -1 ? normalized : normalized.slice(lastSlash + 1);
+    const match: RegExpExecArray | null =
+        CONFLICT_COPY_FILENAME_REGEX.exec(fileName);
+    if (match === null) {
+        return null;
+    }
+    const stem: string = match[1] ?? "";
+    const stamp: string = match[2] ?? "";
+    const ext: string = match[3] ?? "";
+    if (stem === "" || stamp.length !== 15) {
+        return null;
+    }
+    const originalFileName: string = `${stem}${ext}`;
+    const originalPath: string = normalizeVaultPath(
+        parent === "" ? originalFileName : `${parent}/${originalFileName}`
+    );
+    if (originalPath === "") {
+        return null;
+    }
+    const timestampUtc: string =
+        `${stamp.slice(0, 4)}-${stamp.slice(4, 6)}-${stamp.slice(6, 8)} ` +
+        `${stamp.slice(9, 11)}:${stamp.slice(11, 13)}:${stamp.slice(13, 15)} UTC`;
+    return {
+        originalPath,
+        timestampUtc
+    };
+}
+
 function parseServerUrl(rawUrl: string): URL {
     try {
         return new URL(rawUrl);
@@ -691,6 +761,7 @@ export const util = {
     MAX_FILE_SIZE_BYTES,
     MAX_WALK_DEPTH,
     PLUGIN_DATA_RELATIVE_PATH,
+    SYNC_HISTORY_RELATIVE_PATH,
     SYNC_STATE_RELATIVE_PATH,
     areArrayBuffersEqual,
     buildNextcloudWebDavBaseUrl,
@@ -698,17 +769,20 @@ export const util = {
     delay,
     encodeBasicAuth,
     encodeWebDavPath,
+    formatByteSize,
     getConflictPath,
     getFolderLevels,
     getParentPath,
     getPathDepth,
     getPluginDataFilePath,
+    getSyncHistoryFilePath,
     getSyncStateFilePath,
     hasControlChars,
     isExcludedPath,
     isExplicitRootPath,
     normalizeEtag,
     normalizeVaultPath,
+    parseConflictCopyPath,
     runConcurrent,
     toSecondPrecision
 };

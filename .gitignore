@@ -5,6 +5,7 @@ node_modules/
 main.js
 main.js.map
 data.json
+sync-history.json
 sync-state.json
 release-notes.md
 coverage/

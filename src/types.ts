@@ -1,4 +1,24 @@
+export type ConflictResolutionMode =
+    | "identical"
+    | "keep_both"
+    | "newest_wins_local"
+    | "newest_wins_remote";
+
 export type ConflictStrategy = "keep_both" | "newest_wins";
+
+export interface ActiveConflictItem {
+    conflictPath: string;
+    mtime: number;
+    originalPath: string;
+    size: number;
+    timestampUtc: string;
+}
+
+export interface ConflictOutcome {
+    conflictCopyPath?: string;
+    resolution: ConflictResolutionMode;
+    size: number;
+}
 
 export interface LocalItem {
     ctime: number;
@@ -41,9 +61,36 @@ export type SyncActionType =
     | "prune_state"
     | "upload";
 
+export type SyncEventKind =
+    | "conflict"
+    | "create_local_dir"
+    | "create_remote_dir"
+    | "delete_local"
+    | "delete_remote"
+    | "download"
+    | "error"
+    | "upload"
+    | "warning";
+
+export interface SyncHistoryData {
+    runs: SyncRunRecord[];
+    version: number;
+}
+
+export interface SyncLogEvent {
+    conflictCopyPath?: string;
+    isDirectory?: boolean;
+    kind: SyncEventKind;
+    message?: string;
+    path?: string;
+    resolution?: ConflictResolutionMode;
+    size?: number;
+}
+
 export interface SyncPlan {
     actions: SyncAction[];
     timestamp: number;
+    warnings: SyncLogEvent[];
 }
 
 export interface SyncResult {
@@ -52,9 +99,47 @@ export interface SyncResult {
     deletedRemote: number;
     downloaded: number;
     errors: string[];
+    events: SyncLogEvent[];
+    summary: SyncRunSummary;
     timestamp: number;
     uploaded: number;
 }
+
+export interface SyncRunRecord {
+    collapsedCount: number;
+    detailsPruned: boolean;
+    durationMs: number;
+    events: SyncLogEvent[];
+    finishedAt: number;
+    firstCollapsedAt?: number;
+    id: string;
+    omittedEvents: number;
+    startedAt: number;
+    status: SyncRunStatus;
+    summary: SyncRunSummary;
+    trigger: SyncRunTrigger;
+}
+
+export type SyncRunStatus = "failed" | "partial" | "success";
+
+export interface SyncRunSummary {
+    conflictsIdentical: number;
+    conflictsKeepBoth: number;
+    conflictsNewestWins: number;
+    conflictsResolved: number;
+    deletedLocal: number;
+    deletedLocalDirs: number;
+    deletedRemote: number;
+    deletedRemoteDirs: number;
+    dirsCreatedLocal: number;
+    dirsCreatedRemote: number;
+    downloaded: number;
+    errors: number;
+    uploaded: number;
+    warnings: number;
+}
+
+export type SyncRunTrigger = "auto" | "manual";
 
 export interface SyncStateData {
     records: Record<string, SyncStateRecord>;
@@ -78,6 +163,7 @@ export interface VaultDavSettings {
     conflictStrategy: ConflictStrategy;
     remoteBaseDir: string;
     syncInterval: number;
+    syncLogRetentionDays: number;
     url: string;
     username: string;
 }

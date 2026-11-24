@@ -1,4 +1,9 @@
-import { Plugin, requireApiVersion, type SecretStorage } from "obsidian";
+import {
+    Plugin,
+    requireApiVersion,
+    type SecretStorage,
+    type WorkspaceLeaf
+} from "obsidian";
 import { log, redactSensitiveText } from "./log";
 import {
     DEFAULT_APP_PASSWORD_SECRET_ID,
@@ -13,31 +18,60 @@ import {
     sanitizeSecretId,
     sanitizeServerUrl,
     sanitizeSyncInterval,
+    sanitizeSyncLogRetentionDays,
     sanitizeUsername
 } from "./settings";
 import { SyncEngine } from "./sync/engine";
+import { createEmptyRunSummary, SyncHistoryStore } from "./sync/history";
 import { SyncStateStore } from "./sync/state";
 import type {
     ConflictStrategy,
     ProgressReporter,
     SyncResult,
+    SyncRunRecord,
+    SyncRunSummary,
+    SyncRunTrigger,
     VaultDavSettings,
     WebDavClientConfig
 } from "./types";
+import { SYNC_LOG_VIEW_TYPE, SyncLogView } from "./ui/sync_log_view";
 import { util } from "./utilities";
 import { WebDavClient } from "./webdav/client";
 
 const MAX_MIGRATION_SECRET_ATTEMPTS: number = 1000;
 
+function createFallbackSummary(result: SyncResult): SyncRunSummary {
+    if (result.summary !== undefined) {
+        return { ...result.summary };
+    }
+    const summary: SyncRunSummary = createEmptyRunSummary();
+    summary.conflictsResolved = result.conflictsResolved;
+    summary.deletedLocal = result.deletedLocal;
+    summary.deletedRemote = result.deletedRemote;
+    summary.downloaded = result.downloaded;
+    summary.errors = result.errors.length;
+    summary.uploaded = result.uploaded;
+    return summary;
+}
+
 export default class VaultDavPlugin extends Plugin implements ProgressReporter {
     private activeSyncInterval: number = 0;
+    private historyStore: SyncHistoryStore | null = null;
     public isSyncing: boolean = false;
     private isUnloaded: boolean = false;
+    private runIdSequence: number = 0;
     private saveSettingsPromise: Promise<void> = Promise.resolve();
     public settings: VaultDavSettings = { ...DEFAULT_SETTINGS };
     private stateStore: SyncStateStore | null = null;
     private statusBarItem: HTMLElement | null = null;
     private syncIntervalId: number | null = null;
+
+    public async clearSyncHistory(): Promise<void> {
+        const store: SyncHistoryStore = this.getHistoryStore();
+        await store.clear();
+        this.reportProgress("");
+        this.refreshSyncLogViews();
+    }
 
     public configureAutoSync(): void {
         if (this.isUnloaded) {
@@ -65,10 +99,19 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
         if (targetMinutes > 0) {
             const intervalMs: number = targetMinutes * 60 * 1000;
             const id: number = window.setInterval(() => {
-                void this.triggerSync();
+                void this.triggerSync("auto");
             }, intervalMs);
             this.syncIntervalId = this.registerInterval(id);
         }
+    }
+
+    private createRunId(timestamp: number): string {
+        this.runIdSequence += 1;
+        const safeTimestamp: number =
+            Number.isFinite(timestamp) && timestamp > 0
+                ? Math.floor(timestamp)
+                : 0;
+        return `${safeTimestamp}-${this.runIdSequence}`;
     }
 
     public getAppPassword(): string {
@@ -92,6 +135,18 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
             log.warn("Failed to read app password from secret storage:", err);
             return "";
         }
+    }
+
+    private getHistoryStore(): SyncHistoryStore {
+        if (this.historyStore === null) {
+            const configDir: string = this.app.vault.configDir;
+            this.historyStore = new SyncHistoryStore(
+                this.app.vault.adapter,
+                util.getSyncHistoryFilePath(configDir),
+                configDir
+            );
+        }
+        return this.historyStore;
     }
 
     private getResolvedClientConfig(
@@ -146,6 +201,10 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
         return storage;
     }
 
+    public getSyncHistoryRuns(): SyncRunRecord[] {
+        return this.historyStore !== null ? this.historyStore.getRuns() : [];
+    }
+
     public hasSecretStorage(): boolean {
         return this.getSecretStorage() !== null;
     }
@@ -186,6 +245,9 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
                 ? sanitizeRemoteBaseDir(record.remoteBaseDir, configDir)
                 : DEFAULT_SETTINGS.remoteBaseDir;
         const syncInterval: number = sanitizeSyncInterval(record.syncInterval);
+        const syncLogRetentionDays: number = sanitizeSyncLogRetentionDays(
+            record.syncLogRetentionDays
+        );
         const rawUrl: string = typeof record.url === "string" ? record.url : "";
         const hadEmbeddedUrlCredentials: boolean =
             rawUrl !== "" && hasEmbeddedUrlCredentials(rawUrl);
@@ -227,6 +289,7 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
             conflictStrategy,
             remoteBaseDir,
             syncInterval,
+            syncLogRetentionDays,
             url,
             username
         };
@@ -240,6 +303,17 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
                     err
                 );
             }
+        }
+    }
+
+    public async loadSyncHistory(): Promise<SyncRunRecord[]> {
+        try {
+            const store: SyncHistoryStore = this.getHistoryStore();
+            const data = await store.load(this.settings.syncLogRetentionDays);
+            return data.runs;
+        } catch (err: unknown) {
+            log.warn("Failed to load sync history:", err);
+            return [];
         }
     }
 
@@ -304,15 +378,34 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
             util.getSyncStateFilePath(configDir),
             configDir
         );
+        this.historyStore = new SyncHistoryStore(
+            this.app.vault.adapter,
+            util.getSyncHistoryFilePath(configDir),
+            configDir
+        );
         this.statusBarItem = this.addStatusBarItem() ?? null;
+        if (this.statusBarItem !== null) {
+            this.registerDomEvent(this.statusBarItem, "click", (): void => {
+                void this.openSyncLogView();
+            });
+        }
+
+        this.registerView(
+            SYNC_LOG_VIEW_TYPE,
+            (leaf: WorkspaceLeaf): SyncLogView => new SyncLogView(leaf, this)
+        );
 
         this.addRibbonIcon("refresh-cw", "Synchronize with Nextcloud", () => {
-            void this.triggerSync();
+            void this.triggerSync("manual");
+        });
+
+        this.addRibbonIcon("history", "Open sync log", () => {
+            void this.openSyncLogView();
         });
 
         this.addCommand({
             callback: () => {
-                void this.triggerSync();
+                void this.triggerSync("manual");
             },
             id: "sync-now",
             name: "Synchronize now"
@@ -324,6 +417,14 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
             },
             id: "test-connection",
             name: "Test Nextcloud WebDAV connection"
+        });
+
+        this.addCommand({
+            callback: () => {
+                void this.openSyncLogView();
+            },
+            id: "open-sync-log",
+            name: "Open sync log"
         });
 
         this.addSettingTab(new VaultDavSettingTab(this.app, this));
@@ -341,6 +442,39 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
         this.statusBarItem = null;
     }
 
+    public async openSyncLogView(): Promise<void> {
+        if (
+            this.app.workspace === undefined ||
+            typeof this.app.workspace.getLeavesOfType !== "function"
+        ) {
+            return;
+        }
+        const existingLeaves: WorkspaceLeaf[] =
+            this.app.workspace.getLeavesOfType(SYNC_LOG_VIEW_TYPE);
+        let leaf: WorkspaceLeaf | null = existingLeaves[0] ?? null;
+        if (leaf === null) {
+            const rightLeaf: WorkspaceLeaf | null =
+                typeof this.app.workspace.getRightLeaf === "function"
+                    ? this.app.workspace.getRightLeaf(false)
+                    : null;
+            leaf =
+                rightLeaf ??
+                (typeof this.app.workspace.getLeaf === "function"
+                    ? this.app.workspace.getLeaf(true)
+                    : null);
+            if (leaf === null) {
+                return;
+            }
+            await leaf.setViewState({
+                active: true,
+                type: SYNC_LOG_VIEW_TYPE
+            });
+        }
+        if (typeof this.app.workspace.revealLeaf === "function") {
+            await this.app.workspace.revealLeaf(leaf);
+        }
+    }
+
     private persistSettingsData(): Promise<void> {
         const snapshot: VaultDavSettings = {
             appPasswordSecret: sanitizeSecretId(this.settings.appPasswordSecret),
@@ -349,6 +483,7 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
             conflictStrategy: this.settings.conflictStrategy,
             remoteBaseDir: this.settings.remoteBaseDir,
             syncInterval: this.settings.syncInterval,
+            syncLogRetentionDays: this.settings.syncLogRetentionDays,
             url: sanitizeServerUrl(this.settings.url),
             username: this.settings.username
         };
@@ -363,10 +498,41 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
         return nextPromise;
     }
 
+    private async recordSyncRunSafely(run: SyncRunRecord): Promise<void> {
+        try {
+            const store: SyncHistoryStore = this.getHistoryStore();
+            await store.recordRun(
+                run,
+                this.settings.syncLogRetentionDays,
+                run.finishedAt
+            );
+        } catch (err: unknown) {
+            log.warn("Failed to save sync history entry:", err);
+        }
+    }
+
+    public refreshSyncLogViews(): void {
+        if (
+            this.app.workspace === undefined ||
+            typeof this.app.workspace.getLeavesOfType !== "function"
+        ) {
+            return;
+        }
+        const leaves: WorkspaceLeaf[] =
+            this.app.workspace.getLeavesOfType(SYNC_LOG_VIEW_TYPE);
+        for (const leaf of leaves) {
+            if (leaf.view instanceof SyncLogView) {
+                leaf.view.refresh();
+            }
+        }
+    }
+
     public reportProgress(message: string): void {
         if (this.statusBarItem === null || this.statusBarItem === undefined) {
             return;
         }
+        this.statusBarItem.classList.remove("vaultdav-status-error");
+        this.statusBarItem.removeAttribute("title");
         const safeText: string =
             message === "" ? "" : redactSensitiveText(message);
         if (typeof this.statusBarItem.setText === "function") {
@@ -426,6 +592,20 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
         this.configureAutoSync();
     }
 
+    private setStatusBarError(message: string): void {
+        if (this.statusBarItem === null || this.statusBarItem === undefined) {
+            return;
+        }
+        const safeText: string = redactSensitiveText(message);
+        if (typeof this.statusBarItem.setText === "function") {
+            this.statusBarItem.setText(safeText);
+        } else {
+            this.statusBarItem.textContent = safeText;
+        }
+        this.statusBarItem.classList.add("vaultdav-status-error");
+        this.statusBarItem.setAttribute("title", "Open sync log");
+    }
+
     public async testConnection(): Promise<boolean> {
         if (!this.hasSecretStorage()) {
             log.notify(
@@ -473,7 +653,9 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
         }
     }
 
-    public async triggerSync(): Promise<SyncResult | null> {
+    public async triggerSync(
+        trigger: SyncRunTrigger = "manual"
+    ): Promise<SyncResult | null> {
         if (this.isSyncing) {
             log.notify("Synchronization is already in progress.");
             return null;
@@ -501,7 +683,10 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
             return null;
         }
 
+        const startedAt: number = Date.now();
+        let hasErrorStatus: boolean = false;
         this.isSyncing = true;
+        this.refreshSyncLogViews();
         try {
             const resolvedSettings: VaultDavSettings = this.getResolvedSettings();
             const clientConfig: WebDavClientConfig =
@@ -529,7 +714,30 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
 
             log.notify("Starting synchronization...");
             const result: SyncResult = await engine.runSync();
+            const finishedAt: number = Date.now();
+            const runSummary: SyncRunSummary = createFallbackSummary(result);
+            const runRecord: SyncRunRecord = {
+                collapsedCount: 1,
+                detailsPruned: false,
+                durationMs: Math.max(0, finishedAt - startedAt),
+                events: Array.isArray(result.events) ? result.events : [],
+                finishedAt,
+                id: this.createRunId(finishedAt),
+                omittedEvents: 0,
+                startedAt,
+                status: result.errors.length > 0 ? "partial" : "success",
+                summary: runSummary,
+                trigger
+            };
+            await this.recordSyncRunSafely(runRecord);
+
             if (result.errors.length > 0) {
+                hasErrorStatus = true;
+                const errorStatusText: string =
+                    result.errors.length === 1
+                        ? "VaultDAV: 1 sync error"
+                        : `VaultDAV: ${result.errors.length} sync errors`;
+                this.setStatusBarError(errorStatusText);
                 log.notify(
                     `Sync completed with ${result.errors.length} error(s). Uploaded ${result.uploaded}, downloaded ${result.downloaded}.`
                 );
@@ -540,13 +748,40 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
             }
             return result;
         } catch (err: unknown) {
+            const finishedAt: number = Date.now();
             const msg: string = err instanceof Error ? err.message : String(err);
+            const failedSummary: SyncRunSummary = createEmptyRunSummary();
+            failedSummary.errors = 1;
+            const failedRun: SyncRunRecord = {
+                collapsedCount: 1,
+                detailsPruned: false,
+                durationMs: Math.max(0, finishedAt - startedAt),
+                events: [
+                    {
+                        kind: "error",
+                        message: redactSensitiveText(msg)
+                    }
+                ],
+                finishedAt,
+                id: this.createRunId(finishedAt),
+                omittedEvents: 0,
+                startedAt,
+                status: "failed",
+                summary: failedSummary,
+                trigger
+            };
+            await this.recordSyncRunSafely(failedRun);
+            hasErrorStatus = true;
+            this.setStatusBarError("VaultDAV: sync failed");
             log.error("Synchronization failed:", err);
             log.notify(`Sync failed: ${msg}`);
             return null;
         } finally {
-            this.reportProgress("");
+            if (!hasErrorStatus) {
+                this.reportProgress("");
+            }
             this.isSyncing = false;
+            this.refreshSyncLogViews();
         }
     }
 }

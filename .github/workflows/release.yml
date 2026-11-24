@@ -148,6 +148,7 @@ jobs:
         run: |
           test -s main.js
           test -s manifest.json
+          test -s styles.css
           test -s versions.json
           test -s README.md
           test -s LICENSE
@@ -158,6 +159,7 @@ jobs:
           subject-path: |
             main.js
             manifest.json
+            styles.css
 
       - name: Extract changelog notes
         env:
@@ -187,11 +189,11 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           if [ -s release-notes.md ]; then
-            gh release create "$RELEASE_TAG" main.js manifest.json \
+            gh release create "$RELEASE_TAG" main.js manifest.json styles.css \
               --title "$RELEASE_TAG" \
               --notes-file release-notes.md
           else
-            gh release create "$RELEASE_TAG" main.js manifest.json \
+            gh release create "$RELEASE_TAG" main.js manifest.json styles.css \
               --title "$RELEASE_TAG" \
               --generate-notes
           fi
