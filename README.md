@@ -1,67 +1,65 @@
 # VaultDAV
 
-Synchronize Obsidian vaults bidirectionally with Nextcloud via WebDAV.
+Bidirectional Nextcloud WebDAV sync for Obsidian on Desktop, Android, and iOS. Requires Obsidian 1.13.2 or newer.
 
 ## Installation
 
-### Manual Installation
+### Manual
 
 1. Download `main.js`, `manifest.json`, and `styles.css` from the latest [GitHub Release](https://github.com/akjir/vaultdav/releases/latest).
-2. Create the folder `<vault>/<config-dir>/plugins/vaultdav/` (where `<config-dir>` is your Obsidian configuration folder).
-3. Copy `main.js`, `manifest.json`, and `styles.css` into that folder.
-4. Reload Obsidian and enable **VaultDAV** under **Settings > Community plugins**.
+2. Copy the files into `<vault>/<config-dir>/plugins/vaultdav/`.
+3. Reload Obsidian and enable **VaultDAV** under **Settings > Community plugins**.
 
-### Beta Installation (BRAT)
+### BRAT
 
 1. Install the [BRAT](https://github.com/TfTHacker/obsidian42-brat) community plugin.
 2. Add `akjir/vaultdav` in BRAT settings.
 3. Enable **VaultDAV** under **Settings > Community plugins**.
 
-## Nextcloud Setup
+## Setup
 
-1. Open Nextcloud and go to **Settings > Security > Devices & sessions**.
-2. Enter a device name (for example, `Obsidian VaultDAV`) and click **Create new app password**.
-3. Copy the generated App Password.
-4. Enter your Nextcloud host or URL (`example.com`, `https://<domain>`, or `http://<host>`) in **Server URL**, your account name in **Username**, select or create a secret containing the generated password in **App password** (stored in Obsidian SecretStorage), and enter the target folder in **Remote base directory**. If you omit the scheme, VaultDAV assumes `https://` automatically (only `http://` and `https://` are allowed). Check **Resolved WebDAV URL** in Settings to verify the full endpoint:
-   `https://<domain>/remote.php/dav/files/<user>/<remote-base-dir>/`
+1. In Nextcloud, go to **Settings > Security > Devices & sessions**, enter a device name, and click **Create new app password**.
+2. In Obsidian, open **Settings > VaultDAV** and set **Server URL**, **Username**, **App password** (via Obsidian SecretStorage), and optionally **Remote base directory** (defaults to the vault name).
+3. Check **Resolved WebDAV URL** (`https://<domain>/remote.php/dav/files/<user>/<remote-base-dir>/`) and click **Test connection**.
 
 ## Settings
 
-| Setting | Property (`VaultDavSettings`) | Description |
-| :--- | :--- | :--- |
-| Server URL | `url` | Nextcloud host or WebDAV URL (uses `https://` if omitted; only `http://` and `https://` allowed). |
-| Username | `username` | Nextcloud account username. |
-| App password | `appPasswordSecret` | Secret reference ID in Obsidian SecretStorage for your Nextcloud app password (never persisted in plaintext in `data.json`). |
-| Remote base directory | `remoteBaseDir` | Target remote folder path inside the Nextcloud user files root. |
-| Sync interval | `syncInterval` | Automatic synchronization interval in minutes (`0` to `10080`, `0` to disable). |
-| Conflict strategy | `conflictStrategy` | Resolution mode for concurrent edits (`keep_both` or `newest_wins`). |
-| Chunking threshold | `chunkingThresholdMB` | File size threshold in MB (`1` to `512`, default `90`) above which uploads use Nextcloud OC-Chunked transfers. |
-| Chunk size | `chunkSizeMB` | Individual chunk size in MB (`1` to `512`, default `10`) for chunked uploads and parallel HTTP `Range` downloads. |
-| Sync log retention | `syncLogRetentionDays` | Days to retain local sync history (`1` to `365`, default `30`). |
+| Setting | Description |
+| :--- | :--- |
+| Server URL | Nextcloud host or WebDAV URL. Uses `https://` if omitted; only `http://` and `https://` are allowed. |
+| Username | Nextcloud account username. |
+| App password | Obsidian SecretStorage entry for your Nextcloud app password. |
+| Remote base directory | Target folder inside your Nextcloud files root. Defaults to the vault name. |
+| Sync interval | Auto-sync interval in minutes (`0` to `10080`; `0` disables auto-sync). |
+| Conflict strategy | Concurrent edit handling: `Keep both (create conflict copy)` (default) or `Newest wins`. |
+| Chunking threshold | File size in MB (`1` to `512`, default `90`) above which uploads use Nextcloud chunked transfer. |
+| Chunk size | Chunk size in MB (`1` to `512`, default `10`) for chunked uploads and parallel range downloads. |
+| Sync log retention | Days to keep local sync history (`1` to `365`, default `30`). |
 
 ## Commands
 
-| Command ID | Name | Description |
-| :--- | :--- | :--- |
-| `vaultdav:sync-now` | Synchronize now | Execute a bidirectional synchronization cycle immediately. |
-| `vaultdav:test-connection` | Test Nextcloud WebDAV connection | Verify Nextcloud credentials and remote base directory access. |
-| `vaultdav:open-sync-log` | Open sync log | Open the Sync log pane with run summaries, detailed transfer events, and active conflict copies. |
+- **Synchronize now**: Run a sync immediately (also available via the **Synchronize with Nextcloud** ribbon icon).
+- **Test Nextcloud WebDAV connection**: Verify credentials and remote folder access.
+- **Open sync log**: Open the sync log pane with run history, transfer byte totals, file events, active conflict copies, and Markdown export (also available via the ribbon icon).
+
+On desktop, the status bar displays live transfer progress and stays clickable when a sync finishes with errors or fails.
 
 ## Sync Behavior
 
-- Transfers files as binary payloads (`ArrayBuffer`) over Obsidian `requestUrl`, using Nextcloud OC-Chunked uploads (`MKCOL` / `PUT` / `MOVE`) for files exceeding `chunkingThresholdMB` and parallel HTTP `Range` downloads (`Uint8Array.set()`) for remote files larger than 5 MB.
-- Displays real-time transfer and chunk progress in the Obsidian status bar during synchronization, and shows a clickable error indicator when a sync finishes with errors or fails.
-- Records per-file sync activity (uploads, downloads, conflicts with copy paths and resolution modes, deletions, folder creations, warnings, and redacted errors) in a device-local history file (`<config-dir>/plugins/vaultdav/sync-history.json`) with hybrid tiered retention (consecutive no-op folding, 500-event priority cap per run, configurable day TTL, 100-run critical-preserving cap, and a 1 MB size ceiling).
-- Tracks local and remote modification times and ETags to detect creations, modifications, and deletions (tombstones).
-- Synchronizes vault content only (notes, attachments, and regular folders). Excludes the entire Obsidian configuration directory (`<config-dir>`, respecting custom `Vault#configDir` names), all hidden dot-files and dot-folders (such as `.trash/`, `.git/`, `.svn/`, `.DS_Store`, and secondary config directories), `node_modules/`, `Thumbs.db`, and `desktop.ini`.
+- Syncs vault content only (notes, attachments, and regular folders). Excludes `<config-dir>`, all hidden dot-files and dot-folders (for example `.trash/`, `.git/`, `.svn/`, `.DS_Store`), `node_modules/`, `Thumbs.db`, and `desktop.ini`.
+- Tracks modification times and ETags locally to sync additions, edits, and deletions. Changing the server, username, or remote base directory resets local sync state automatically so existing files are not deleted.
+- Transfers files as binary data, using Nextcloud chunked uploads above the configured threshold and parallel range downloads for files larger than 5 MB.
+- Resolves identical concurrent edits without creating copies. For differing edits, `Keep both` creates a `.conflict-*` copy and `Newest wins` keeps the newer file.
+- Stores sync state and history per device under `<config-dir>/plugins/vaultdav/` (`sync-state.json` and `sync-history.json`). History is pruned automatically by age, run count, and a 1 MB size limit.
 
 ## Compatibility & Privacy
 
-- **Desktop & Mobile:** Supports Desktop, Android, and iOS (`isDesktopOnly: false`) on Obsidian 1.13.2 or newer with zero runtime dependencies.
-- **iOS TLS requirement:** Apple iOS blocks self-signed TLS certificates in Obsidian. Use a valid CA-signed HTTPS certificate (for example, Let's Encrypt) on your Nextcloud server when syncing from iOS.
-- **Network & privacy:** VaultDAV communicates only with the Nextcloud server that you configure (`https://` by default, or `http://` when explicitly specified). It sends no telemetry or requests to third-party servers. Your Nextcloud app password is stored in Obsidian SecretStorage (local to each device), while `<config-dir>/plugins/vaultdav/data.json` stores only the secret reference ID (`appPasswordSecret`) and remains excluded from synchronization. Legacy plaintext `appPassword` entries in `data.json` are migrated automatically into SecretStorage and removed from `data.json` on load.
+- Supports Desktop, Android, and iOS on Obsidian 1.13.2 or newer with zero runtime dependencies.
+- Apple iOS blocks self-signed TLS certificates in Obsidian. Use a valid CA-signed HTTPS certificate (for example, Let's Encrypt) when syncing from iOS.
+- Communicates only with the configured Nextcloud server (`https://` by default, or `http://` when explicitly specified). Sends no telemetry or third-party requests.
+- Stores the app password per device in Obsidian SecretStorage, never in plaintext in `<config-dir>/plugins/vaultdav/data.json`. Legacy plaintext passwords migrate automatically on load.
 
-## Development & Build
+## Development
 
 ```bash
 npm install
@@ -71,10 +69,8 @@ npm run build
 npm run dev
 ```
 
-## Acknowledgments
-
-VaultDAV's synchronization algorithm and WebDAV quirk handling are inspired by [remotely-save](https://github.com/remotely-save/remotely-save).
-
 ## License
 
-VaultDAV is licensed under the GNU General Public License v3.0. See [LICENSE](LICENSE) for full terms.
+GNU General Public License v3.0. See [LICENSE](LICENSE).
+
+Sync logic and WebDAV quirk handling are inspired by [remotely-save](https://github.com/remotely-save/remotely-save).
