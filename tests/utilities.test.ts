@@ -305,7 +305,19 @@ describe("utilities and logging", () => {
         );
     });
 
-    it("excludes sync state, plugin files, case variations, trash, workspace files, traversal segments, and null-byte paths while allowing .github/.gitlab", () => {
+    it("excludes Obsidian config directories, hidden dot-paths, ignored system/tool segments, traversal segments, and null-byte paths while allowing regular vault content", () => {
+        expect(util.isExcludedPath(".obsidian")).toBe(true);
+        expect(util.isExcludedPath(".obsidian", ".obsidian")).toBe(true);
+        expect(util.isExcludedPath(".obsidian/app.json")).toBe(true);
+        expect(util.isExcludedPath(".obsidian/app.json", ".obsidian")).toBe(true);
+        expect(util.isExcludedPath(".obsidian/appearance.json", ".obsidian")).toBe(true);
+        expect(util.isExcludedPath(".obsidian/themes/Minimal/theme.css", ".obsidian")).toBe(
+            true
+        );
+        expect(util.isExcludedPath(".obsidian/snippets/custom.css", ".obsidian")).toBe(true);
+        expect(util.isExcludedPath(".obsidian/plugins/other/main.js", ".obsidian")).toBe(
+            true
+        );
         expect(util.isExcludedPath(".obsidian/plugins/vaultdav/sync-state.json")).toBe(true);
         expect(util.isExcludedPath(".obsidian/plugins/vaultdav/data.json")).toBe(true);
         expect(util.isExcludedPath(".obsidian/plugins/VaultDAV/data.json")).toBe(true);
@@ -317,11 +329,17 @@ describe("utilities and logging", () => {
         expect(util.isExcludedPath(".obsidian/plugins/other/sync-state.json")).toBe(true);
         expect(util.isExcludedPath(".obsidian/workspace.json")).toBe(true);
         expect(util.isExcludedPath(".OBSIDIAN/workspace.json")).toBe(true);
+        expect(util.isExcludedPath(".OBSIDIAN/app.json", ".obsidian")).toBe(true);
         expect(util.isExcludedPath(".obsidian/workspace-mobile.json")).toBe(true);
         expect(util.isExcludedPath(".obsidian-mobile/plugins/vaultdav/data.json")).toBe(
             true
         );
         expect(util.isExcludedPath(".obsidian-mobile/workspace.json")).toBe(true);
+        expect(util.isExcludedPath(".obsidian-mobile/app.json", ".obsidian")).toBe(true);
+
+        // Custom non-dot vault.configDir excludes the entire directory with strict / boundary
+        expect(util.isExcludedPath("custom-config", "custom-config")).toBe(true);
+        expect(util.isExcludedPath("CUSTOM-CONFIG/app.json", "custom-config")).toBe(true);
         expect(
             util.isExcludedPath("custom-config/plugins/vaultdav/data.json", "custom-config")
         ).toBe(true);
@@ -336,23 +354,48 @@ describe("utilities and logging", () => {
         ).toBe(true);
         expect(
             util.isExcludedPath("custom-config/app.json", "custom-config")
+        ).toBe(true);
+        expect(
+            util.isExcludedPath("custom-config/themes/Dark/theme.css", "custom-config")
+        ).toBe(true);
+        expect(
+            util.isExcludedPath("custom-config-notes/Daily.md", "custom-config")
         ).toBe(false);
+        expect(
+            util.isExcludedPath("Notes/custom-config/Daily.md", "custom-config")
+        ).toBe(false);
+
+        // Hidden dotfiles/dotfolders and non-dot ignored system/tool segments
         expect(util.isExcludedPath(".trash/note.md")).toBe(true);
         expect(util.isExcludedPath(".TRASH/note.md")).toBe(true);
         expect(util.isExcludedPath("sub/.DS_Store")).toBe(true);
         expect(util.isExcludedPath(".git/config")).toBe(true);
         expect(util.isExcludedPath(".GIT/config")).toBe(true);
+        expect(util.isExcludedPath(".svn/entries")).toBe(true);
+        expect(util.isExcludedPath(".github/workflows/ci.yml")).toBe(true);
+        expect(util.isExcludedPath(".gitlab/issue_templates/bug.md")).toBe(true);
+        expect(util.isExcludedPath(".smart-env/embeddings.json")).toBe(true);
+        expect(util.isExcludedPath("Notes/.hidden.md")).toBe(true);
+        expect(util.isExcludedPath("node_modules/pkg/index.js")).toBe(true);
+        expect(util.isExcludedPath("sub/Thumbs.db")).toBe(true);
+        expect(util.isExcludedPath("desktop.ini")).toBe(true);
         expect(util.isExcludedPath("../outside.md")).toBe(true);
         expect(util.isExcludedPath("Notes/../outside.md")).toBe(true);
         expect(util.isExcludedPath("./note.md")).toBe(true);
         expect(util.isExcludedPath("note\0.md")).toBe(true);
 
-        expect(util.isExcludedPath(".github/workflows/ci.yml")).toBe(false);
-        expect(util.isExcludedPath(".gitlab/issue_templates/bug.md")).toBe(false);
-        expect(util.isExcludedPath(".obsidian/app.json")).toBe(false);
+        // Regular vault notes, attachments, and folders (including internal dots) remain synced
         expect(util.isExcludedPath("Notes/Daily.md")).toBe(false);
+        expect(util.isExcludedPath("Notes/Daily.md", ".obsidian")).toBe(false);
+        expect(util.isExcludedPath("Assets/photo.png", ".obsidian")).toBe(false);
+        expect(util.isExcludedPath("Archive/2026.11/v1.2.3-notes.md", ".obsidian")).toBe(
+            false
+        );
+        expect(
+            util.isExcludedPath("Notes/Daily.conflict-20261124-120000.md", ".obsidian")
+        ).toBe(false);
 
-        // Custom vault.configDir support (e.g. .obsidian-mobile)
+        // Custom dot vault.configDir support (e.g. .obsidian-mobile)
         expect(
             util.isExcludedPath(
                 ".obsidian-mobile/plugins/vaultdav/data.json",
@@ -382,7 +425,7 @@ describe("utilities and logging", () => {
                 ".obsidian-mobile/app.json",
                 ".obsidian-mobile"
             )
-        ).toBe(false);
+        ).toBe(true);
         expect(util.getSyncStateFilePath(".obsidian-mobile")).toBe(
             ".obsidian-mobile/plugins/vaultdav/sync-state.json"
         );

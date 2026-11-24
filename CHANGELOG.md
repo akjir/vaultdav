@@ -10,7 +10,11 @@ All notable changes to this project will be documented in this file.
 - Capture per-file uploads, downloads, conflict resolution details (`keep_both`, `newest_wins_local`, `newest_wins_remote`, `identical`), deletions, folder creations, plan/walk warnings, and redacted errors on every sync run.
 - Show a clickable Desktop status bar error indicator when a sync completes with errors or fails.
 
+### Changed
+- Synchronize vault content only (notes, attachments, and regular folders) by excluding the entire Obsidian configuration directory (`<config-dir>`, including custom `Vault#configDir` paths) and all hidden dot-files and dot-folders without deleting existing local or remote configuration files.
+
 ### Fixed
+- Harden `SyncStateStore` constructor path validation with a strict `<config-dir>/plugins/vaultdav/sync-state.json` allowlist matching `SyncHistoryStore`.
 - Harden `SyncHistoryStore` with a strict allowlist for history file paths, unified async serialization across `load()`, `recordRun()`, `clear()`, and `save()`, O(N) run/event retention with incremental UTF-8 byte tracking, `stat()` pre-read size checks, safe integer clamping, and `Map`-based event priority lookup.
 - Replace the backtracking URL userinfo redaction regex in `redactSensitiveText()` with a linear-time scanner and guard truncated authority prefixes in `sanitizeEventMessage()`.
 

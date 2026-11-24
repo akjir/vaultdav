@@ -34,7 +34,7 @@
 - **File System:** Execute all local file operations via `app.vault.adapter` (`DataAdapter`) and `app.vault`.
 - **Authentication:** Use HTTP Basic Auth (`Authorization: Basic <base64>`) with Nextcloud username and an App Password retrieved on demand from Obsidian `SecretStorage` (`app.secretStorage`, never persisted in plaintext in `data.json`) against `https://<domain>/remote.php/dav/files/<user>/<remote-base-dir>/`.
 - **Concurrency & Locks:** Limit parallel WebDAV transfers (max 3-5 concurrent requests) to prevent Nextcloud rate limits and `423 Locked` (`Sabre\DAV\Exception\Locked`) errors.
-- **Exclusions:** Exclude the local sync state file, local sync history file, plugin data file, `<config-dir>/workspace*.json`, and `.trash/` from synchronization (using `Vault#configDir`, never hardcoding `.obsidian`) to prevent infinite sync loops.
+- **Exclusions:** Synchronize vault content only. Exclude the entire `<config-dir>` directory (using `Vault#configDir`, never hardcoding `.obsidian`), all hidden dot-files and dot-folders (for example `.trash/`, `.git/`, `.svn/`, `.DS_Store`), `node_modules/`, `Thumbs.db`, and `desktop.ini`.
 - **Zero Hot-Path Allocations:** Define static `Set`, `Map`, and `RegExp` instances at module top-level (`UPPER_SNAKE_CASE`), never inside functions called per-file or per-request.
 - **Strict Path Boundary & Traversal Safety:** Always verify `/` or end-of-string boundaries when stripping URL/path prefixes. Reject any path containing `.` or `..` segments.
 - **Defensive Numeric Guards:** Validate numeric inputs (`timestamp`, `mtime`, `size`, `concurrency`) with `Number.isFinite()` before arithmetic or `Date` construction.

@@ -53,7 +53,7 @@ Synchronize Obsidian vaults bidirectionally with Nextcloud via WebDAV.
 - Displays real-time transfer and chunk progress in the Obsidian status bar during synchronization, and shows a clickable error indicator when a sync finishes with errors or fails.
 - Records per-file sync activity (uploads, downloads, conflicts with copy paths and resolution modes, deletions, folder creations, warnings, and redacted errors) in a device-local history file (`<config-dir>/plugins/vaultdav/sync-history.json`) with hybrid tiered retention (consecutive no-op folding, 500-event priority cap per run, configurable day TTL, 100-run critical-preserving cap, and a 1 MB size ceiling).
 - Tracks local and remote modification times and ETags to detect creations, modifications, and deletions (tombstones).
-- Excludes the local sync state file (`<config-dir>/plugins/vaultdav/sync-state.json`), local sync history file (`<config-dir>/plugins/vaultdav/sync-history.json`), plugin configuration (`<config-dir>/plugins/vaultdav/data.json`), `<config-dir>/workspace*.json`, `.trash/`, `.git/`, `.svn/`, `node_modules/`, and OS metadata files (`.DS_Store`, `Thumbs.db`, `desktop.ini`), respecting custom `Vault#configDir` names to prevent sync loops.
+- Synchronizes vault content only (notes, attachments, and regular folders). Excludes the entire Obsidian configuration directory (`<config-dir>`, respecting custom `Vault#configDir` names), all hidden dot-files and dot-folders (such as `.trash/`, `.git/`, `.svn/`, `.DS_Store`, and secondary config directories), `node_modules/`, `Thumbs.db`, and `desktop.ini`.
 
 ## Compatibility & Privacy
 

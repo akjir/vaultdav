@@ -494,12 +494,13 @@ describe("SyncEngine delta calculation and execution", () => {
         expect(downloadedPaths).toEqual(["RemoteWins.md"]);
     });
 
-    it("excludes .trash and path traversal while syncing .github and guarding NaN timestamps and stats", async () => {
+    it("excludes .trash, hidden dot-folders, and path traversal while syncing vault notes and guarding NaN timestamps and stats", async () => {
         const plan: SyncPlan = buildSyncPlan(
             [
                 makeLocal(".trash/deleted.md", 1000, 10),
                 makeLocal("../outside.md", 1000, 10),
                 makeLocal(".github/workflows/ci.yml", 1000, 20),
+                makeLocal("Archive/2026.11/note.md", 1000, 20),
                 makeLocal("ConflictNaN.md", 1000, 15)
             ],
             [makeRemote("ConflictNaN.md", 2000, 25, "e-nan")],
@@ -511,7 +512,8 @@ describe("SyncEngine delta calculation and execution", () => {
         const paths: string[] = plan.actions.map((a: SyncAction) => a.path);
         expect(paths).not.toContain(".trash/deleted.md");
         expect(paths).not.toContain("../outside.md");
-        expect(paths).toContain(".github/workflows/ci.yml");
+        expect(paths).not.toContain(".github/workflows/ci.yml");
+        expect(paths).toContain("Archive/2026.11/note.md");
 
         const conflictAction: SyncAction | undefined = plan.actions.find(
             (a: SyncAction) => a.path === "ConflictNaN.md"
@@ -2686,6 +2688,176 @@ describe("SyncEngine delta calculation and execution", () => {
 
         warnSpy.mockRestore();
         errorSpy.mockRestore();
+    });
+
+    it("syncs vault content only, skips configDir and hidden dot-paths during walkLocal, and leaves previously tracked config files untouched on upgrade", async () => {
+        const t0: number = Date.UTC(2026, 10, 24, 18, 0, 0);
+        const customConfigDir: string = "custom-config";
+        const customStatePath: string = util.getSyncStateFilePath(customConfigDir);
+        const listedDirs: string[] = [];
+        const uploadedPaths: string[] = [];
+        const deletedLocalPaths: string[] = [];
+        const deletedRemotePaths: string[] = [];
+
+        const initialStateJson: string = JSON.stringify({
+            records: {
+                ".obsidian": {
+                    etag: "",
+                    isDirectory: true,
+                    lastSyncTime: t0,
+                    localMtime: t0,
+                    path: ".obsidian",
+                    remoteMtime: t0,
+                    size: 0
+                },
+                ".obsidian/app.json": {
+                    etag: "etag-obs-app",
+                    isDirectory: false,
+                    lastSyncTime: t0,
+                    localMtime: t0,
+                    path: ".obsidian/app.json",
+                    remoteMtime: t0,
+                    size: 40
+                },
+                "Notes/Existing.md": {
+                    etag: "etag-existing",
+                    isDirectory: false,
+                    lastSyncTime: t0,
+                    localMtime: t0,
+                    path: "Notes/Existing.md",
+                    remoteMtime: t0,
+                    size: 16
+                },
+                "custom-config/app.json": {
+                    etag: "etag-custom-app",
+                    isDirectory: false,
+                    lastSyncTime: t0,
+                    localMtime: t0,
+                    path: "custom-config/app.json",
+                    remoteMtime: t0,
+                    size: 40
+                }
+            },
+            version: 1
+        });
+        const textFiles: Map<string, string> = new Map<string, string>([
+            [customStatePath, initialStateJson]
+        ]);
+
+        const adapter: Partial<DataAdapter> = {
+            exists: async (p: string): Promise<boolean> => textFiles.has(p),
+            list: async (dir: string): Promise<ListedFiles> => {
+                listedDirs.push(dir);
+                if (dir === "") {
+                    return {
+                        files: [".hidden-root.md", "v1.2-root.md"],
+                        folders: [
+                            ".obsidian",
+                            ".obsidian-mobile",
+                            ".github",
+                            "custom-config",
+                            "custom-config-notes",
+                            "Notes"
+                        ]
+                    };
+                }
+                if (dir === "Notes") {
+                    return {
+                        files: ["Notes/Existing.md", "Notes/.hidden-note.md"],
+                        folders: []
+                    };
+                }
+                if (dir === "custom-config-notes") {
+                    return {
+                        files: ["custom-config-notes/Allowed.md"],
+                        folders: []
+                    };
+                }
+                throw new Error(`walkLocal must not descend into excluded directory: ${dir}`);
+            },
+            mkdir: async (): Promise<void> => undefined,
+            read: async (p: string): Promise<string> => textFiles.get(p) ?? "",
+            readBinary: async (): Promise<ArrayBuffer> => new Uint8Array([1, 2, 3, 4]).buffer,
+            remove: async (p: string): Promise<void> => {
+                deletedLocalPaths.push(p);
+            },
+            rmdir: async (p: string): Promise<void> => {
+                deletedLocalPaths.push(p);
+            },
+            stat: async (p: string): Promise<Stat | null> => {
+                if (p === "Notes" || p === "custom-config-notes") {
+                    return { ctime: t0, mtime: t0, size: 0, type: "folder" };
+                }
+                if (p === "Notes/Existing.md") {
+                    return { ctime: t0, mtime: t0, size: 16, type: "file" };
+                }
+                if (p === "v1.2-root.md" || p === "custom-config-notes/Allowed.md") {
+                    return { ctime: t0, mtime: t0, size: 4, type: "file" };
+                }
+                return null;
+            },
+            write: async (p: string, d: string): Promise<void> => {
+                textFiles.set(p, d);
+            }
+        };
+
+        const mockClient: Partial<WebDavClient> = {
+            createDirectory: async (): Promise<void> => undefined,
+            deleteItem: async (p: string): Promise<void> => {
+                deletedRemotePaths.push(p);
+            },
+            ensureRemoteBaseDir: async (): Promise<void> => undefined,
+            uploadFile: async (
+                p: string,
+                content: ArrayBuffer,
+                mtime: number
+            ): Promise<RemoteItem> => {
+                uploadedPaths.push(p);
+                return makeRemote(p, mtime, content.byteLength, `etag-${p}`);
+            },
+            walkRemote: async (): Promise<RemoteItem[]> => [
+                makeRemote("Notes", t0, 0, "", true),
+                makeRemote("Notes/Existing.md", t0, 16, "etag-existing", false),
+                makeRemote(".obsidian/app.json", t0, 40, "etag-obs-app", false),
+                makeRemote("custom-config/app.json", t0, 40, "etag-custom-app", false)
+            ]
+        };
+
+        const stateStore: SyncStateStore = new SyncStateStore(
+            adapter as DataAdapter,
+            customStatePath,
+            customConfigDir
+        );
+        const engine: SyncEngine = new SyncEngine(
+            { adapter: adapter as DataAdapter, configDir: customConfigDir } as Vault,
+            mockClient as WebDavClient,
+            stateStore,
+            {
+                appPasswordSecret: "vaultdav-app-password",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                syncLogRetentionDays: 30,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        const result: SyncResult = await engine.runSync();
+
+        expect(result.errors).toEqual([]);
+        expect(listedDirs.sort()).toEqual(["", "Notes", "custom-config-notes"]);
+        expect(uploadedPaths.sort()).toEqual([
+            "custom-config-notes/Allowed.md",
+            "v1.2-root.md"
+        ]);
+        expect(deletedLocalPaths).toEqual([]);
+        expect(deletedRemotePaths).toEqual([]);
+        expect(stateStore.getRecord(".obsidian/app.json")).toBeUndefined();
+        expect(stateStore.getRecord("custom-config/app.json")).toBeUndefined();
+        expect(stateStore.getRecord("Notes/Existing.md")?.etag).toBe("etag-existing");
     });
 });
 

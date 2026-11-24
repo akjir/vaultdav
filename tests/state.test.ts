@@ -348,7 +348,7 @@ describe("SyncStateStore", () => {
         expect(store.getRecord("Notes/Padded.md")?.etag).toBe("e1");
     });
 
-    it("rejects root, traversal, credential data.json, and non-excluded vault paths as stateFilePath in constructor", () => {
+    it("enforces strict stateFilePath allowlist rejecting root, traversal, config files, plugin code, .git, .trash, and vault paths in constructor", () => {
         const { adapter } = createMockAdapter();
 
         expect(() => new SyncStateStore(adapter, "")).toThrow(
@@ -374,9 +374,69 @@ describe("SyncStateStore", () => {
                     "  //.OBSIDIAN/plugins/other-plugin/DATA.JSON "
                 )
         ).toThrow(/Invalid sync state file path/);
+        expect(
+            () => new SyncStateStore(adapter, ".obsidian/app.json", ".obsidian")
+        ).toThrow(/Invalid sync state file path/);
+        expect(
+            () =>
+                new SyncStateStore(
+                    adapter,
+                    ".obsidian/workspace.json",
+                    ".obsidian"
+                )
+        ).toThrow(/Invalid sync state file path/);
+        expect(
+            () =>
+                new SyncStateStore(
+                    adapter,
+                    ".obsidian/plugins/vaultdav/main.js",
+                    ".obsidian"
+                )
+        ).toThrow(/Invalid sync state file path/);
+        expect(
+            () =>
+                new SyncStateStore(
+                    adapter,
+                    ".obsidian/plugins/other-plugin/sync-state.json",
+                    ".obsidian"
+                )
+        ).toThrow(/Invalid sync state file path/);
+        expect(
+            () => new SyncStateStore(adapter, ".git/config", ".obsidian")
+        ).toThrow(/Invalid sync state file path/);
+        expect(
+            () =>
+                new SyncStateStore(
+                    adapter,
+                    ".git/plugins/vaultdav/sync-state.json",
+                    ".git"
+                )
+        ).toThrow(/Invalid sync state file path/);
+        expect(
+            () =>
+                new SyncStateStore(
+                    adapter,
+                    ".git/plugins/vaultdav/sync-state.json"
+                )
+        ).toThrow(/Invalid sync state file path/);
+        expect(
+            () =>
+                new SyncStateStore(
+                    adapter,
+                    ".obsidian/plugins/vaultdav/sync-state.json",
+                    "../escape"
+                )
+        ).toThrow(/Invalid sync state file path/);
         expect(() => new SyncStateStore(adapter, "Notes/UserNote.md")).toThrow(
             /Invalid sync state file path/
         );
+        expect(
+            () =>
+                new SyncStateStore(
+                    adapter,
+                    ".obsidian/plugins/vaultdav/sync-state.json"
+                )
+        ).not.toThrow();
     });
 
     it("neutralizes interior null-byte ReDoS payloads in O(N) time and rejects oversized state files in load()", async () => {
@@ -573,11 +633,31 @@ describe("SyncStateStore", () => {
             remoteMtime: 1000,
             size: 12
         });
+        store.upsertRecord({
+            etag: "excluded-app",
+            isDirectory: false,
+            lastSyncTime: 1000,
+            localMtime: 1000,
+            path: "custom-config/app.json",
+            remoteMtime: 1000,
+            size: 12
+        });
+        store.upsertRecord({
+            etag: "excluded-hidden",
+            isDirectory: false,
+            lastSyncTime: 1000,
+            localMtime: 1000,
+            path: "Notes/.hidden.md",
+            remoteMtime: 1000,
+            size: 12
+        });
 
         await store.save();
         expect(files.has("custom-config/plugins/vaultdav/sync-state.json")).toBe(true);
         expect(store.getRecord("Notes/Custom.md")?.etag).toBe("custom-etag");
         expect(store.getRecord("custom-config/workspace.json")).toBeUndefined();
+        expect(store.getRecord("custom-config/app.json")).toBeUndefined();
+        expect(store.getRecord("Notes/.hidden.md")).toBeUndefined();
         expect(
             () =>
                 new SyncStateStore(

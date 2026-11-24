@@ -18,10 +18,6 @@ const FORBIDDEN_OBJECT_KEYS: ReadonlySet<string> = new Set<string>([
 ]);
 const HTTPS_PROTOCOL_REGEX: RegExp = /^https:\/\//i;
 const IGNORED_SEGMENTS_LOWER: ReadonlySet<string> = new Set<string>([
-    ".ds_store",
-    ".git",
-    ".svn",
-    ".trash",
     "desktop.ini",
     "node_modules",
     "thumbs.db"
@@ -33,14 +29,10 @@ const NEXTCLOUD_ALT_ENDPOINTS_LOWER: ReadonlySet<string> = new Set<string>([
     "public.php",
     "status.php"
 ]);
-const PLUGIN_DIR_RELATIVE_PATH: string = "plugins/vaultdav";
-const PLUGIN_DIR_RELATIVE_PREFIX: string = "plugins/vaultdav/";
-const PLUGINS_RELATIVE_PREFIX: string = "plugins/";
 const QUERY_OR_HASH_REGEX: RegExp = /[?#]/;
 const TRAILING_DOT_OR_SPACE_REGEX: RegExp = /[. ]$/;
 const TRAILING_SLASHES_REGEX: RegExp = /\/+$/;
 const URI_SCHEME_REGEX: RegExp = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
-const WORKSPACE_FILE_REGEX: RegExp = /^workspace[^/]*\.json$/i;
 
 export function areArrayBuffersEqual(a: ArrayBuffer, b: ArrayBuffer): boolean {
     if (a === b) {
@@ -503,27 +495,6 @@ export function hasControlChars(value: string): boolean {
     return false;
 }
 
-function isExcludedConfigRelativePath(relativeLower: string): boolean {
-    if (
-        relativeLower === SYNC_STATE_RELATIVE_PATH ||
-        relativeLower === SYNC_HISTORY_RELATIVE_PATH ||
-        relativeLower === PLUGIN_DATA_RELATIVE_PATH ||
-        relativeLower === PLUGIN_DIR_RELATIVE_PATH ||
-        relativeLower.startsWith(PLUGIN_DIR_RELATIVE_PREFIX)
-    ) {
-        return true;
-    }
-    if (
-        relativeLower.startsWith(PLUGINS_RELATIVE_PREFIX) &&
-        (relativeLower.endsWith("/data.json") ||
-            relativeLower.endsWith("/sync-history.json") ||
-            relativeLower.endsWith("/sync-state.json"))
-    ) {
-        return true;
-    }
-    return WORKSPACE_FILE_REGEX.test(relativeLower);
-}
-
 export function isExcludedPath(path: string, configDir: string = ""): boolean {
     if (hasControlChars(path)) {
         return true;
@@ -536,29 +507,18 @@ export function isExcludedPath(path: string, configDir: string = ""): boolean {
 
     const normalizedConfigDir: string =
         configDir !== "" ? normalizeVaultPath(configDir).toLowerCase() : "";
-    if (normalizedConfigDir !== "") {
-        const configPrefix: string = `${normalizedConfigDir}/`;
-        if (lower.startsWith(configPrefix)) {
-            const relativeLower: string = lower.slice(configPrefix.length);
-            if (isExcludedConfigRelativePath(relativeLower)) {
-                return true;
-            }
-        }
-    }
-
-    const firstSlash: number = lower.indexOf("/");
-    if (firstSlash > 0 && lower.startsWith(".")) {
-        const relativeLower: string = lower.slice(firstSlash + 1);
-        if (isExcludedConfigRelativePath(relativeLower)) {
-            return true;
-        }
+    if (
+        normalizedConfigDir !== "" &&
+        (lower === normalizedConfigDir ||
+            lower.startsWith(`${normalizedConfigDir}/`))
+    ) {
+        return true;
     }
 
     const segments: string[] = lower.split("/");
     for (const segment of segments) {
         if (
-            segment === "." ||
-            segment === ".." ||
+            segment.startsWith(".") ||
             IGNORED_SEGMENTS_LOWER.has(segment)
         ) {
             return true;

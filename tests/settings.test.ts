@@ -419,6 +419,11 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         expect(plugin.settings.chunkSizeMB).toBe(MAX_CHUNK_SIZE_MB);
 
         await getSettingByName("Remote base directory").textOnChange?.(
+            ".obsidian"
+        );
+        expect(plugin.settings.remoteBaseDir).toBe("");
+
+        await getSettingByName("Remote base directory").textOnChange?.(
             ".obsidian/plugins/vaultdav"
         );
         expect(plugin.settings.remoteBaseDir).toBe("");
@@ -432,6 +437,10 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             customPlugin
         );
         customTab.display();
+        await getSettingByName("Remote base directory").textOnChange?.(
+            "custom-config"
+        );
+        expect(customPlugin.settings.remoteBaseDir).toBe("");
         await getSettingByName("Remote base directory").textOnChange?.(
             "custom-config/plugins/vaultdav"
         );

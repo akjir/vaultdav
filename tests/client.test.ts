@@ -284,7 +284,7 @@ describe("WebDavClient", () => {
         }
     });
 
-    it("handles partial /remote.php/dav/files URLs without duplication, skips .trash, keeps .github, and guards non-finite retry/mtime", async () => {
+    it("handles partial /remote.php/dav/files URLs without duplication, skips hidden dot-folders, walks vault folders, and guards non-finite retry/mtime", async () => {
         const rootXml: string = `<?xml version="1.0"?>
 <d:multistatus xmlns:d="DAV:">
     <d:response>
@@ -301,17 +301,24 @@ describe("WebDavClient", () => {
             <d:status>HTTP/1.1 200 OK</d:status>
         </d:propstat>
     </d:response>
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/Notes/</d:href>
+        <d:propstat>
+            <d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
 </d:multistatus>`;
 
-        const githubXml: string = `<?xml version="1.0"?>
+        const notesXml: string = `<?xml version="1.0"?>
 <d:multistatus xmlns:d="DAV:">
     <d:response>
-        <d:href>/remote.php/dav/files/alice/Vault/.github/workflows.md</d:href>
+        <d:href>/remote.php/dav/files/alice/Vault/Notes/v1.0.md</d:href>
         <d:propstat>
             <d:prop>
                 <d:getlastmodified>Wed, 14 Oct 2026 18:00:00 GMT</d:getlastmodified>
                 <d:getcontentlength>12</d:getcontentlength>
-                <d:getetag>"gh-12"</d:getetag>
+                <d:getetag>"n-12"</d:getetag>
                 <d:resourcetype/>
             </d:prop>
             <d:status>HTTP/1.1 200 OK</d:status>
@@ -334,8 +341,8 @@ describe("WebDavClient", () => {
                 if (param.url.endsWith("/Vault/")) {
                     return createMockResponse(207, rootXml);
                 }
-                if (param.url.endsWith("/Vault/.github/")) {
-                    return createMockResponse(207, githubXml);
+                if (param.url.endsWith("/Vault/Notes/")) {
+                    return createMockResponse(207, notesXml);
                 }
                 return createMockResponse(404);
             }
@@ -352,13 +359,14 @@ describe("WebDavClient", () => {
 
         const items: RemoteItem[] = await client.walkRemote();
         expect(items.map((i: RemoteItem) => i.path)).toEqual([
-            ".github",
-            ".github/workflows.md"
+            "Notes",
+            "Notes/v1.0.md"
         ]);
         expect(requestedUrls[0]).toBe(
             "https://cloud.example.com/remote.php/dav/files/alice/Vault/"
         );
         expect(requestedUrls.some((u: string) => u.includes(".trash"))).toBe(false);
+        expect(requestedUrls.some((u: string) => u.includes(".github"))).toBe(false);
 
         const uploaded: RemoteItem = await client.uploadFile(
             "Notes/NaNMtime.md",
@@ -1544,6 +1552,106 @@ describe("WebDavClient", () => {
         // Chunk 0 + up to 4 parallel workers (chunks 1..4) = at most 5 requests out of 10 chunks
         expect(requestedRanges.length).toBeLessThanOrEqual(5);
         expect(progressEvents).toEqual([[1, 10]]);
+    });
+
+    it("refuses configDir and hidden dot-paths in client operations and skips them during walkRemote", async () => {
+        const client: WebDavClient = new WebDavClient(
+            DEFAULT_TEST_SETTINGS,
+            1,
+            ".obsidian"
+        );
+        const customClient: WebDavClient = new WebDavClient(
+            {
+                ...DEFAULT_TEST_SETTINGS,
+                remoteBaseDir: "Vault"
+            },
+            1,
+            "custom-config"
+        );
+
+        await expect(
+            client.uploadFile(".obsidian/app.json", new ArrayBuffer(4), 1728928291000)
+        ).rejects.toThrow(/refused on excluded path/);
+        await expect(
+            client.downloadFile(".obsidian/themes/Minimal/theme.css")
+        ).rejects.toThrow(/refused on excluded path/);
+        await expect(
+            client.uploadFile(".obsidian-mobile/app.json", new ArrayBuffer(4), 1728928291000)
+        ).rejects.toThrow(/refused on excluded path/);
+        await expect(
+            client.uploadFile("Notes/.hidden.md", new ArrayBuffer(4), 1728928291000)
+        ).rejects.toThrow(/refused on excluded path/);
+        await expect(
+            customClient.uploadFile("custom-config/app.json", new ArrayBuffer(4), 1728928291000)
+        ).rejects.toThrow(/refused on excluded path/);
+
+        const requestedUrls: string[] = [];
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (req: RequestUrlParam | string): RequestUrlResponsePromise => {
+                const url: string = typeof req === "string" ? req : req.url;
+                requestedUrls.push(url);
+                if (url.endsWith("/Vault/")) {
+                    return createMockResponse(
+                        207,
+                        `<?xml version="1.0" encoding="utf-8"?>
+                        <d:multistatus xmlns:d="DAV:">
+                            <d:response>
+                                <d:href>/remote.php/dav/files/alice/Vault/</d:href>
+                                <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+                            </d:response>
+                            <d:response>
+                                <d:href>/remote.php/dav/files/alice/Vault/.obsidian/</d:href>
+                                <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+                            </d:response>
+                            <d:response>
+                                <d:href>/remote.php/dav/files/alice/Vault/custom-config/</d:href>
+                                <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+                            </d:response>
+                            <d:response>
+                                <d:href>/remote.php/dav/files/alice/Vault/.github/</d:href>
+                                <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+                            </d:response>
+                            <d:response>
+                                <d:href>/remote.php/dav/files/alice/Vault/.hidden.md</d:href>
+                                <d:propstat><d:prop><d:resourcetype/><d:getcontentlength>10</d:getcontentlength><d:getetag>"e-h"</d:getetag><d:getlastmodified>Wed, 14 Oct 2026 19:51:31 GMT</d:getlastmodified></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+                            </d:response>
+                            <d:response>
+                                <d:href>/remote.php/dav/files/alice/Vault/Notes/</d:href>
+                                <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+                            </d:response>
+                        </d:multistatus>`
+                    );
+                }
+                if (url.endsWith("/Vault/Notes/")) {
+                    return createMockResponse(
+                        207,
+                        `<?xml version="1.0" encoding="utf-8"?>
+                        <d:multistatus xmlns:d="DAV:">
+                            <d:response>
+                                <d:href>/remote.php/dav/files/alice/Vault/Notes/</d:href>
+                                <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+                            </d:response>
+                            <d:response>
+                                <d:href>/remote.php/dav/files/alice/Vault/Notes/v1.2.md</d:href>
+                                <d:propstat><d:prop><d:resourcetype/><d:getcontentlength>12</d:getcontentlength><d:getetag>"e-v1"</d:getetag><d:getlastmodified>Wed, 14 Oct 2026 19:51:31 GMT</d:getlastmodified></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+                            </d:response>
+                        </d:multistatus>`
+                    );
+                }
+                throw new Error(`Unexpected PROPFIND URL: ${url}`);
+            }
+        );
+
+        const walked: RemoteItem[] = await customClient.walkRemote();
+        expect(walked.map((item: RemoteItem) => item.path)).toEqual([
+            "Notes",
+            "Notes/v1.2.md"
+        ]);
+        expect(requestedUrls.some((url: string) => url.includes(".obsidian"))).toBe(false);
+        expect(requestedUrls.some((url: string) => url.includes("custom-config"))).toBe(
+            false
+        );
+        expect(requestedUrls.some((url: string) => url.includes(".github"))).toBe(false);
     });
 });
 

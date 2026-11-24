@@ -4,6 +4,15 @@ import type { SyncStateData, SyncStateRecord } from "../types";
 import { MAX_FILE_SIZE_BYTES, util } from "../utilities";
 
 const CURRENT_STATE_VERSION: number = 1;
+const FORBIDDEN_STATE_SEGMENTS_LOWER: ReadonlySet<string> = new Set<string>([
+    ".ds_store",
+    ".git",
+    ".svn",
+    ".trash",
+    "desktop.ini",
+    "node_modules",
+    "thumbs.db"
+]);
 const MAX_SAFE_TIMESTAMP_MS: number = 8_640_000_000_000_000;
 
 function cloneRecord(record: SyncStateRecord): SyncStateRecord {
@@ -34,14 +43,55 @@ function createRecordMap(): Record<string, SyncStateRecord> {
 
 function resolveStateFilePath(
     stateFilePath: string,
-    configDir: string
+    rawConfigDir: string
 ): string {
     const normalized: string = util.normalizeVaultPath(stateFilePath);
+    if (normalized === "") {
+        throw new Error(`Invalid sync state file path: ${stateFilePath}`);
+    }
     const lower: string = normalized.toLowerCase();
+    const expectedSuffix: string = `/${util.SYNC_STATE_RELATIVE_PATH}`;
+
+    if (rawConfigDir !== "") {
+        const normalizedConfigDir: string = util.normalizeVaultPath(rawConfigDir);
+        if (normalizedConfigDir === "") {
+            throw new Error(`Invalid sync state file path: ${stateFilePath}`);
+        }
+        const configSegments: string[] = normalizedConfigDir
+            .toLowerCase()
+            .split("/");
+        for (const segment of configSegments) {
+            if (FORBIDDEN_STATE_SEGMENTS_LOWER.has(segment)) {
+                throw new Error(
+                    `Invalid sync state file path: ${stateFilePath}`
+                );
+            }
+        }
+        const expectedPathLower: string = util
+            .getSyncStateFilePath(normalizedConfigDir)
+            .toLowerCase();
+        if (
+            lower !== expectedPathLower ||
+            !util.isExcludedPath(normalized, normalizedConfigDir)
+        ) {
+            throw new Error(`Invalid sync state file path: ${stateFilePath}`);
+        }
+        return normalized;
+    }
+
+    if (!lower.endsWith(expectedSuffix)) {
+        throw new Error(`Invalid sync state file path: ${stateFilePath}`);
+    }
+    const prefixLower: string = lower.slice(
+        0,
+        lower.length - expectedSuffix.length
+    );
     if (
-        normalized === "" ||
-        lower.endsWith("/data.json") ||
-        !util.isExcludedPath(normalized, configDir)
+        prefixLower === "" ||
+        !prefixLower.startsWith(".") ||
+        prefixLower.includes("/") ||
+        FORBIDDEN_STATE_SEGMENTS_LOWER.has(prefixLower) ||
+        !util.isExcludedPath(normalized, "")
     ) {
         throw new Error(`Invalid sync state file path: ${stateFilePath}`);
     }
@@ -103,9 +153,9 @@ export class SyncStateStore {
         configDir: string = ""
     ) {
         this.adapter = adapter;
+        this.stateFilePath = resolveStateFilePath(stateFilePath, configDir);
         this.configDir =
             configDir !== "" ? util.normalizeVaultPath(configDir) : "";
-        this.stateFilePath = resolveStateFilePath(stateFilePath, this.configDir);
         this.records = createRecordMap();
     }
 
