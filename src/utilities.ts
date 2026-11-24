@@ -705,6 +705,18 @@ export function normalizeServerUrl(rawUrl: string): string {
             "Nextcloud server URL must not contain embedded credentials"
         );
     }
+    if (
+        parsedUrl.search !== "" ||
+        parsedUrl.hash !== "" ||
+        QUERY_OR_HASH_REGEX.test(candidateUrl)
+    ) {
+        throw new Error(
+            "Nextcloud server URL must not contain query or hash parameters"
+        );
+    }
+    if (parsedUrl.port === "0") {
+        throw new Error("Invalid Nextcloud server URL");
+    }
     const hostname: string = parsedUrl.hostname.toLowerCase();
     if (
         hostname === "" ||

@@ -724,4 +724,82 @@ describe("SyncStateStore", () => {
         await reloaded.clear();
         expect(reloaded.getRecord("notes/afterclear.md")).toBeUndefined();
     });
+
+    it("persists and validates credential-free remoteTarget and resets records safely on target switch", async () => {
+        const { adapter, files } = createMockAdapter();
+        const store: SyncStateStore = new SyncStateStore(
+            adapter,
+            SYNC_STATE_FILE_PATH,
+            TEST_CONFIG_DIR
+        );
+
+        store.setRemoteTarget(
+            "https://cloud.example.com/remote.php/dav/files/alice/VaultA/"
+        );
+        expect(store.getRemoteTarget()).toBe(
+            "https://cloud.example.com/remote.php/dav/files/alice/VaultA"
+        );
+        store.upsertRecord({
+            etag: "e-a",
+            isDirectory: false,
+            lastSyncTime: 1000,
+            localMtime: 1000,
+            path: "Notes/A.md",
+            remoteMtime: 1000,
+            size: 10
+        });
+        await store.save();
+
+        const persistedRaw: string = files.get(SYNC_STATE_FILE_PATH) ?? "";
+        expect(persistedRaw).toContain(
+            "https://cloud.example.com/remote.php/dav/files/alice/VaultA"
+        );
+
+        const reloaded: SyncStateStore = new SyncStateStore(
+            adapter,
+            SYNC_STATE_FILE_PATH,
+            TEST_CONFIG_DIR
+        );
+        const loaded: SyncStateData = await reloaded.load();
+        expect(loaded.remoteTarget).toBe(
+            "https://cloud.example.com/remote.php/dav/files/alice/VaultA"
+        );
+        expect(reloaded.getRemoteTarget()).toBe(
+            "https://cloud.example.com/remote.php/dav/files/alice/VaultA"
+        );
+
+        // Switching remoteTarget must drop stale records to prevent mass deletions
+        reloaded.resetForRemoteTarget(
+            "https://cloud.example.com/remote.php/dav/files/alice/VaultB"
+        );
+        expect(reloaded.getRemoteTarget()).toBe(
+            "https://cloud.example.com/remote.php/dav/files/alice/VaultB"
+        );
+        expect(reloaded.getAll()).toEqual({});
+
+        // Malicious remoteTarget values with credentials, query/hash, or forbidden schemes must be rejected
+        for (const badTarget of [
+            "https://alice:secret@cloud.example.com/remote.php/dav/files/alice/Vault",
+            "https://cloud.example.com/remote.php/dav/files/alice/Vault?token=secret",
+            "ftp://cloud.example.com/Vault",
+            "not-a-url"
+        ]) {
+            reloaded.setRemoteTarget(badTarget);
+            expect(reloaded.getRemoteTarget()).toBe("");
+        }
+
+        // Tampered remoteTarget in persisted JSON must be ignored safely on load()
+        files.set(
+            SYNC_STATE_FILE_PATH,
+            JSON.stringify({
+                records: {},
+                remoteTarget:
+                    "https://alice:secret@cloud.example.com/remote.php/dav/files/alice/Vault",
+                version: 1
+            })
+        );
+        const tamperedData: SyncStateData = await reloaded.load();
+        expect(tamperedData.remoteTarget).toBeUndefined();
+        expect(reloaded.getRemoteTarget()).toBe("");
+    });
 });

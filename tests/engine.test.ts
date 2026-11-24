@@ -2861,5 +2861,275 @@ describe("SyncEngine delta calculation and execution", () => {
         expect(stateStore.getRecord("custom-config/app.json")).toBeUndefined();
         expect(stateStore.getRecord("Notes/Existing.md")?.etag).toBe("etag-existing");
     });
+
+    it("resets local sync state instead of deleting local files when the remote WebDAV target changes", async () => {
+        const t0: number = 1728928291000;
+        const warnSpy = vi.spyOn(log, "warn").mockImplementation((): void => undefined);
+        const textFiles: Map<string, string> = new Map<string, string>([
+            [
+                TEST_STATE_PATH,
+                JSON.stringify({
+                    records: {
+                        "Notes/Important.md": {
+                            etag: "etag-old",
+                            isDirectory: false,
+                            lastSyncTime: t0,
+                            localMtime: t0,
+                            path: "Notes/Important.md",
+                            remoteMtime: t0,
+                            size: 11
+                        }
+                    },
+                    remoteTarget:
+                        "https://cloud.example.com/remote.php/dav/files/alice/VaultA",
+                    version: 1
+                })
+            ]
+        ]);
+        const binaryFiles: Map<string, { content: ArrayBuffer; mtime: number }> = new Map([
+            [
+                "Notes/Important.md",
+                { content: new TextEncoder().encode("vital notes").buffer, mtime: t0 }
+            ]
+        ]);
+        const deletedLocalPaths: string[] = [];
+        const uploadedPaths: string[] = [];
+
+        const adapter: Partial<DataAdapter> = {
+            exists: async (p: string): Promise<boolean> =>
+                textFiles.has(p) || binaryFiles.has(p) || p === "Notes",
+            list: async (dir: string): Promise<ListedFiles> => {
+                if (dir === "") {
+                    return { files: [], folders: ["Notes"] };
+                }
+                if (dir === "Notes") {
+                    return { files: ["Notes/Important.md"], folders: [] };
+                }
+                return { files: [], folders: [] };
+            },
+            mkdir: async (): Promise<void> => undefined,
+            read: async (p: string): Promise<string> => {
+                const raw: string | undefined = textFiles.get(p);
+                if (raw === undefined) {
+                    throw new Error(`ENOENT: ${p}`);
+                }
+                return raw;
+            },
+            readBinary: async (p: string): Promise<ArrayBuffer> => {
+                const entry = binaryFiles.get(p);
+                if (entry === undefined) {
+                    throw new Error(`ENOENT: ${p}`);
+                }
+                return entry.content;
+            },
+            remove: async (p: string): Promise<void> => {
+                deletedLocalPaths.push(p);
+            },
+            stat: async (p: string) => {
+                if (p === "Notes") {
+                    return { ctime: t0, mtime: t0, size: 0, type: "folder" as const };
+                }
+                const entry = binaryFiles.get(p);
+                if (entry !== undefined) {
+                    return {
+                        ctime: entry.mtime,
+                        mtime: entry.mtime,
+                        size: entry.content.byteLength,
+                        type: "file" as const
+                    };
+                }
+                return null;
+            },
+            trashLocal: async (p: string): Promise<void> => {
+                deletedLocalPaths.push(p);
+            },
+            write: async (p: string, d: string): Promise<void> => {
+                textFiles.set(p, d);
+            }
+        };
+
+        const mockClient: Partial<WebDavClient> = {
+            createDirectory: async (): Promise<void> => undefined,
+            ensureRemoteBaseDir: async (): Promise<void> => undefined,
+            getRemoteTarget: (): string =>
+                "https://cloud.example.com/remote.php/dav/files/alice/VaultB",
+            uploadFile: async (
+                p: string,
+                content: ArrayBuffer,
+                mtime: number
+            ): Promise<RemoteItem> => {
+                uploadedPaths.push(p);
+                return makeRemote(p, mtime, content.byteLength, `etag-new-${p}`);
+            },
+            walkRemote: async (): Promise<RemoteItem[]> => []
+        };
+
+        const stateStore: SyncStateStore = new SyncStateStore(
+            adapter as DataAdapter,
+            TEST_STATE_PATH,
+            TEST_CONFIG_DIR
+        );
+        const engine: SyncEngine = new SyncEngine(
+            { adapter: adapter as DataAdapter, configDir: TEST_CONFIG_DIR } as Vault,
+            mockClient as WebDavClient,
+            stateStore,
+            {
+                appPasswordSecret: "vaultdav-app-password",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "VaultB",
+                syncInterval: 0,
+                syncLogRetentionDays: 30,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        const result: SyncResult = await engine.runSync();
+
+        expect(deletedLocalPaths).toEqual([]);
+        expect(result.deletedLocal).toBe(0);
+        expect(uploadedPaths).toEqual(["Notes/Important.md"]);
+        expect(result.uploaded).toBe(1);
+        expect(result.summary.warnings).toBe(1);
+        expect(
+            result.events.some(
+                (evt) =>
+                    evt.kind === "warning" &&
+                    (evt.message ?? "").includes("Remote WebDAV target changed")
+            )
+        ).toBe(true);
+        expect(stateStore.getRemoteTarget()).toBe(
+            "https://cloud.example.com/remote.php/dav/files/alice/VaultB"
+        );
+        warnSpy.mockRestore();
+    });
+
+    it("blocks local file/directory type confusion in deleteLocalItem, rejects leading-slash fsPath escapes, avoids phantom conflict counts, and redacts result.errors", async () => {
+        const trashCalls: string[] = [];
+        const readBinaryPaths: string[] = [];
+        const adapter: Partial<DataAdapter> = {
+            exists: async (): Promise<boolean> => true,
+            list: async (): Promise<ListedFiles> => ({ files: [], folders: [] }),
+            mkdir: async (): Promise<void> => undefined,
+            read: async (): Promise<string> => '{"version":1,"records":{}}',
+            readBinary: async (p: string): Promise<ArrayBuffer> => {
+                readBinaryPaths.push(p);
+                return new Uint8Array([1, 2, 3]).buffer;
+            },
+            stat: async (p: string) => {
+                if (p === "ActuallyFolder") {
+                    return { ctime: 1000, mtime: 1000, size: 0, type: "folder" as const };
+                }
+                if (p === "ActuallyFile.md") {
+                    return { ctime: 1000, mtime: 1000, size: 12, type: "file" as const };
+                }
+                return null;
+            },
+            trashLocal: async (p: string): Promise<void> => {
+                trashCalls.push(p);
+            },
+            write: async (): Promise<void> => undefined
+        };
+
+        const mockClient: Partial<WebDavClient> = {
+            uploadFile: async (
+                p: string,
+                content: ArrayBuffer,
+                mtime: number
+            ): Promise<RemoteItem> => {
+                if (p === "SecretErr.md") {
+                    throw new Error(
+                        "Failed https://alice:supersecret@cloud.example.com/dav Basic YWxpY2U6c2VjcmV0"
+                    );
+                }
+                return makeRemote(p, mtime, content.byteLength, `etag-${p}`);
+            }
+        };
+
+        const stateStore: SyncStateStore = new SyncStateStore(
+            adapter as DataAdapter,
+            TEST_STATE_PATH,
+            TEST_CONFIG_DIR
+        );
+        const engine: SyncEngine = new SyncEngine(
+            { adapter: adapter as DataAdapter, configDir: TEST_CONFIG_DIR } as Vault,
+            mockClient as WebDavClient,
+            stateStore,
+            {
+                appPasswordSecret: "vaultdav-app-password",
+                chunkSizeMB: 10,
+                chunkingThresholdMB: 90,
+                conflictStrategy: "keep_both",
+                remoteBaseDir: "Vault",
+                syncInterval: 0,
+                syncLogRetentionDays: 30,
+                url: "https://cloud.example.com",
+                username: "alice"
+            }
+        );
+
+        // 1. File delete on an actual directory must NOT recursively trash it
+        await expect(engine.deleteLocalItem("ActuallyFolder", false)).rejects.toThrow(
+            /target is a directory/
+        );
+        // 2. Directory delete on an actual file must NOT delete it
+        await expect(engine.deleteLocalItem("ActuallyFile.md", true)).rejects.toThrow(
+            /target is a file/
+        );
+        expect(trashCalls).toEqual([]);
+
+        // 3. Leading-slash / backslash fsPath must NOT escape to raw absolute/backslash paths
+        const craftedLocalMap: Map<string, LocalItem> = new Map<string, LocalItem>([
+            [
+                "etc/passwd",
+                {
+                    ctime: 1000,
+                    fsPath: "/etc/passwd",
+                    isDirectory: false,
+                    mtime: 1000,
+                    path: "etc/passwd",
+                    size: 3
+                }
+            ]
+        ]);
+        await engine.executeUpload("etc/passwd", craftedLocalMap, 2000);
+        expect(readBinaryPaths).toEqual(["etc/passwd"]);
+
+        // 4. executePlan must not count null conflict outcomes and must redact credentials in result.errors
+        const errorSpy = vi.spyOn(log, "error").mockImplementation((): void => undefined);
+        const plan: SyncPlan = {
+            actions: [
+                {
+                    depth: 1,
+                    isDirectory: false,
+                    path: "MissingConflict.md",
+                    type: "conflict"
+                },
+                {
+                    depth: 1,
+                    isDirectory: false,
+                    path: "SecretErr.md",
+                    type: "upload"
+                }
+            ],
+            timestamp: 2000,
+            warnings: []
+        };
+        const planResult: SyncResult = await engine.executePlan(
+            plan,
+            [makeLocal("SecretErr.md", 2000, 3, false)],
+            []
+        );
+        expect(planResult.conflictsResolved).toBe(0);
+        expect(planResult.summary.conflictsResolved).toBe(0);
+        expect(planResult.errors.length).toBe(1);
+        expect(planResult.errors[0]).not.toContain("supersecret");
+        expect(planResult.errors[0]).not.toContain("YWxpY2U6c2VjcmV0");
+        expect(planResult.errors[0]).toContain("https://[REDACTED]@cloud.example.com/dav");
+        expect(planResult.errors[0]).toContain("Basic [REDACTED]");
+        errorSpy.mockRestore();
+    });
 });
 

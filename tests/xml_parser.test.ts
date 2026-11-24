@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { RemoteItem } from "../src/types";
 import {
     buildPropfindBody,
+    isRemoteDirectoryEmpty,
     parseMultiStatus,
     parseSingleStat
 } from "../src/webdav/xml_parser";
@@ -566,6 +567,78 @@ describe("webdav xml_parser", () => {
         expect(fileItem?.isDirectory).toBe(false);
         expect(fileItem?.size).toBe(777);
         expect(fileItem?.etag).toBe("shadowed-file-etag");
+    });
+
+    it("returns false from isRemoteDirectoryEmpty() whenever any child response is unparseable, forbidden, or non-self", () => {
+        const trulyEmptyDirXml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/Archive/</d:href>
+        <d:propstat>
+            <d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+        expect(
+            isRemoteDirectoryEmpty(trulyEmptyDirXml, "alice", "Vault", "Archive")
+        ).toBe(true);
+
+        const colonChildDirXml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/Archive/</d:href>
+        <d:propstat>
+            <d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/Archive/2026:01:01-backup.tar.gz</d:href>
+        <d:propstat>
+            <d:prop><d:getcontentlength>1024</d:getcontentlength><d:resourcetype/></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+        expect(
+            isRemoteDirectoryEmpty(colonChildDirXml, "alice", "Vault", "Archive")
+        ).toBe(false);
+
+        const forbiddenChildDirXml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/Archive/</d:href>
+        <d:propstat>
+            <d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/Archive/LockedShare/</d:href>
+        <d:propstat>
+            <d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+            <d:status>HTTP/1.1 403 Forbidden</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+        expect(
+            isRemoteDirectoryEmpty(forbiddenChildDirXml, "alice", "Vault", "Archive")
+        ).toBe(false);
+
+        const fileSelfXml: string = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+    <d:response>
+        <d:href>/remote.php/dav/files/alice/Vault/Archive</d:href>
+        <d:propstat>
+            <d:prop><d:getcontentlength>12</d:getcontentlength><d:resourcetype/></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status>
+        </d:propstat>
+    </d:response>
+</d:multistatus>`;
+        expect(() =>
+            isRemoteDirectoryEmpty(fileSelfXml, "alice", "Vault", "Archive")
+        ).toThrow("Invalid WebDAV XML response: queried path is not a directory");
     });
 });
 

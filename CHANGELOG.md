@@ -21,6 +21,9 @@ All notable changes to this project will be documented in this file.
 - Harden the sync log view against unsafe file opening, excluded path exposure, unredacted clipboard exports, and view lifecycle race conditions.
 - Harden vault path, WebDAV URL, and exclusion validation against whitespace smuggling, malformed configuration paths, and empty credential authorities.
 - Improve credential redaction in sync logs to handle malformed URLs safely.
+- Reset local sync state automatically when the remote Nextcloud WebDAV target changes to prevent unintended deletions.
+- Prevent recursive remote and local folder deletions when folders contain skipped, forbidden, or mismatched-type entries.
+- Harden credential redaction, server URL validation, and local path resolution against nested error leaks, query parameters, and unsafe path prefixes.
 
 ## [1.2.0] - 2026-11-24
 

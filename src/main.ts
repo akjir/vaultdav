@@ -8,6 +8,7 @@ import {
     DEFAULT_APP_PASSWORD_SECRET_ID,
     DEFAULT_SETTINGS,
     hasEmbeddedUrlCredentials,
+    hasServerUrlQueryOrHash,
     MAX_SYNC_INTERVAL_MINUTES,
     resolveRemoteBaseDir,
     VaultDavSettingTab,
@@ -239,6 +240,8 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
         const rawUrl: string = typeof record.url === "string" ? record.url : "";
         const hadEmbeddedUrlCredentials: boolean =
             rawUrl !== "" && hasEmbeddedUrlCredentials(rawUrl);
+        const hadQueryOrHashUrl: boolean =
+            rawUrl !== "" && hasServerUrlQueryOrHash(rawUrl);
         const url: string =
             rawUrl !== "" ? sanitizeServerUrl(rawUrl) : DEFAULT_SETTINGS.url;
         const username: string =
@@ -252,7 +255,8 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
             typeof record.appPassword === "string"
                 ? sanitizeAppPassword(record.appPassword)
                 : "";
-        let shouldPersistScrubbedSettings: boolean = hadEmbeddedUrlCredentials;
+        let shouldPersistScrubbedSettings: boolean =
+            hadEmbeddedUrlCredentials || hadQueryOrHashUrl;
 
         if (hasLegacyPasswordField) {
             if (legacyAppPassword === "") {

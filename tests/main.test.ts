@@ -948,5 +948,21 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
         await plugin.loadSettings();
         expect(plugin.settings.url).toBe("");
         expect(saveDataSpy).toHaveBeenCalledTimes(1);
+
+        vi.spyOn(plugin, "loadData").mockResolvedValueOnce({
+            url: "https://alice:my secret@cloud.example.com",
+            username: "alice"
+        });
+        await plugin.loadSettings();
+        expect(plugin.settings.url).toBe("");
+        expect(saveDataSpy).toHaveBeenCalledTimes(2);
+
+        vi.spyOn(plugin, "loadData").mockResolvedValueOnce({
+            url: "https://cloud.example.com?token=secret-token",
+            username: "alice"
+        });
+        await plugin.loadSettings();
+        expect(plugin.settings.url).toBe("");
+        expect(saveDataSpy).toHaveBeenCalledTimes(3);
     });
 });

@@ -6,7 +6,19 @@ export type { ProgressReporter };
 const BASIC_AUTH_REDACT_REGEX: RegExp = /Basic\s+[A-Za-z0-9+/=]+/gi;
 const DEFAULT_NOTICE_DURATION_MS: number = 4000;
 const LOG_PREFIX: string = "[VaultDAV]";
+const MAX_LOG_SANITIZE_DEPTH: number = 6;
 const NOTICE_PREFIX: string = "VaultDAV:";
+const SENSITIVE_LOG_KEYS_LOWER: ReadonlySet<string> = new Set<string>([
+    "apppassword",
+    "authorization",
+    "cookie",
+    "passwd",
+    "password",
+    "proxy-authorization",
+    "secret",
+    "set-cookie",
+    "token"
+]);
 const WHITESPACE_CHAR_REGEX: RegExp = /\s/;
 
 export interface Logger {
@@ -163,29 +175,125 @@ function redactUrlUserinfo(text: string): string {
 }
 
 function sanitizeLogArg(arg: unknown): unknown {
-    if (typeof arg === "string") {
-        return redactSensitiveText(arg);
-    }
-    if (arg instanceof Error) {
-        const redactedMessage: string = redactSensitiveText(arg.message);
-        const redactedStack: string | undefined =
-            typeof arg.stack === "string"
-                ? redactSensitiveText(arg.stack)
-                : undefined;
-        if (redactedMessage !== arg.message || redactedStack !== arg.stack) {
-            const sanitizedError: Error = new Error(redactedMessage);
-            sanitizedError.name = arg.name;
-            if (redactedStack !== undefined) {
-                sanitizedError.stack = redactedStack;
-            }
-            return sanitizedError;
-        }
-    }
-    return arg;
+    return sanitizeLogValue(arg, new WeakSet<object>(), 0).value;
 }
 
 function sanitizeLogArgs(args: ReadonlyArray<unknown>): unknown[] {
     return args.map((arg: unknown) => sanitizeLogArg(arg));
+}
+
+function sanitizeLogValue(
+    arg: unknown,
+    seen: WeakSet<object>,
+    depth: number
+): { changed: boolean; value: unknown } {
+    if (typeof arg === "string") {
+        const redacted: string = redactSensitiveText(arg);
+        return { changed: redacted !== arg, value: redacted };
+    }
+    if (typeof arg !== "object" || arg === null) {
+        return { changed: false, value: arg };
+    }
+    if (arg instanceof Date || arg instanceof RegExp) {
+        return { changed: false, value: arg };
+    }
+    if (seen.has(arg)) {
+        return { changed: true, value: "[Circular]" };
+    }
+    if (depth >= MAX_LOG_SANITIZE_DEPTH) {
+        return { changed: true, value: "[Truncated]" };
+    }
+
+    seen.add(arg);
+    try {
+        if (arg instanceof Error) {
+            const redactedMessage: string = redactSensitiveText(arg.message);
+            const redactedStack: string | undefined =
+                typeof arg.stack === "string"
+                    ? redactSensitiveText(arg.stack)
+                    : undefined;
+            const errorWithCause: Error & { cause?: unknown } = arg as Error & {
+                cause?: unknown;
+            };
+            const hasCause: boolean =
+                "cause" in errorWithCause && errorWithCause.cause !== undefined;
+            const sanitizedCause: { changed: boolean; value: unknown } = hasCause
+                ? sanitizeLogValue(errorWithCause.cause, seen, depth + 1)
+                : { changed: false, value: undefined };
+
+            let ownPropsChanged: boolean = false;
+            const sanitizedEntries: Array<[string, unknown]> = [];
+            for (const [key, val] of Object.entries(arg)) {
+                if (SENSITIVE_LOG_KEYS_LOWER.has(key.toLowerCase())) {
+                    ownPropsChanged = true;
+                    sanitizedEntries.push([key, "[REDACTED]"]);
+                } else {
+                    const sanitizedVal: { changed: boolean; value: unknown } =
+                        sanitizeLogValue(val, seen, depth + 1);
+                    if (sanitizedVal.changed) {
+                        ownPropsChanged = true;
+                    }
+                    sanitizedEntries.push([key, sanitizedVal.value]);
+                }
+            }
+
+            const changed: boolean =
+                redactedMessage !== arg.message ||
+                redactedStack !== arg.stack ||
+                sanitizedCause.changed ||
+                ownPropsChanged;
+            if (!changed) {
+                return { changed: false, value: arg };
+            }
+            const sanitizedError: Error & Record<string, unknown> = new Error(
+                redactedMessage
+            ) as Error & Record<string, unknown>;
+            sanitizedError.name = arg.name;
+            if (redactedStack !== undefined) {
+                sanitizedError.stack = redactedStack;
+            }
+            if (hasCause) {
+                sanitizedError.cause = sanitizedCause.value;
+            }
+            for (const [key, val] of sanitizedEntries) {
+                sanitizedError[key] = val;
+            }
+            return { changed: true, value: sanitizedError };
+        }
+
+        if (Array.isArray(arg)) {
+            let changed: boolean = false;
+            const sanitizedList: unknown[] = new Array<unknown>(arg.length);
+            for (let i: number = 0; i < arg.length; i += 1) {
+                const entry: { changed: boolean; value: unknown } =
+                    sanitizeLogValue(arg[i], seen, depth + 1);
+                if (entry.changed) {
+                    changed = true;
+                }
+                sanitizedList[i] = entry.value;
+            }
+            return { changed, value: changed ? sanitizedList : arg };
+        }
+
+        let changed: boolean = false;
+        const sanitizedRecord: Record<string, unknown> = {};
+        for (const [key, val] of Object.entries(arg)) {
+            if (SENSITIVE_LOG_KEYS_LOWER.has(key.toLowerCase())) {
+                changed = true;
+                sanitizedRecord[key] = "[REDACTED]";
+            } else {
+                const entry: { changed: boolean; value: unknown } =
+                    sanitizeLogValue(val, seen, depth + 1);
+                if (entry.changed) {
+                    changed = true;
+                }
+                sanitizedRecord[key] = entry.value;
+            }
+        }
+        return { changed, value: changed ? sanitizedRecord : arg };
+    } finally {
+        seen.delete(arg);
+    }
 }
 
 export const log: Logger = {

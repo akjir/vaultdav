@@ -147,6 +147,7 @@ export type SyncRunTrigger = "auto" | "manual";
 
 export interface SyncStateData {
     records: Record<string, SyncStateRecord>;
+    remoteTarget?: string;
     version: number;
 }
 

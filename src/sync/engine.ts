@@ -25,6 +25,7 @@ const DEFAULT_CHUNKING_THRESHOLD_MB: number = 90;
 const MAX_CHUNKED_FILE_SIZE_BYTES: number = 1024 * 1024 * 1024;
 const MAX_CHUNKING_THRESHOLD_MB: number = 512;
 const PARALLEL_DOWNLOAD_THRESHOLD_BYTES: number = 5 * 1024 * 1024;
+const TRAILING_SLASHES_REGEX: RegExp = /\/+$/;
 const TRANSFER_CONCURRENCY: number = 4;
 const WALK_STAT_CONCURRENCY: number = 5;
 
@@ -513,6 +514,10 @@ export function isRemoteModified(remote: RemoteItem, state: SyncStateRecord): bo
     );
 }
 
+function normalizeRemoteTargetKey(target: string): string {
+    return target.trim().replace(TRAILING_SLASHES_REGEX, "").toLowerCase();
+}
+
 function resolveCanonicalPath(
     normalizedPath: string,
     canonicalPathByLower: Map<string, string>
@@ -549,7 +554,16 @@ function resolveLocalFsPath(
     explicitFsPath?: string
 ): string {
     const candidate: string | undefined = explicitFsPath ?? local?.fsPath;
-    if (candidate !== undefined && candidate !== "") {
+    if (
+        candidate !== undefined &&
+        candidate !== "" &&
+        !util.hasControlChars(candidate) &&
+        !candidate.startsWith("/") &&
+        !candidate.endsWith("/") &&
+        !candidate.includes("//") &&
+        !candidate.includes("\\") &&
+        candidate.trim() === candidate
+    ) {
         const normCandidate: string = util.normalizeVaultPath(candidate);
         if (
             normCandidate !== "" &&
@@ -735,6 +749,23 @@ export class SyncEngine {
         }
         if (!exists) {
             return;
+        }
+        if (typeof this.vault.adapter.stat === "function") {
+            const targetStat: Stat | null = await this.vault.adapter.stat(
+                targetPath
+            );
+            if (targetStat !== null) {
+                if (!isDirectory && targetStat.type === "folder") {
+                    throw new Error(
+                        `Local file delete refused because target is a directory: ${normalizedPath}`
+                    );
+                }
+                if (isDirectory && targetStat.type === "file") {
+                    throw new Error(
+                        `Local directory delete refused because target is a file: ${normalizedPath}`
+                    );
+                }
+            }
         }
         if (isDirectory && typeof this.vault.adapter.list === "function") {
             const listed: ListedFiles = await this.vault.adapter.list(targetPath);
@@ -1428,13 +1459,14 @@ export class SyncEngine {
                     } catch (err: unknown) {
                         const msg: string =
                             err instanceof Error ? err.message : String(err);
-                        log.error(`Directory creation failed for ${action.path}: ${msg}`);
-                        result.errors.push(`${action.path}: ${msg}`);
+                        const safeMsg: string = redactSensitiveText(msg);
+                        log.error(`Directory creation failed for ${action.path}: ${safeMsg}`);
+                        result.errors.push(`${action.path}: ${safeMsg}`);
                         summary.errors += 1;
                         events.push({
                             isDirectory: true,
                             kind: "error",
-                            message: redactSensitiveText(msg),
+                            message: safeMsg,
                             path: util.normalizeVaultPath(action.path) || action.path
                         });
                     }
@@ -1496,13 +1528,14 @@ export class SyncEngine {
                     }
                     const msg: string =
                         err instanceof Error ? err.message : String(err);
-                    log.error(`File deletion failed for ${action.path}: ${msg}`);
-                    result.errors.push(`${action.path}: ${msg}`);
+                    const safeMsg: string = redactSensitiveText(msg);
+                    log.error(`File deletion failed for ${action.path}: ${safeMsg}`);
+                    result.errors.push(`${action.path}: ${safeMsg}`);
                     summary.errors += 1;
                     events.push({
                         isDirectory: false,
                         kind: "error",
-                        message: redactSensitiveText(msg),
+                        message: safeMsg,
                         path: normalizedPath || action.path
                     });
                 }
@@ -1595,13 +1628,14 @@ export class SyncEngine {
                         }
                         const msg: string =
                             err instanceof Error ? err.message : String(err);
-                        log.error(`Directory deletion failed for ${action.path}: ${msg}`);
-                        result.errors.push(`${action.path}: ${msg}`);
+                        const safeMsg: string = redactSensitiveText(msg);
+                        log.error(`Directory deletion failed for ${action.path}: ${safeMsg}`);
+                        result.errors.push(`${action.path}: ${safeMsg}`);
                         summary.errors += 1;
                         events.push({
                             isDirectory: true,
                             kind: "error",
-                            message: redactSensitiveText(msg),
+                            message: safeMsg,
                             path: normalizedDir || action.path
                         });
                     }
@@ -1682,9 +1716,9 @@ export class SyncEngine {
                                 localDirFsPathByLower,
                                 existingPathsLower
                             );
-                        result.conflictsResolved += 1;
-                        summary.conflictsResolved += 1;
                         if (outcome !== null) {
+                            result.conflictsResolved += 1;
+                            summary.conflictsResolved += 1;
                             summary.bytesUploaded = addSafeNonNegativeInt(
                                 summary.bytesUploaded,
                                 outcome.bytesUploaded
@@ -1717,13 +1751,14 @@ export class SyncEngine {
                 } catch (err: unknown) {
                     const msg: string =
                         err instanceof Error ? err.message : String(err);
-                    log.error(`Transfer failed for ${action.path}: ${msg}`);
-                    result.errors.push(`${action.path}: ${msg}`);
+                    const safeMsg: string = redactSensitiveText(msg);
+                    log.error(`Transfer failed for ${action.path}: ${safeMsg}`);
+                    result.errors.push(`${action.path}: ${safeMsg}`);
                     summary.errors += 1;
                     events.push({
                         isDirectory: false,
                         kind: "error",
-                        message: redactSensitiveText(msg),
+                        message: safeMsg,
                         path: util.normalizeVaultPath(action.path) || action.path
                     });
                 }
@@ -1807,7 +1842,7 @@ export class SyncEngine {
         await this.client.ensureRemoteBaseDir();
         const walkWarnings: SyncLogEvent[] = [];
         const [stateData, remoteItems, localItems]: [
-            { records: Record<string, SyncStateRecord> },
+            { records: Record<string, SyncStateRecord>; remoteTarget?: string },
             RemoteItem[],
             LocalItem[]
         ] = await Promise.all([
@@ -1816,14 +1851,56 @@ export class SyncEngine {
             this.walkLocal(walkWarnings)
         ]);
 
+        const currentTarget: string =
+            typeof this.client.getRemoteTarget === "function"
+                ? this.client.getRemoteTarget()
+                : "";
+        const previousTarget: string =
+            typeof stateData.remoteTarget === "string"
+                ? stateData.remoteTarget
+                : "";
+        let effectiveRecords: Record<string, SyncStateRecord> = stateData.records;
+        let shouldPersistTarget: boolean = false;
+
+        if (currentTarget !== "") {
+            if (
+                previousTarget !== "" &&
+                normalizeRemoteTargetKey(previousTarget) !==
+                    normalizeRemoteTargetKey(currentTarget)
+            ) {
+                const msg: string =
+                    "Remote WebDAV target changed; local sync state was reset to prevent unintended deletions.";
+                log.warn(msg);
+                walkWarnings.push({
+                    kind: "warning",
+                    message: msg
+                });
+                this.stateStore.resetForRemoteTarget(currentTarget);
+                effectiveRecords = {};
+                shouldPersistTarget = true;
+            } else if (previousTarget === "") {
+                this.stateStore.setRemoteTarget(currentTarget);
+                shouldPersistTarget = true;
+            }
+        }
+
         const plan: SyncPlan = buildSyncPlan(
             localItems,
             remoteItems,
-            stateData.records,
+            effectiveRecords,
             Date.now(),
             this.configDir
         );
-        return await this.executePlan(plan, localItems, remoteItems, walkWarnings);
+        const result: SyncResult = await this.executePlan(
+            plan,
+            localItems,
+            remoteItems,
+            walkWarnings
+        );
+        if (shouldPersistTarget) {
+            await this.stateStore.save();
+        }
+        return result;
     }
 
     private async uploadContent(

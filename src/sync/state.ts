@@ -14,6 +14,7 @@ const FORBIDDEN_STATE_SEGMENTS_LOWER: ReadonlySet<string> = new Set<string>([
     "thumbs.db"
 ]);
 const MAX_SAFE_TIMESTAMP_MS: number = 8_640_000_000_000_000;
+const TRAILING_SLASHES_REGEX: RegExp = /\/+$/;
 
 function cloneRecord(record: SyncStateRecord): SyncStateRecord {
     return {
@@ -122,6 +123,36 @@ function sanitizeRecordSize(value: unknown): number {
     return value;
 }
 
+function sanitizeRemoteTarget(value: unknown): string {
+    if (typeof value !== "string" || util.hasControlChars(value)) {
+        return "";
+    }
+    const trimmed: string = value.trim();
+    if (trimmed === "") {
+        return "";
+    }
+    try {
+        const normalized: string = util.normalizeServerUrl(trimmed);
+        const parsed: URL = new URL(normalized);
+        if (
+            (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+            parsed.username !== "" ||
+            parsed.password !== "" ||
+            parsed.search !== "" ||
+            parsed.hash !== ""
+        ) {
+            return "";
+        }
+        const cleanPath: string = parsed.pathname.replace(
+            TRAILING_SLASHES_REGEX,
+            ""
+        );
+        return `${parsed.origin}${cleanPath}`;
+    } catch {
+        return "";
+    }
+}
+
 function stripNullPadding(raw: string): string {
     let start: number = 0;
     let end: number = raw.length;
@@ -144,6 +175,7 @@ export class SyncStateStore {
     private isParentDirEnsured: boolean = false;
     private lowerKeyMap: Map<string, string> = new Map<string, string>();
     private records: Record<string, SyncStateRecord>;
+    private remoteTarget: string = "";
     private savePromise: Promise<void> = Promise.resolve();
     private readonly stateFilePath: string;
 
@@ -162,6 +194,7 @@ export class SyncStateStore {
     public async clear(): Promise<void> {
         this.records = createRecordMap();
         this.lowerKeyMap.clear();
+        this.remoteTarget = "";
         await this.save();
     }
 
@@ -222,12 +255,17 @@ export class SyncStateStore {
         return undefined;
     }
 
+    public getRemoteTarget(): string {
+        return this.remoteTarget;
+    }
+
     public async load(): Promise<SyncStateData> {
         await this.savePromise;
         const exists: boolean = await this.adapter.exists(this.stateFilePath);
         if (!exists) {
             this.records = createRecordMap();
             this.lowerKeyMap.clear();
+            this.remoteTarget = "";
             return {
                 records: {},
                 version: CURRENT_STATE_VERSION
@@ -247,6 +285,7 @@ export class SyncStateStore {
             );
             this.records = createRecordMap();
             this.lowerKeyMap.clear();
+            this.remoteTarget = "";
             return {
                 records: {},
                 version: CURRENT_STATE_VERSION
@@ -265,8 +304,15 @@ export class SyncStateStore {
                 parsed.records !== null &&
                 !Array.isArray(parsed.records)
             ) {
+                const parsedObj: Record<string, unknown> = parsed as Record<
+                    string,
+                    unknown
+                >;
                 const rawRecords: Record<string, unknown> =
-                    parsed.records as Record<string, unknown>;
+                    parsedObj.records as Record<string, unknown>;
+                const validatedTarget: string = sanitizeRemoteTarget(
+                    parsedObj.remoteTarget
+                );
                 const validated: Record<string, SyncStateRecord> =
                     createRecordMap();
                 const lowerKeyMap: Map<string, string> = new Map<
@@ -322,10 +368,15 @@ export class SyncStateStore {
                 }
                 this.records = validated;
                 this.lowerKeyMap = lowerKeyMap;
-                return {
+                this.remoteTarget = validatedTarget;
+                const result: SyncStateData = {
                     records: cloneRecordMap(this.records),
                     version: CURRENT_STATE_VERSION
                 };
+                if (this.remoteTarget !== "") {
+                    result.remoteTarget = this.remoteTarget;
+                }
+                return result;
             }
         } catch (err: unknown) {
             log.warn("Failed to parse sync state file; resetting state.", err);
@@ -333,6 +384,7 @@ export class SyncStateStore {
 
         this.records = createRecordMap();
         this.lowerKeyMap.clear();
+        this.remoteTarget = "";
         return {
             records: {},
             version: CURRENT_STATE_VERSION
@@ -355,6 +407,12 @@ export class SyncStateStore {
         }
     }
 
+    public resetForRemoteTarget(target: string): void {
+        this.records = createRecordMap();
+        this.lowerKeyMap.clear();
+        this.remoteTarget = sanitizeRemoteTarget(target);
+    }
+
     public save(): Promise<void> {
         const writeTask = async (): Promise<void> => {
             await this.ensureParentDirectory();
@@ -362,6 +420,9 @@ export class SyncStateStore {
                 records: this.records,
                 version: CURRENT_STATE_VERSION
             };
+            if (this.remoteTarget !== "") {
+                payload.remoteTarget = this.remoteTarget;
+            }
             // Use unformatted JSON to save space and I/O time on mobile
             const serialized: string = JSON.stringify(payload);
             await this.adapter.write(this.stateFilePath, serialized);
@@ -372,6 +433,10 @@ export class SyncStateStore {
         );
         this.savePromise = nextPromise.catch(() => undefined);
         return nextPromise;
+    }
+
+    public setRemoteTarget(target: string): void {
+        this.remoteTarget = sanitizeRemoteTarget(target);
     }
 
     public upsertRecord(record: SyncStateRecord): void {

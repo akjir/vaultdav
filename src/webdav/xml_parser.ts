@@ -140,6 +140,57 @@ function hasCollectionResourceType(
     return false;
 }
 
+export function isRemoteDirectoryEmpty(
+    xmlText: string,
+    username: string,
+    remoteBaseDir: string,
+    queriedDirPath: string
+): boolean {
+    const doc: Document = parseXmlDocument(xmlText);
+    const normalizedBase: string = util.normalizeVaultPath(remoteBaseDir);
+    if (normalizedBase === "" && !util.isExplicitRootPath(remoteBaseDir)) {
+        throw new Error("Invalid WebDAV remote base directory path");
+    }
+    const normalizedQueriedDir: string = util.normalizeVaultPath(queriedDirPath);
+    if (normalizedQueriedDir === "" && !util.isExplicitRootPath(queriedDirPath)) {
+        throw new Error("Invalid WebDAV queried directory path");
+    }
+    const lowerQueriedDir: string = normalizedQueriedDir.toLowerCase();
+    const responses: Element[] = findChildrenByLocalName(doc, "response");
+    let selfCount: number = 0;
+
+    for (const responseEl of responses) {
+        const parsed: RemoteItem | null = parseResponseElement(
+            responseEl,
+            username,
+            remoteBaseDir
+        );
+        if (parsed === null) {
+            return false;
+        }
+        if (
+            parsed.path === normalizedQueriedDir ||
+            parsed.path.toLowerCase() === lowerQueriedDir
+        ) {
+            if (!parsed.isDirectory) {
+                throw new Error(
+                    "Invalid WebDAV XML response: queried path is not a directory"
+                );
+            }
+            selfCount += 1;
+            continue;
+        }
+        return false;
+    }
+
+    if (selfCount === 0) {
+        throw new Error(
+            "Invalid WebDAV XML response: no in-scope responses for queried directory"
+        );
+    }
+    return true;
+}
+
 export function parseMultiStatus(
     xmlText: string,
     username: string,

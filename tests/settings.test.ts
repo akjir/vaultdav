@@ -522,11 +522,26 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         );
 
         await getSettingByName("Server URL").textOnChange?.(
-            "https://cloud.example.com?email=user@example.org"
+            "https://cloud.example.com/users/alice@example.com"
         );
         expect(plugin.settings.url).toBe(
+            "https://cloud.example.com/users/alice@example.com"
+        );
+
+        await getSettingByName("Server URL").textOnChange?.(
             "https://cloud.example.com?email=user@example.org"
         );
+        expect(plugin.settings.url).toBe("");
+
+        await getSettingByName("Server URL").textOnChange?.(
+            "https://cloud.example.com#secret-fragment"
+        );
+        expect(plugin.settings.url).toBe("");
+
+        await getSettingByName("Server URL").textOnChange?.(
+            "https://cloud.example.com:0"
+        );
+        expect(plugin.settings.url).toBe("");
 
         await getSettingByName("Server URL").textOnChange?.(
             "https://cloud.example.com\r\nX-Injected: true"
@@ -576,6 +591,19 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
                 "https://cloud.example.com?email=user@example.org"
             )
         ).toBe(false);
+        expect(
+            hasEmbeddedUrlCredentials(
+                "https://alice:my secret@cloud.example.com/remote.php/dav"
+            )
+        ).toBe(true);
+        expect(
+            hasEmbeddedUrlCredentials("alice:my secret@cloud.example.com")
+        ).toBe(true);
+        expect(
+            hasEmbeddedUrlCredentials(
+                "https://alice:pass\tword@cloud.example.com/dav"
+            )
+        ).toBe(true);
     });
 
     it("disables Test connection button during execution and restores state in finally", async () => {

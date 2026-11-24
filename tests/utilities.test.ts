@@ -1091,5 +1091,26 @@ describe("utilities and logging", () => {
         expect(
             util.normalizeServerUrl("https://cloud.example.com/users/alice@example.com")
         ).toBe("https://cloud.example.com/users/alice@example.com");
+
+        // 5. Query/hash parameters and explicit port 0 must be rejected directly by normalizeServerUrl
+        for (const queryOrHashUrl of [
+            "https://cloud.example.com?token=secret",
+            "https://cloud.example.com/nextcloud?foo=bar",
+            "https://cloud.example.com#secret",
+            "cloud.example.com?token=secret",
+            "cloud.example.com#frag"
+        ]) {
+            expect(() => util.normalizeServerUrl(queryOrHashUrl)).toThrow(
+                /query or hash/i
+            );
+        }
+        for (const zeroPortUrl of [
+            "https://cloud.example.com:0",
+            "http://192.168.1.50:0/nextcloud",
+            "[::1]:0",
+            "https://[::1]:0"
+        ]) {
+            expect(() => util.normalizeServerUrl(zeroPortUrl)).toThrow(/Invalid/i);
+        }
     });
 });

@@ -6,6 +6,7 @@ import type {
 import * as obsidian from "obsidian";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RemoteItem, WebDavClientConfig } from "../src/types";
+import { util } from "../src/utilities";
 import { WebDavClient } from "../src/webdav/client";
 
 function createMockResponse(
@@ -1652,6 +1653,73 @@ describe("WebDavClient", () => {
             false
         );
         expect(requestedUrls.some((url: string) => url.includes(".github"))).toBe(false);
+    });
+
+    it("refuses recursive DELETE on remote directories containing unparseable or forbidden children, exposes getRemoteTarget(), and normalizes Basic Auth usernames", async () => {
+        const client: WebDavClient = new WebDavClient(
+            {
+                ...DEFAULT_TEST_SETTINGS,
+                remoteBaseDir: "Vault",
+                username: "  alice  "
+            },
+            1,
+            ".obsidian"
+        );
+        expect(client.getRemoteTarget()).toBe(
+            "https://cloud.example.com/remote.php/dav/files/alice/Vault"
+        );
+
+        const methodsSent: string[] = [];
+        let capturedAuthHeader: string = "";
+        vi.spyOn(obsidian, "requestUrl").mockImplementation(
+            (req: RequestUrlParam | string): RequestUrlResponsePromise => {
+                const param: RequestUrlParam =
+                    typeof req === "string" ? { url: req } : req;
+                const method: string = param.method ?? "GET";
+                methodsSent.push(method);
+                capturedAuthHeader = param.headers?.Authorization ?? "";
+                if (method === "PROPFIND" && param.url.endsWith("/Vault/ColonDir/")) {
+                    return createMockResponse(
+                        207,
+                        `<?xml version="1.0" encoding="utf-8"?>
+                        <d:multistatus xmlns:d="DAV:">
+                            <d:response>
+                                <d:href>/remote.php/dav/files/alice/Vault/ColonDir/</d:href>
+                                <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+                            </d:response>
+                            <d:response>
+                                <d:href>/remote.php/dav/files/alice/Vault/ColonDir/2026:01:01-backup.tar.gz</d:href>
+                                <d:propstat><d:prop><d:resourcetype/><d:getcontentlength>4096</d:getcontentlength></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+                            </d:response>
+                        </d:multistatus>`
+                    );
+                }
+                if (method === "PROPFIND" && param.url.endsWith("/Vault/ForbiddenDir/")) {
+                    return createMockResponse(
+                        207,
+                        `<?xml version="1.0" encoding="utf-8"?>
+                        <d:multistatus xmlns:d="DAV:">
+                            <d:response>
+                                <d:href>/remote.php/dav/files/alice/Vault/ForbiddenDir/</d:href>
+                                <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+                            </d:response>
+                            <d:response>
+                                <d:href>/remote.php/dav/files/alice/Vault/ForbiddenDir/Protected/</d:href>
+                                <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 403 Forbidden</d:status></d:propstat>
+                            </d:response>
+                        </d:multistatus>`
+                    );
+                }
+                throw new Error(`Unexpected ${method} to ${param.url}`);
+            }
+        );
+
+        await expect(client.deleteItem("ColonDir", true)).rejects.toThrow(/ENOTEMPTY/);
+        await expect(client.deleteItem("ForbiddenDir", true)).rejects.toThrow(/ENOTEMPTY/);
+        expect(methodsSent).toEqual(["PROPFIND", "PROPFIND"]);
+        expect(capturedAuthHeader).toBe(
+            util.encodeBasicAuth("alice", DEFAULT_TEST_SETTINGS.appPassword)
+        );
     });
 });
 

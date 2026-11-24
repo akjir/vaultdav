@@ -6,7 +6,12 @@ import type {
     WebDavRequestOptions
 } from "../types";
 import { util } from "../utilities";
-import { buildPropfindBody, parseMultiStatus, parseSingleStat } from "./xml_parser";
+import {
+    buildPropfindBody,
+    isRemoteDirectoryEmpty,
+    parseMultiStatus,
+    parseSingleStat
+} from "./xml_parser";
 
 export const MAX_CHUNKED_FILE_SIZE_BYTES: number = 1024 * 1024 * 1024;
 export const MAX_FILE_SIZE_BYTES: number = util.MAX_FILE_SIZE_BYTES;
@@ -65,19 +70,19 @@ export class WebDavClient {
             throw new Error("Nextcloud app password must not be empty or invalid");
         }
         const safeAppPassword: string = config.appPassword.trim();
+        const safeUsername: string =
+            typeof config.username === "string"
+                ? config.username.normalize("NFC").trim()
+                : "";
         const frozenSettings: Readonly<SanitizedClientSettings> = Object.freeze({
             chunkSizeMB: config.chunkSizeMB,
             chunkingThresholdMB: config.chunkingThresholdMB,
             remoteBaseDir: config.remoteBaseDir,
-            username: config.username
+            username: safeUsername
         });
         this.settings = frozenSettings;
         this.configDir =
             configDir !== "" ? util.normalizeVaultPath(configDir) : "";
-        this.authHeader = util.encodeBasicAuth(
-            frozenSettings.username,
-            safeAppPassword
-        );
         this.retryBaseMs =
             Number.isFinite(retryBaseMs) && retryBaseMs >= 0
                 ? retryBaseMs
@@ -96,6 +101,10 @@ export class WebDavClient {
             config.url,
             frozenSettings.username,
             util.normalizeVaultPath(frozenSettings.remoteBaseDir)
+        );
+        this.authHeader = util.encodeBasicAuth(
+            frozenSettings.username,
+            safeAppPassword
         );
     }
 
@@ -195,13 +204,13 @@ export class WebDavClient {
                     listResp.status
                 );
             }
-            const children: RemoteItem[] = parseMultiStatus(
+            const isEmpty: boolean = isRemoteDirectoryEmpty(
                 listResp.text,
                 this.settings.username,
                 this.settings.remoteBaseDir,
                 normalizedPath
             );
-            if (children.length > 0) {
+            if (!isEmpty) {
                 throw new Error(
                     `ENOTEMPTY: Remote directory not empty: ${normalizedPath}`
                 );
@@ -618,6 +627,10 @@ export class WebDavClient {
             return clampedMb * BYTES_PER_MB;
         }
         return DEFAULT_CHUNKING_THRESHOLD_MB * BYTES_PER_MB;
+    }
+
+    public getRemoteTarget(): string {
+        return this.baseUrl;
     }
 
     public async listDirectory(dirPath: string): Promise<RemoteItem[]> {

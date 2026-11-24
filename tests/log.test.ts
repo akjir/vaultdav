@@ -176,4 +176,61 @@ describe("log", () => {
             "123https://[REDACTED]@example.com/x"
         );
     });
+
+    it("redacts credentials hidden inside Error.cause, enumerable Error properties, nested plain objects, arrays, and cyclic references", () => {
+        const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+        const rootCause: Error = new Error(
+            "Upstream https://alice:cause-secret@cloud.example.com/dav failed"
+        );
+        const wrappedError: Error & {
+            cause?: unknown;
+            headers?: Record<string, string>;
+            url?: string;
+        } = new Error("Request failed");
+        wrappedError.cause = rootCause;
+        wrappedError.headers = {
+            Authorization: "Basic YWxpY2U6c2VjcmV0",
+            "X-Custom": "safe-value"
+        };
+        wrappedError.url = "https://alice:prop-secret@cloud.example.com/dav";
+
+        log.error("Wrapped failure", wrappedError);
+
+        const loggedError: unknown = errorSpy.mock.calls[0]?.[1];
+        expect(loggedError).toBeInstanceOf(Error);
+        const serializedWrapped: string = JSON.stringify(
+            loggedError,
+            Object.getOwnPropertyNames(loggedError)
+        );
+        expect(serializedWrapped).not.toContain("cause-secret");
+        expect(serializedWrapped).not.toContain("prop-secret");
+        expect(serializedWrapped).not.toContain("YWxpY2U6c2VjcmV0");
+        const loggedCause: unknown = (loggedError as Error & { cause?: unknown }).cause;
+        expect(loggedCause).toBeInstanceOf(Error);
+        expect((loggedCause as Error).message).toContain("https://[REDACTED]@cloud.example.com/dav");
+
+        const cyclicPayload: Record<string, unknown> = {
+            appPassword: "plain-app-password",
+            headers: {
+                authorization: "Basic dXNlcjpwYXNz",
+                cookie: "session=secret-cookie"
+            },
+            nested: ["https://bob:nested-secret@cloud.example.com/remote.php/dav"]
+        };
+        cyclicPayload.self = cyclicPayload;
+
+        log.error("Object failure", cyclicPayload);
+        const loggedObj: Record<string, unknown> = errorSpy.mock.calls[1]?.[1] as Record<
+            string,
+            unknown
+        >;
+        expect(loggedObj.appPassword).toBe("[REDACTED]");
+        expect((loggedObj.headers as Record<string, unknown>).authorization).toBe("[REDACTED]");
+        expect((loggedObj.headers as Record<string, unknown>).cookie).toBe("[REDACTED]");
+        expect((loggedObj.nested as string[])[0]).toBe(
+            "https://[REDACTED]@cloud.example.com/remote.php/dav"
+        );
+        expect(loggedObj.self).toBe("[Circular]");
+    });
 });

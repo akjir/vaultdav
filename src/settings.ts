@@ -34,10 +34,11 @@ export const MAX_SYNC_INTERVAL_MINUTES: number = 10080;
 export const MAX_SYNC_LOG_RETENTION_DAYS: number = 365;
 export const MIN_SYNC_LOG_RETENTION_DAYS: number = 1;
 
-const BARE_URL_USERINFO_REGEX: RegExp = /^[^/\s?#]+@/;
+const BARE_URL_USERINFO_REGEX: RegExp = /^[^/?#\\]+@/;
 const HTTP_URL_USERINFO_REGEX: RegExp = /^(https?:\/\/)[^/\s?#]+@/i;
+const QUERY_OR_HASH_REGEX: RegExp = /[?#]/;
 const SECRET_ID_REGEX: RegExp = /^[a-z0-9-]+$/;
-const URL_USERINFO_REGEX: RegExp = /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/\s?#]+@/i;
+const URL_USERINFO_REGEX: RegExp = /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/?#\\]+@/i;
 
 function applyMobileLowercaseInputAttributes(
     inputEl: HTMLInputElement,
@@ -60,6 +61,10 @@ export function hasEmbeddedUrlCredentials(value: string): boolean {
         URL_USERINFO_REGEX.test(trimmed) ||
         BARE_URL_USERINFO_REGEX.test(trimmed)
     );
+}
+
+export function hasServerUrlQueryOrHash(value: string): boolean {
+    return QUERY_OR_HASH_REGEX.test(value);
 }
 
 function parseNumericInput(value: unknown): number {
@@ -130,22 +135,13 @@ export function resolveWebDavUrlPreview(
                 text: "Server URL must use http:// or https://."
             };
         }
-        return {
-            isError: true,
-            isReady: false,
-            text: "Enter a valid server URL (http:// or https://)."
-        };
-    }
-    try {
-        const parsedUrl: URL = new URL(normalizedUrl);
-        if (parsedUrl.search !== "" || parsedUrl.hash !== "") {
+        if (message.includes("query or hash")) {
             return {
                 isError: true,
                 isReady: false,
                 text: "Server URL must not contain query or hash parameters."
             };
         }
-    } catch {
         return {
             isError: true,
             isReady: false,
