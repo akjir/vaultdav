@@ -8,13 +8,17 @@ All notable changes to this project will be documented in this file.
 - Add a dockable sync log view with run history, upload/download byte totals, file-level sync events, active conflicts, and Markdown export.
 - Add device-local sync history with configurable retention and automatic storage limits.
 - Show a clickable Desktop status bar indicator when a sync finishes with errors.
+- Show the full resolved Nextcloud WebDAV URL live in plugin settings.
 
 ### Changed
 - Synchronize vault content only by excluding the Obsidian configuration directory and hidden files without deleting existing files.
+- Assume `https://` automatically for bare server hostnames and allow only `http://` and `https://` URLs.
+- Disable mobile auto-capitalization on text and search inputs.
 
 ### Fixed
 - Harden local sync state and history storage against invalid paths, concurrent writes, and oversized files.
 - Harden the sync log view against unsafe file opening, excluded path exposure, unredacted clipboard exports, and view lifecycle race conditions.
+- Harden vault path, WebDAV URL, and exclusion validation against whitespace smuggling, malformed configuration paths, and empty credential authorities.
 - Improve credential redaction in sync logs to handle malformed URLs safely.
 
 ## [1.2.0] - 2026-11-24

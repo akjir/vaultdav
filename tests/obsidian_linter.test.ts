@@ -443,6 +443,7 @@ describe("Obsidian Plugin Linter static guard (eslint-plugin-obsidianmd)", () =>
         expect(extractedLiterals).toContain(
             "App password secret was not found in secret storage."
         );
+        expect(extractedLiterals).toContain("Resolved WebDAV URL");
         expect(extractedLiterals).toContain("Enter username");
         expect(extractedLiterals.length).toBeGreaterThanOrEqual(30);
     });

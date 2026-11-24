@@ -378,6 +378,10 @@ describe("SyncLogView and formatting helpers", () => {
             ".vaultdav-log-search-input"
         );
         expect(searchInput).not.toBeNull();
+        expect(searchInput?.getAttribute("autocapitalize")).toBe("none");
+        expect(searchInput?.getAttribute("autocorrect")).toBe("off");
+        expect(searchInput?.autocomplete).toBe("off");
+        expect(searchInput?.spellcheck).toBe(false);
         if (searchInput !== null) {
             searchInput.value = "does-not-exist";
             searchInput.dispatchEvent(new Event("input"));
@@ -651,6 +655,10 @@ describe("SyncLogView and formatting helpers", () => {
         const runSearchInput: HTMLInputElement | null =
             view.contentEl.querySelector(".vaultdav-log-run-search-input");
         expect(runSearchInput).not.toBeNull();
+        expect(runSearchInput?.getAttribute("autocapitalize")).toBe("none");
+        expect(runSearchInput?.getAttribute("autocorrect")).toBe("off");
+        expect(runSearchInput?.autocomplete).toBe("off");
+        expect(runSearchInput?.spellcheck).toBe(false);
         if (runSearchInput !== null) {
             runSearchInput.value = "Fail-90";
             runSearchInput.dispatchEvent(new Event("input"));

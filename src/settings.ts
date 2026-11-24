@@ -21,6 +21,12 @@ export type SettingGroupConstructor = new (
     containerEl: HTMLElement
 ) => SettingGroupBuilder;
 
+export interface WebDavUrlPreview {
+    isError: boolean;
+    isReady: boolean;
+    text: string;
+}
+
 export const DEFAULT_APP_PASSWORD_SECRET_ID: string = "vaultdav-app-password";
 export const DEFAULT_SETTINGS: Readonly<VaultDavSettings> =
     Object.freeze<VaultDavSettings>({
@@ -41,8 +47,25 @@ export const MAX_SYNC_INTERVAL_MINUTES: number = 10080;
 export const MAX_SYNC_LOG_RETENTION_DAYS: number = 365;
 export const MIN_SYNC_LOG_RETENTION_DAYS: number = 1;
 
+const BARE_URL_USERINFO_REGEX: RegExp = /^[^/\s?#]+@/;
+const HTTP_URL_USERINFO_REGEX: RegExp = /^(https?:\/\/)[^/\s?#]+@/i;
 const SECRET_ID_REGEX: RegExp = /^[a-z0-9-]+$/;
 const URL_USERINFO_REGEX: RegExp = /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/\s?#]+@/i;
+
+function applyMobileLowercaseInputAttributes(
+    inputEl: HTMLInputElement,
+    isUrl: boolean = false
+): void {
+    inputEl.autocapitalize = "none";
+    inputEl.setAttribute("autocapitalize", "none");
+    inputEl.setAttribute("autocorrect", "off");
+    inputEl.autocomplete = "off";
+    inputEl.spellcheck = false;
+    if (isUrl) {
+        inputEl.inputMode = "url";
+        inputEl.setAttribute("inputmode", "url");
+    }
+}
 
 export function createSettingGroup(
     containerEl: HTMLElement,
@@ -72,7 +95,11 @@ export function createSettingGroup(
 }
 
 export function hasEmbeddedUrlCredentials(value: string): boolean {
-    return URL_USERINFO_REGEX.test(value.trim());
+    const trimmed: string = value.trim();
+    return (
+        URL_USERINFO_REGEX.test(trimmed) ||
+        BARE_URL_USERINFO_REGEX.test(trimmed)
+    );
 }
 
 function parseNumericInput(value: unknown): number {
@@ -84,6 +111,153 @@ function parseNumericInput(value: unknown): number {
         return trimmed === "" ? Number.NaN : Number(trimmed);
     }
     return Number.NaN;
+}
+
+export function resolveRemoteBaseDir(
+    remoteBaseDir: string,
+    vaultName: string,
+    configDir: string
+): string {
+    const normalizedRemoteBaseDir: string = sanitizeRemoteBaseDir(
+        remoteBaseDir,
+        configDir
+    );
+    if (normalizedRemoteBaseDir !== "") {
+        return normalizedRemoteBaseDir;
+    }
+    const normalizedVaultName: string = sanitizeRemoteBaseDir(
+        vaultName,
+        configDir
+    );
+    return normalizedVaultName !== "" ? normalizedVaultName : "VaultDAV";
+}
+
+export function resolveWebDavUrlPreview(
+    rawUrl: string,
+    rawUsername: string,
+    rawRemoteBaseDir: string,
+    vaultName: string,
+    configDir: string
+): WebDavUrlPreview {
+    const trimmedUrl: string = rawUrl.trim();
+    if (trimmedUrl === "") {
+        return {
+            isError: false,
+            isReady: false,
+            text: "Enter server URL and username to preview the WebDAV URL."
+        };
+    }
+    if (util.hasControlChars(rawUrl)) {
+        return {
+            isError: true,
+            isReady: false,
+            text: "Enter a valid server URL (http:// or https://)."
+        };
+    }
+    const strippedUrl: string = trimmedUrl.replace(
+        HTTP_URL_USERINFO_REGEX,
+        "$1"
+    );
+    let normalizedUrl: string = "";
+    try {
+        normalizedUrl = util.normalizeServerUrl(strippedUrl);
+    } catch (err: unknown) {
+        const message: string = err instanceof Error ? err.message : "";
+        if (message.includes("HTTP or HTTPS")) {
+            return {
+                isError: true,
+                isReady: false,
+                text: "Server URL must use http:// or https://."
+            };
+        }
+        return {
+            isError: true,
+            isReady: false,
+            text: "Enter a valid server URL (http:// or https://)."
+        };
+    }
+    try {
+        const parsedUrl: URL = new URL(normalizedUrl);
+        if (parsedUrl.search !== "" || parsedUrl.hash !== "") {
+            return {
+                isError: true,
+                isReady: false,
+                text: "Server URL must not contain query or hash parameters."
+            };
+        }
+    } catch {
+        return {
+            isError: true,
+            isReady: false,
+            text: "Enter a valid server URL (http:// or https://)."
+        };
+    }
+
+    const trimmedUsername: string = rawUsername.trim();
+    if (trimmedUsername === "") {
+        return {
+            isError: false,
+            isReady: false,
+            text: "Enter username to preview the WebDAV URL."
+        };
+    }
+    const safeUsername: string = sanitizeUsername(rawUsername);
+    if (safeUsername === "") {
+        return {
+            isError: true,
+            isReady: false,
+            text: "Username must not contain colons, slashes, or control characters."
+        };
+    }
+
+    const trimmedRemoteBaseDir: string = rawRemoteBaseDir.trim();
+    const sanitizedRemoteBaseDir: string = sanitizeRemoteBaseDir(
+        rawRemoteBaseDir,
+        configDir
+    );
+    if (
+        trimmedRemoteBaseDir !== "" &&
+        trimmedRemoteBaseDir !== "/" &&
+        sanitizedRemoteBaseDir === ""
+    ) {
+        return {
+            isError: true,
+            isReady: false,
+            text: "Remote base directory cannot use excluded or invalid paths."
+        };
+    }
+
+    const effectiveBaseDir: string = resolveRemoteBaseDir(
+        sanitizedRemoteBaseDir,
+        vaultName,
+        configDir
+    );
+    try {
+        const baseUrl: string = util.buildNextcloudWebDavBaseUrl(
+            normalizedUrl,
+            safeUsername,
+            effectiveBaseDir
+        );
+        return {
+            isError: false,
+            isReady: true,
+            text: baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`
+        };
+    } catch (err: unknown) {
+        const message: string = err instanceof Error ? err.message : "";
+        if (message.toLowerCase().includes("username")) {
+            return {
+                isError: true,
+                isReady: false,
+                text: "Enter a valid Nextcloud username."
+            };
+        }
+        return {
+            isError: true,
+            isReady: false,
+            text: "Enter a valid server URL (http:// or https://)."
+        };
+    }
 }
 
 export function sanitizeAppPassword(value: string): string {
@@ -141,7 +315,16 @@ export function sanitizeServerUrl(value: string): string {
     if (util.hasControlChars(value)) {
         return "";
     }
-    return value.trim().replace(URL_USERINFO_REGEX, "$1");
+    const trimmed: string = value.trim();
+    if (trimmed === "") {
+        return "";
+    }
+    const stripped: string = trimmed.replace(HTTP_URL_USERINFO_REGEX, "$1");
+    try {
+        return util.normalizeServerUrl(stripped);
+    } catch {
+        return "";
+    }
 }
 
 export function sanitizeSyncInterval(value: unknown): number {
@@ -182,7 +365,11 @@ export function sanitizeUsername(value: string): string {
 }
 
 export class VaultDavSettingTab extends PluginSettingTab {
+    private draftRemoteBaseDir: string | null = null;
+    private draftUrl: string | null = null;
+    private draftUsername: string | null = null;
     private readonly pluginInstance: VaultDavPlugin;
+    private resolvedUrlEl: HTMLElement | null = null;
 
     public constructor(app: App, plugin: VaultDavPlugin) {
         super(app, plugin);
@@ -209,6 +396,79 @@ export class VaultDavSettingTab extends PluginSettingTab {
         }
     }
 
+    private attachRemoteBaseDirControl(setting: Setting): () => void {
+        this.draftRemoteBaseDir = null;
+        setting.addText((text) => {
+            applyMobileLowercaseInputAttributes(text.inputEl);
+            return text
+                .setPlaceholder(this.app.vault.getName())
+                .setValue(this.pluginInstance.settings.remoteBaseDir)
+                .onChange(async (value: string): Promise<void> => {
+                    this.draftRemoteBaseDir = value;
+                    await this.setControlValue("remoteBaseDir", value);
+                });
+        });
+        return (): void => {
+            this.draftRemoteBaseDir = null;
+        };
+    }
+
+    private attachResolvedUrlPreview(setting: Setting): () => void {
+        setting.settingEl.classList.add("vaultdav-settings-endpoint-row");
+        const previewEl: HTMLElement = setting.descEl.createDiv({
+            cls: "vaultdav-settings-endpoint-preview"
+        });
+        this.resolvedUrlEl = previewEl;
+        this.refreshResolvedUrlPreview();
+        return (): void => {
+            if (this.resolvedUrlEl === previewEl) {
+                this.resolvedUrlEl = null;
+            }
+        };
+    }
+
+    private attachServerUrlControl(setting: Setting): () => void {
+        this.draftUrl = null;
+        let inputEl: HTMLInputElement | null = null;
+        const handleBlur = (): void => {
+            if (inputEl === null) {
+                return;
+            }
+            const rawValue: string = inputEl.value;
+            if (rawValue.trim() === "") {
+                this.draftUrl = null;
+                this.refreshResolvedUrlPreview();
+                return;
+            }
+            const normalized: string = sanitizeServerUrl(rawValue);
+            if (normalized !== "") {
+                if (inputEl.value !== normalized) {
+                    inputEl.value = normalized;
+                }
+                this.draftUrl = null;
+                this.refreshResolvedUrlPreview();
+            }
+        };
+        setting.addText((text) => {
+            inputEl = text.inputEl;
+            applyMobileLowercaseInputAttributes(text.inputEl, true);
+            text.inputEl.addEventListener("blur", handleBlur);
+            return text
+                .setPlaceholder("https://cloud.example.com")
+                .setValue(this.pluginInstance.settings.url)
+                .onChange(async (value: string): Promise<void> => {
+                    this.draftUrl = value;
+                    await this.setControlValue("url", value);
+                });
+        });
+        return (): void => {
+            if (inputEl !== null) {
+                inputEl.removeEventListener("blur", handleBlur);
+            }
+            this.draftUrl = null;
+        };
+    }
+
     private attachTestConnectionButton(setting: Setting): void {
         setting.addButton((button) =>
             button
@@ -227,8 +487,29 @@ export class VaultDavSettingTab extends PluginSettingTab {
         );
     }
 
+    private attachUsernameControl(setting: Setting): () => void {
+        this.draftUsername = null;
+        setting.addText((text) => {
+            applyMobileLowercaseInputAttributes(text.inputEl);
+            return text
+                .setPlaceholder("Enter username")
+                .setValue(this.pluginInstance.settings.username)
+                .onChange(async (value: string): Promise<void> => {
+                    this.draftUsername = value;
+                    await this.setControlValue("username", value);
+                });
+        });
+        return (): void => {
+            this.draftUsername = null;
+        };
+    }
+
     public display(): void {
         const { containerEl } = this;
+        this.draftRemoteBaseDir = null;
+        this.draftUrl = null;
+        this.draftUsername = null;
+        this.resolvedUrlEl = null;
         if (typeof containerEl.empty === "function") {
             containerEl.empty();
         } else {
@@ -240,33 +521,15 @@ export class VaultDavSettingTab extends PluginSettingTab {
                 setting
                     .setName("Server URL")
                     .setDesc(
-                        "Nextcloud base URL or WebDAV endpoint (https://<domain>)."
-                    )
-                    .addText((text) => {
-                        text.inputEl.autocapitalize = "none";
-                        text.inputEl.spellcheck = false;
-                        return text
-                            .setPlaceholder("https://cloud.example.com")
-                            .setValue(this.pluginInstance.settings.url)
-                            .onChange(async (value: string): Promise<void> => {
-                                await this.setControlValue("url", value);
-                            });
-                    });
+                        "Nextcloud host or WebDAV URL (uses https:// if omitted; only http:// and https:// allowed)."
+                    );
+                this.attachServerUrlControl(setting);
             })
             .addSetting((setting: Setting): void => {
                 setting
                     .setName("Username")
-                    .setDesc("Nextcloud account username.")
-                    .addText((text) => {
-                        text.inputEl.autocapitalize = "none";
-                        text.inputEl.spellcheck = false;
-                        return text
-                            .setPlaceholder("Enter username")
-                            .setValue(this.pluginInstance.settings.username)
-                            .onChange(async (value: string): Promise<void> => {
-                                await this.setControlValue("username", value);
-                            });
-                    });
+                    .setDesc("Nextcloud account username.");
+                this.attachUsernameControl(setting);
             })
             .addSetting((setting: Setting): void => {
                 setting
@@ -281,22 +544,16 @@ export class VaultDavSettingTab extends PluginSettingTab {
                     .setName("Remote base directory")
                     .setDesc(
                         "Target remote folder path inside the Nextcloud user files root."
-                    )
-                    .addText((text) => {
-                        text.inputEl.autocapitalize = "none";
-                        text.inputEl.spellcheck = false;
-                        return text
-                            .setPlaceholder(this.app.vault.getName())
-                            .setValue(
-                                this.pluginInstance.settings.remoteBaseDir
-                            )
-                            .onChange(async (value: string): Promise<void> => {
-                                await this.setControlValue(
-                                    "remoteBaseDir",
-                                    value
-                                );
-                            });
-                    });
+                    );
+                this.attachRemoteBaseDirControl(setting);
+            })
+            .addSetting((setting: Setting): void => {
+                setting
+                    .setName("Resolved WebDAV URL")
+                    .setDesc(
+                        "Full WebDAV endpoint constructed from server URL, username, and remote base directory."
+                    );
+                this.attachResolvedUrlPreview(setting);
             });
 
         createSettingGroup(containerEl)
@@ -489,35 +746,29 @@ export class VaultDavSettingTab extends PluginSettingTab {
             {
                 items: [
                     {
-                        control: {
-                            defaultValue: DEFAULT_SETTINGS.url,
-                            key: "url",
-                            placeholder: "https://cloud.example.com",
-                            type: "text"
-                        },
-                        desc: "Nextcloud base URL or WebDAV endpoint (https://<domain>).",
-                        name: "Server URL"
+                        desc: "Nextcloud host or WebDAV URL (uses https:// if omitted; only http:// and https:// allowed).",
+                        name: "Server URL",
+                        render: (setting: Setting): (() => void) =>
+                            this.attachServerUrlControl(setting)
                     },
                     {
-                        control: {
-                            defaultValue: DEFAULT_SETTINGS.username,
-                            key: "username",
-                            placeholder: "Enter username",
-                            type: "text"
-                        },
                         desc: "Nextcloud account username.",
-                        name: "Username"
+                        name: "Username",
+                        render: (setting: Setting): (() => void) =>
+                            this.attachUsernameControl(setting)
                     },
                     appPasswordDefinition,
                     {
-                        control: {
-                            defaultValue: DEFAULT_SETTINGS.remoteBaseDir,
-                            key: "remoteBaseDir",
-                            placeholder: this.app.vault.getName(),
-                            type: "text"
-                        },
                         desc: "Target remote folder path inside the Nextcloud user files root.",
-                        name: "Remote base directory"
+                        name: "Remote base directory",
+                        render: (setting: Setting): (() => void) =>
+                            this.attachRemoteBaseDirControl(setting)
+                    },
+                    {
+                        desc: "Full WebDAV endpoint constructed from server URL, username, and remote base directory.",
+                        name: "Resolved WebDAV URL",
+                        render: (setting: Setting): (() => void) =>
+                            this.attachResolvedUrlPreview(setting)
                     }
                 ],
                 type: "group"
@@ -615,7 +866,35 @@ export class VaultDavSettingTab extends PluginSettingTab {
         return definitions;
     }
 
+    public hide(): void {
+        this.draftRemoteBaseDir = null;
+        this.draftUrl = null;
+        this.draftUsername = null;
+        this.resolvedUrlEl = null;
+    }
+
+    private refreshResolvedUrlPreview(): void {
+        if (this.resolvedUrlEl === null) {
+            return;
+        }
+        const preview: WebDavUrlPreview = resolveWebDavUrlPreview(
+            this.draftUrl ?? this.pluginInstance.settings.url,
+            this.draftUsername ?? this.pluginInstance.settings.username,
+            this.draftRemoteBaseDir ??
+                this.pluginInstance.settings.remoteBaseDir,
+            this.app.vault.getName(),
+            this.app.vault.configDir
+        );
+        this.resolvedUrlEl.textContent = preview.text;
+        this.resolvedUrlEl.classList.toggle("is-error", preview.isError);
+        this.resolvedUrlEl.classList.toggle(
+            "is-placeholder",
+            !preview.isReady && !preview.isError
+        );
+    }
+
     public async setControlValue(key: string, value: unknown): Promise<void> {
+        let shouldRefreshPreview: boolean = false;
         switch (key) {
             case "appPasswordSecret":
                 this.pluginInstance.settings.appPasswordSecret =
@@ -642,6 +921,7 @@ export class VaultDavSettingTab extends PluginSettingTab {
                         typeof value === "string" ? value : "",
                         this.app.vault.configDir
                     );
+                shouldRefreshPreview = true;
                 break;
             case "syncInterval":
                 this.pluginInstance.settings.syncInterval =
@@ -655,14 +935,19 @@ export class VaultDavSettingTab extends PluginSettingTab {
                 this.pluginInstance.settings.url = sanitizeServerUrl(
                     typeof value === "string" ? value : ""
                 );
+                shouldRefreshPreview = true;
                 break;
             case "username":
                 this.pluginInstance.settings.username = sanitizeUsername(
                     typeof value === "string" ? value : ""
                 );
+                shouldRefreshPreview = true;
                 break;
             default:
                 return;
+        }
+        if (shouldRefreshPreview) {
+            this.refreshResolvedUrlPreview();
         }
         await this.pluginInstance.saveSettings();
     }

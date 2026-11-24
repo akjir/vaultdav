@@ -903,4 +903,43 @@ describe("VaultDavPlugin lifecycle, settings, and actions", () => {
             expect.any(Error)
         );
     });
+
+    it("normalizes bare server URLs to https://, allows http://, rejects non-HTTP schemes, and scrubs bare embedded URL credentials on loadSettings()", async () => {
+        const { plugin } = createTestPlugin();
+        const saveDataSpy = vi
+            .spyOn(plugin, "saveData")
+            .mockResolvedValue(undefined);
+
+        vi.spyOn(plugin, "loadData").mockResolvedValueOnce({
+            url: "example.com/nextcloud",
+            username: "stefan"
+        });
+        await plugin.loadSettings();
+        expect(plugin.settings.url).toBe("https://example.com/nextcloud");
+        expect(saveDataSpy).not.toHaveBeenCalled();
+
+        vi.spyOn(plugin, "loadData").mockResolvedValueOnce({
+            url: "http://192.168.1.50:8080",
+            username: "stefan"
+        });
+        await plugin.loadSettings();
+        expect(plugin.settings.url).toBe("http://192.168.1.50:8080");
+        expect(saveDataSpy).not.toHaveBeenCalled();
+
+        vi.spyOn(plugin, "loadData").mockResolvedValueOnce({
+            url: "ftp://example.com",
+            username: "stefan"
+        });
+        await plugin.loadSettings();
+        expect(plugin.settings.url).toBe("");
+        expect(saveDataSpy).not.toHaveBeenCalled();
+
+        vi.spyOn(plugin, "loadData").mockResolvedValueOnce({
+            url: "alice:secret@cloud.example.com",
+            username: "alice"
+        });
+        await plugin.loadSettings();
+        expect(plugin.settings.url).toBe("");
+        expect(saveDataSpy).toHaveBeenCalledTimes(1);
+    });
 });

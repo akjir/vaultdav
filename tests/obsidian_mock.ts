@@ -353,10 +353,10 @@ export class Setting {
     public textOnChange: ((value: string) => unknown) | null = null;
 
     public constructor(containerEl: HTMLElement) {
-        this.settingEl = document.createElement("div");
-        this.nameEl = document.createElement("div");
-        this.descEl = document.createElement("div");
-        this.controlEl = document.createElement("div");
+        this.settingEl = attachDomHelpers(document.createElement("div"));
+        this.nameEl = attachDomHelpers(document.createElement("div"));
+        this.descEl = attachDomHelpers(document.createElement("div"));
+        this.controlEl = attachDomHelpers(document.createElement("div"));
         this.settingEl.appendChild(this.nameEl);
         this.settingEl.appendChild(this.descEl);
         this.settingEl.appendChild(this.controlEl);

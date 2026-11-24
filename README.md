@@ -22,14 +22,14 @@ Synchronize Obsidian vaults bidirectionally with Nextcloud via WebDAV.
 1. Open Nextcloud and go to **Settings > Security > Devices & sessions**.
 2. Enter a device name (for example, `Obsidian VaultDAV`) and click **Create new app password**.
 3. Copy the generated App Password.
-4. Enter your Nextcloud base URL (`https://<domain>`) in **Server URL**, your account name in **Username**, select or create a secret containing the generated password in **App password** (stored in Obsidian SecretStorage), and enter the target folder in **Remote base directory**. VaultDAV resolves requests against:
+4. Enter your Nextcloud host or URL (`example.com`, `https://<domain>`, or `http://<host>`) in **Server URL**, your account name in **Username**, select or create a secret containing the generated password in **App password** (stored in Obsidian SecretStorage), and enter the target folder in **Remote base directory**. If you omit the scheme, VaultDAV assumes `https://` automatically (only `http://` and `https://` are allowed). Check **Resolved WebDAV URL** in Settings to verify the full endpoint:
    `https://<domain>/remote.php/dav/files/<user>/<remote-base-dir>/`
 
 ## Settings
 
 | Setting | Property (`VaultDavSettings`) | Description |
 | :--- | :--- | :--- |
-| Server URL | `url` | Nextcloud base URL or WebDAV endpoint (`https://<domain>`). |
+| Server URL | `url` | Nextcloud host or WebDAV URL (uses `https://` if omitted; only `http://` and `https://` allowed). |
 | Username | `username` | Nextcloud account username. |
 | App password | `appPasswordSecret` | Secret reference ID in Obsidian SecretStorage for your Nextcloud app password (never persisted in plaintext in `data.json`). |
 | Remote base directory | `remoteBaseDir` | Target remote folder path inside the Nextcloud user files root. |
@@ -59,7 +59,7 @@ Synchronize Obsidian vaults bidirectionally with Nextcloud via WebDAV.
 
 - **Desktop & Mobile:** Supports Desktop, Android, and iOS (`isDesktopOnly: false`) on Obsidian 1.11.4 or newer with zero runtime dependencies.
 - **iOS TLS requirement:** Apple iOS blocks self-signed TLS certificates in Obsidian. Use a valid CA-signed HTTPS certificate (for example, Let's Encrypt) on your Nextcloud server when syncing from iOS.
-- **Network & privacy:** VaultDAV communicates only with the Nextcloud HTTPS server that you configure. It sends no telemetry or requests to third-party servers. Your Nextcloud app password is stored in Obsidian SecretStorage (local to each device), while `<config-dir>/plugins/vaultdav/data.json` stores only the secret reference ID (`appPasswordSecret`) and remains excluded from synchronization. Legacy plaintext `appPassword` entries in `data.json` are migrated automatically into SecretStorage and removed from `data.json` on load.
+- **Network & privacy:** VaultDAV communicates only with the Nextcloud server that you configure (`https://` by default, or `http://` when explicitly specified). It sends no telemetry or requests to third-party servers. Your Nextcloud app password is stored in Obsidian SecretStorage (local to each device), while `<config-dir>/plugins/vaultdav/data.json` stores only the secret reference ID (`appPasswordSecret`) and remains excluded from synchronization. Legacy plaintext `appPassword` entries in `data.json` are migrated automatically into SecretStorage and removed from `data.json` on load.
 
 ## Development & Build
 

@@ -333,6 +333,46 @@
     cursor: pointer;
 }
 
+.vaultdav-settings-endpoint-row .setting-item-info {
+    width: 100%;
+    padding-right: 0;
+}
+
+.vaultdav-settings-endpoint-row .setting-item-control {
+    display: none;
+}
+
+.vaultdav-settings-endpoint-preview {
+    margin-top: var(--size-4-2);
+    padding: var(--size-4-2);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-s);
+    background-color: var(--background-primary);
+    font-family: var(--font-monospace);
+    font-size: var(--font-ui-smaller);
+    color: var(--text-normal);
+    user-select: text;
+    -webkit-user-select: text;
+    word-break: break-all;
+}
+
+.vaultdav-settings-endpoint-preview.is-placeholder {
+    font-family: var(--font-interface);
+    color: var(--text-muted);
+    user-select: none;
+    -webkit-user-select: none;
+    word-break: break-word;
+}
+
+.vaultdav-settings-endpoint-preview.is-error {
+    font-family: var(--font-interface);
+    border-color: var(--text-error);
+    color: var(--text-error);
+    user-select: none;
+    -webkit-user-select: none;
+    word-break: break-word;
+}
+
 @container (min-width: 680px) {
     .vaultdav-log-workspace-grid {
         grid-template-columns: minmax(250px, 320px) minmax(0, 1fr);

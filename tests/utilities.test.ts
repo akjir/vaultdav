@@ -67,7 +67,65 @@ describe("utilities and logging", () => {
         expect(util.encodeWebDavPath("../OtherFolder")).toBe("");
     });
 
-    it("builds Nextcloud WebDAV base URLs and rejects non-HTTPS, embedded credentials, and empty usernames", () => {
+    it("builds Nextcloud WebDAV base URLs, defaults bare hosts to HTTPS, allows HTTP and HTTPS only, and rejects invalid URLs, embedded credentials, and empty usernames", () => {
+        expect(util.normalizeServerUrl("example.com")).toBe("https://example.com");
+        expect(util.normalizeServerUrl("  example.com/nextcloud  ")).toBe(
+            "https://example.com/nextcloud"
+        );
+        expect(util.normalizeServerUrl("example.com:8443/nextcloud")).toBe(
+            "https://example.com:8443/nextcloud"
+        );
+        expect(util.normalizeServerUrl("localhost:8080")).toBe(
+            "https://localhost:8080"
+        );
+        expect(util.normalizeServerUrl("192.168.1.50")).toBe(
+            "https://192.168.1.50"
+        );
+        expect(util.normalizeServerUrl("[::1]:8443")).toBe(
+            "https://[::1]:8443"
+        );
+        expect(util.normalizeServerUrl("HTTP://192.168.1.50:8080/nextcloud")).toBe(
+            "http://192.168.1.50:8080/nextcloud"
+        );
+        expect(util.normalizeServerUrl("HTTPS://cloud.example.com/")).toBe(
+            "https://cloud.example.com/"
+        );
+        expect(util.normalizeServerUrl("http://nextcloud")).toBe(
+            "http://nextcloud"
+        );
+
+        expect(
+            util.buildNextcloudWebDavBaseUrl(
+                "example.com",
+                "stefan",
+                "Vault"
+            )
+        ).toBe("https://example.com/remote.php/dav/files/stefan/Vault");
+
+        expect(
+            util.buildNextcloudWebDavBaseUrl(
+                "example.com/nextcloud",
+                "stefan",
+                "Vault"
+            )
+        ).toBe("https://example.com/nextcloud/remote.php/dav/files/stefan/Vault");
+
+        expect(
+            util.buildNextcloudWebDavBaseUrl(
+                "http://cloud.example.com",
+                "alice",
+                "Notes"
+            )
+        ).toBe("http://cloud.example.com/remote.php/dav/files/alice/Notes");
+
+        expect(
+            util.buildNextcloudWebDavBaseUrl(
+                "http://192.168.1.50:8080/nextcloud/",
+                "stefan",
+                "Vault"
+            )
+        ).toBe("http://192.168.1.50:8080/nextcloud/remote.php/dav/files/stefan/Vault");
+
         expect(
             util.buildNextcloudWebDavBaseUrl(
                 "https://cloud.example.com/",
@@ -140,17 +198,47 @@ describe("utilities and logging", () => {
             )
         ).toBe("https://cloud.example.com/nextcloud/remote.php/dav/files/alice/Notes");
 
-        expect(() =>
-            util.buildNextcloudWebDavBaseUrl(
-                "http://cloud.example.com",
-                "alice",
-                "Notes"
-            )
-        ).toThrow(/HTTPS/i);
+        for (const forbiddenSchemeUrl of [
+            "ftp://cloud.example.com",
+            "ftps://cloud.example.com",
+            "file:///etc/passwd",
+            "file:/etc/passwd",
+            "davs://cloud.example.com",
+            "ws://cloud.example.com",
+            "wss://cloud.example.com",
+            "javascript:alert(1)",
+            "data:text/html,hi",
+            "mailto:user@example.com",
+            "ftp:21"
+        ]) {
+            expect(() =>
+                util.buildNextcloudWebDavBaseUrl(
+                    forbiddenSchemeUrl,
+                    "alice",
+                    "Notes"
+                )
+            ).toThrow(/HTTP or HTTPS/i);
+        }
 
         expect(() =>
             util.buildNextcloudWebDavBaseUrl(
                 "https://alice:secret@cloud.example.com",
+                "alice",
+                "Notes"
+            )
+        ).toThrow(/credentials/i);
+
+        expect(() =>
+            util.buildNextcloudWebDavBaseUrl(
+                "http://alice:secret@cloud.example.com",
+                "alice",
+                "Notes"
+            )
+        ).toThrow(/credentials/i);
+
+        expect(() =>
+            util.buildNextcloudWebDavBaseUrl(
+                "alice:secret@cloud.example.com",
                 "alice",
                 "Notes"
             )
@@ -164,13 +252,32 @@ describe("utilities and logging", () => {
             )
         ).toThrow(/username/i);
 
-        expect(() =>
-            util.buildNextcloudWebDavBaseUrl(
-                "not-a-valid-url",
-                "alice",
-                "Notes"
-            )
-        ).toThrow(/Invalid/i);
+        for (const invalidUrl of [
+            "",
+            "   ",
+            "not-a-valid-url",
+            "12345",
+            "0x7f000001",
+            "http:example.com",
+            "https:example.com",
+            "http:/example.com",
+            "http://",
+            "https://",
+            "https:///example.com",
+            "//example.com",
+            "/remote.php/dav",
+            "example.",
+            ".example.com",
+            "example..com",
+            "example.com\\dav",
+            "example.com:0",
+            "example.com:70000",
+            "example com"
+        ]) {
+            expect(() =>
+                util.buildNextcloudWebDavBaseUrl(invalidUrl, "alice", "Notes")
+            ).toThrow(/Invalid/i);
+        }
     });
 
     it("decodes WebDAV href values and enforces username boundaries, traversal, null-byte, and URIError safety", () => {
@@ -545,11 +652,25 @@ describe("utilities and logging", () => {
         ).toBeNull();
         expect(
             util.decodeWebDavHref(
-                "http://cloud.example.com/remote.php/dav/files/alice/Obsidian%20Vault/pwned.md",
+                "ftp://cloud.example.com/remote.php/dav/files/alice/Obsidian%20Vault/pwned.md",
                 "alice",
                 "Obsidian Vault"
             )
         ).toBeNull();
+        expect(
+            util.decodeWebDavHref(
+                "javascript://cloud.example.com/remote.php/dav/files/alice/Obsidian%20Vault/pwned.md",
+                "alice",
+                "Obsidian Vault"
+            )
+        ).toBeNull();
+        expect(
+            util.decodeWebDavHref(
+                "http://cloud.example.com/remote.php/dav/files/alice/Obsidian%20Vault/Note.md",
+                "alice",
+                "Obsidian Vault"
+            )
+        ).toBe("Note.md");
         expect(
             util.decodeWebDavHref(
                 "//evil.example.com/remote.php/dav/files/alice/Obsidian%20Vault/pwned.md",
@@ -868,5 +989,107 @@ describe("utilities and logging", () => {
         expect(util.formatByteSize(1536)).toBe("1.5 KB");
         expect(util.formatByteSize(2 * 1024 * 1024)).toBe("2.0 MB");
         expect(util.formatByteSize(1.5 * 1024 * 1024 * 1024)).toBe("1.50 GB");
+    });
+
+    it("neutralizes leading-slash whitespace exclusion bypasses, href whitespace aliasing, fail-open configDir, and empty-userinfo @ authority bypasses", () => {
+        // 1. Leading slash + leading whitespace must not bypass isExcludedPath or break normalizeVaultPath idempotency
+        for (const smuggledPath of [
+            "/ .obsidian/plugins/vaultdav/data.json",
+            "\\ .obsidian\\plugins\\vaultdav\\data.json",
+            "/\u00a0.obsidian/plugins/vaultdav/data.json",
+            "/\ufeff.obsidian/plugins/vaultdav/data.json",
+            "/ custom-config/plugins/vaultdav/data.json",
+            "/ .git/config",
+            "/ node_modules/pkg/index.js",
+            "/ desktop.ini",
+            "Notes/ .hidden.md",
+            "Notes/vaultdav\u00a0/main.js",
+            "Notes/vaultdav\u202f/main.js",
+            "Notes/vaultdav\ufeff/main.js"
+        ]) {
+            expect(util.normalizeVaultPath(smuggledPath)).toBe("");
+            expect(util.isExcludedPath(smuggledPath, ".obsidian")).toBe(true);
+            expect(util.isExcludedPath(smuggledPath, "custom-config")).toBe(true);
+        }
+        expect(() =>
+            util.getConflictPath(
+                "/ .obsidian/plugins/vaultdav/data.json",
+                Date.UTC(2026, 9, 14, 19, 51, 31)
+            )
+        ).toThrow(/Conflict path/i);
+        expect(() =>
+            util.buildNextcloudWebDavBaseUrl(
+                "https://cloud.example.com",
+                "alice",
+                "/ .obsidian"
+            )
+        ).toThrow(/remoteBaseDir/i);
+
+        // Outer user-input padding around slashes remains supported and idempotent
+        expect(util.normalizeVaultPath("  /Notes//Subfolder/  ")).toBe(
+            "Notes/Subfolder"
+        );
+        expect(
+            util.normalizeVaultPath(
+                util.normalizeVaultPath("  /Notes//Subfolder/  ")
+            )
+        ).toBe("Notes/Subfolder");
+
+        // 2. WebDAV href segments with leading/trailing ASCII or Unicode whitespace must return null (no silent aliasing)
+        for (const aliasedHref of [
+            "/remote.php/dav/files/alice/Vault/%20note.md",
+            "/remote.php/dav/files/alice/Vault/%20Folder/note.md",
+            "/remote.php/dav/files/alice/Vault/Notes/note.md%20",
+            "/remote.php/dav/files/alice/Vault/Notes/note.md%C2%A0",
+            "/remote.php/dav/files/alice/Vault/Notes/note.md%E2%80%AF",
+            "/remote.php/dav/files/alice/Vault/Notes/note.md%EF%BB%BF",
+            "/remote.php/dav/files/alice/Vault/Notes/note.md%E3%80%80",
+            "/remote.php/dav/files/alice/Vault/.obsidian/plugins/vaultdav%C2%A0/main.js",
+            "/remote.php/dav/files/alice/Vault/.obsidian/plugins/vaultdav%E2%80%AF/main.js",
+            "/remote.php/dav/files/alice/Vault/.obsidian/plugins/vaultdav.%EF%BB%BF/main.js",
+            "/remote.php/dav/files/alice/Vault/%EF%BB%BF.obsidian/plugins/vaultdav/data.json"
+        ]) {
+            expect(
+                util.decodeWebDavHref(aliasedHref, "alice", "Vault")
+            ).toBeNull();
+        }
+
+        // 3. Non-empty malformed configDir in isExcludedPath must fail closed
+        for (const invalidConfigDir of [
+            "../custom-config",
+            "custom-config.",
+            "custom-config\0",
+            "/",
+            "   ",
+            "/ custom-config"
+        ]) {
+            expect(
+                util.isExcludedPath(
+                    "custom-config/plugins/vaultdav/data.json",
+                    invalidConfigDir
+                )
+            ).toBe(true);
+            expect(util.isExcludedPath("Notes/Daily.md", invalidConfigDir)).toBe(
+                true
+            );
+        }
+
+        // 4. Empty-userinfo @ authorities must be rejected in normalizeServerUrl while @ in path remains allowed
+        for (const atAuthorityUrl of [
+            "https://:@cloud.example.com",
+            "https://@cloud.example.com",
+            "http://@cloud.example.com/nextcloud",
+            "@cloud.example.com"
+        ]) {
+            expect(() => util.normalizeServerUrl(atAuthorityUrl)).toThrow(
+                /credentials/i
+            );
+            expect(() =>
+                util.buildNextcloudWebDavBaseUrl(atAuthorityUrl, "alice", "Vault")
+            ).toThrow(/credentials/i);
+        }
+        expect(
+            util.normalizeServerUrl("https://cloud.example.com/users/alice@example.com")
+        ).toBe("https://cloud.example.com/users/alice@example.com");
     });
 });

@@ -11,12 +11,33 @@ const BASE64_CHARS: string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx
 const CONFLICT_COPY_FILENAME_REGEX: RegExp =
     /^(.+)\.conflict-(\d{8}-\d{6})(?:-\d+)?(\.[^./]+)?$/i;
 const DOTS_ONLY_REGEX: RegExp = /^\.+$/;
+const EXPLICIT_SCHEME_REGEX: RegExp = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//;
+const FORBIDDEN_BARE_SCHEMES_LOWER: ReadonlySet<string> = new Set<string>([
+    "about",
+    "blob",
+    "data",
+    "dav",
+    "davs",
+    "file",
+    "ftp",
+    "ftps",
+    "http",
+    "https",
+    "javascript",
+    "mailto",
+    "smb",
+    "ssh",
+    "tel",
+    "vbscript",
+    "ws",
+    "wss"
+]);
 const FORBIDDEN_OBJECT_KEYS: ReadonlySet<string> = new Set<string>([
     "__proto__",
     "constructor",
     "prototype"
 ]);
-const HTTPS_PROTOCOL_REGEX: RegExp = /^https:\/\//i;
+const HTTP_OR_HTTPS_PROTOCOL_REGEX: RegExp = /^https?:\/\//i;
 const IGNORED_SEGMENTS_LOWER: ReadonlySet<string> = new Set<string>([
     "desktop.ini",
     "node_modules",
@@ -29,10 +50,13 @@ const NEXTCLOUD_ALT_ENDPOINTS_LOWER: ReadonlySet<string> = new Set<string>([
     "public.php",
     "status.php"
 ]);
+const PORT_DIGITS_REGEX: RegExp = /^\d{1,5}$/;
 const QUERY_OR_HASH_REGEX: RegExp = /[?#]/;
+const SCHEME_NAME_REGEX: RegExp = /^[a-zA-Z][a-zA-Z0-9+.-]*$/;
 const TRAILING_DOT_OR_SPACE_REGEX: RegExp = /[. ]$/;
 const TRAILING_SLASHES_REGEX: RegExp = /\/+$/;
 const URI_SCHEME_REGEX: RegExp = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+const WHITESPACE_CHAR_REGEX: RegExp = /\s/;
 
 export function areArrayBuffersEqual(a: ArrayBuffer, b: ArrayBuffer): boolean {
     if (a === b) {
@@ -56,10 +80,10 @@ export function buildNextcloudWebDavBaseUrl(
     username: string,
     remoteBaseDir: string
 ): string {
-    const rawUrl: string = url.trim();
-    const parsedUrl: URL = parseServerUrl(rawUrl);
-    if (parsedUrl.protocol !== "https:") {
-        throw new Error("Nextcloud server URL must use HTTPS");
+    const normalizedUrl: string = normalizeServerUrl(url);
+    const parsedUrl: URL = parseServerUrl(normalizedUrl);
+    if (parsedUrl.protocol !== "https:" && parsedUrl.protocol !== "http:") {
+        throw new Error("Nextcloud server URL must use HTTP or HTTPS");
     }
     if (parsedUrl.username !== "" || parsedUrl.password !== "") {
         throw new Error("Nextcloud server URL must not contain embedded credentials");
@@ -142,7 +166,7 @@ export function decodeWebDavHref(
         return null;
     }
     if (URI_SCHEME_REGEX.test(rawPathname)) {
-        if (!HTTPS_PROTOCOL_REGEX.test(rawPathname)) {
+        if (!HTTP_OR_HTTPS_PROTOCOL_REGEX.test(rawPathname)) {
             return null;
         }
         try {
@@ -202,14 +226,7 @@ export function decodeWebDavHref(
             return null;
         }
         const normalizedSegment: string = decodedPart.normalize("NFC");
-        const trimmedSegment: string = normalizedSegment.trim();
-        if (
-            trimmedSegment === "" ||
-            DOTS_ONLY_REGEX.test(trimmedSegment) ||
-            TRAILING_DOT_OR_SPACE_REGEX.test(normalizedSegment) ||
-            normalizedSegment.includes(":") ||
-            FORBIDDEN_OBJECT_KEYS.has(trimmedSegment.toLowerCase())
-        ) {
+        if (isInvalidPathSegment(normalizedSegment)) {
             return null;
         }
         decodedSegments.push(normalizedSegment);
@@ -315,6 +332,18 @@ export function encodeWebDavPath(path: string): string {
         .split("/")
         .map((segment: string) => encodeURIComponent(segment))
         .join("/");
+}
+
+function findAuthorityEnd(value: string): number {
+    let end: number = value.length;
+    for (let i: number = 0; i < value.length; i += 1) {
+        const ch: string = value.charAt(i);
+        if (ch === "/" || ch === "?" || ch === "#") {
+            end = i;
+            break;
+        }
+    }
+    return end;
 }
 
 export function formatByteSize(bytes: number): string {
@@ -505,14 +534,18 @@ export function isExcludedPath(path: string, configDir: string = ""): boolean {
     }
     const lower: string = normalized.toLowerCase();
 
-    const normalizedConfigDir: string =
-        configDir !== "" ? normalizeVaultPath(configDir).toLowerCase() : "";
-    if (
-        normalizedConfigDir !== "" &&
-        (lower === normalizedConfigDir ||
-            lower.startsWith(`${normalizedConfigDir}/`))
-    ) {
-        return true;
+    if (configDir !== "") {
+        const normalizedConfigDir: string =
+            normalizeVaultPath(configDir).toLowerCase();
+        if (normalizedConfigDir === "") {
+            return true;
+        }
+        if (
+            lower === normalizedConfigDir ||
+            lower.startsWith(`${normalizedConfigDir}/`)
+        ) {
+            return true;
+        }
     }
 
     const segments: string[] = lower.split("/");
@@ -535,6 +568,18 @@ export function isExplicitRootPath(path: string): boolean {
     return trimmed === "" || trimmed === "/";
 }
 
+function isInvalidPathSegment(segment: string): boolean {
+    const trimmedSegment: string = segment.trim();
+    return (
+        trimmedSegment === "" ||
+        trimmedSegment !== segment ||
+        DOTS_ONLY_REGEX.test(trimmedSegment) ||
+        TRAILING_DOT_OR_SPACE_REGEX.test(segment) ||
+        segment.includes(":") ||
+        FORBIDDEN_OBJECT_KEYS.has(trimmedSegment.toLowerCase())
+    );
+}
+
 export function normalizeEtag(rawEtag: string | null | undefined): string {
     if (rawEtag === undefined || rawEtag === null) {
         return "";
@@ -547,6 +592,147 @@ export function normalizeEtag(rawEtag: string | null | undefined): string {
         cleaned = cleaned.slice(1, -1);
     }
     return cleaned;
+}
+
+export function normalizeServerUrl(rawUrl: string): string {
+    if (hasControlChars(rawUrl)) {
+        throw new Error("Invalid Nextcloud server URL");
+    }
+    const trimmed: string = rawUrl.trim();
+    if (
+        trimmed === "" ||
+        trimmed.includes("\\") ||
+        trimmed.startsWith("/") ||
+        trimmed.startsWith(":") ||
+        WHITESPACE_CHAR_REGEX.test(trimmed)
+    ) {
+        throw new Error("Invalid Nextcloud server URL");
+    }
+
+    const schemeMatch: RegExpExecArray | null = EXPLICIT_SCHEME_REGEX.exec(trimmed);
+    let candidateUrl: string = "";
+    let hadExplicitScheme: boolean = false;
+    let hasExplicitPort: boolean = false;
+    let rawBareHost: string = "";
+
+    if (schemeMatch !== null) {
+        const scheme: string = (schemeMatch[1] ?? "").toLowerCase();
+        if (scheme !== "http" && scheme !== "https") {
+            throw new Error("Nextcloud server URL must use HTTP or HTTPS");
+        }
+        const afterScheme: string = trimmed.slice(schemeMatch[0].length);
+        if (
+            afterScheme === "" ||
+            afterScheme.startsWith("/") ||
+            afterScheme.startsWith("?") ||
+            afterScheme.startsWith("#")
+        ) {
+            throw new Error("Invalid Nextcloud server URL");
+        }
+        candidateUrl = `${scheme}://${afterScheme}`;
+        hadExplicitScheme = true;
+    } else {
+        const authorityEnd: number = findAuthorityEnd(trimmed);
+        const authority: string = trimmed.slice(0, authorityEnd);
+        if (authority === "") {
+            throw new Error("Invalid Nextcloud server URL");
+        }
+        if (authority.startsWith("[")) {
+            rawBareHost = authority;
+            candidateUrl = `https://${trimmed}`;
+        } else {
+            const colonIndex: number = authority.indexOf(":");
+            if (colonIndex !== -1) {
+                const beforeColon: string = authority.slice(0, colonIndex);
+                const afterColon: string = authority.slice(colonIndex + 1);
+                const beforeColonLower: string = beforeColon.toLowerCase();
+                if (
+                    beforeColon === "" ||
+                    beforeColonLower === "http" ||
+                    beforeColonLower === "https"
+                ) {
+                    throw new Error("Invalid Nextcloud server URL");
+                }
+                if (FORBIDDEN_BARE_SCHEMES_LOWER.has(beforeColonLower)) {
+                    throw new Error("Nextcloud server URL must use HTTP or HTTPS");
+                }
+                if (PORT_DIGITS_REGEX.test(afterColon)) {
+                    const portNumber: number = Number.parseInt(afterColon, 10);
+                    if (portNumber < 1 || portNumber > 65535) {
+                        throw new Error("Invalid Nextcloud server URL");
+                    }
+                    rawBareHost = beforeColon;
+                    hasExplicitPort = true;
+                    candidateUrl = `https://${trimmed}`;
+                } else if (afterColon.includes("@")) {
+                    throw new Error(
+                        "Nextcloud server URL must not contain embedded credentials"
+                    );
+                } else if (
+                    SCHEME_NAME_REGEX.test(beforeColon) &&
+                    !beforeColon.includes(".")
+                ) {
+                    throw new Error("Nextcloud server URL must use HTTP or HTTPS");
+                } else {
+                    throw new Error("Invalid Nextcloud server URL");
+                }
+            } else {
+                rawBareHost = authority;
+                candidateUrl = `https://${trimmed}`;
+            }
+        }
+    }
+
+    const parsedUrl: URL = parseServerUrl(candidateUrl);
+    if (parsedUrl.protocol !== "https:" && parsedUrl.protocol !== "http:") {
+        throw new Error("Nextcloud server URL must use HTTP or HTTPS");
+    }
+    const schemeSeparatorIndex: number = candidateUrl.indexOf("://");
+    const afterCandidateScheme: string =
+        schemeSeparatorIndex !== -1
+            ? candidateUrl.slice(schemeSeparatorIndex + 3)
+            : candidateUrl;
+    const candidateAuthority: string = afterCandidateScheme.slice(
+        0,
+        findAuthorityEnd(afterCandidateScheme)
+    );
+    if (
+        parsedUrl.username !== "" ||
+        parsedUrl.password !== "" ||
+        candidateAuthority.includes("@")
+    ) {
+        throw new Error(
+            "Nextcloud server URL must not contain embedded credentials"
+        );
+    }
+    const hostname: string = parsedUrl.hostname.toLowerCase();
+    if (
+        hostname === "" ||
+        hostname.startsWith(".") ||
+        hostname.endsWith(".") ||
+        hostname.includes("..")
+    ) {
+        throw new Error("Invalid Nextcloud server URL");
+    }
+    if (!hadExplicitScheme && !rawBareHost.startsWith("[")) {
+        const lowerBareHost: string = rawBareHost.toLowerCase();
+        if (
+            lowerBareHost === "" ||
+            lowerBareHost.startsWith(".") ||
+            lowerBareHost.endsWith(".") ||
+            lowerBareHost.includes("..")
+        ) {
+            throw new Error("Invalid Nextcloud server URL");
+        }
+        if (
+            !hasExplicitPort &&
+            lowerBareHost !== "localhost" &&
+            !lowerBareHost.includes(".")
+        ) {
+            throw new Error("Invalid Nextcloud server URL");
+        }
+    }
+    return candidateUrl;
 }
 
 function normalizeUsername(username: string): string | null {
@@ -583,14 +769,7 @@ export function normalizeVaultPath(path: string): string {
         if (rawSegment === "") {
             continue;
         }
-        const trimmedSegment: string = rawSegment.trim();
-        if (
-            trimmedSegment === "" ||
-            DOTS_ONLY_REGEX.test(trimmedSegment) ||
-            TRAILING_DOT_OR_SPACE_REGEX.test(rawSegment) ||
-            rawSegment.includes(":") ||
-            FORBIDDEN_OBJECT_KEYS.has(trimmedSegment.toLowerCase())
-        ) {
+        if (isInvalidPathSegment(rawSegment)) {
             return "";
         }
     }
@@ -603,14 +782,7 @@ export function normalizeVaultPath(path: string): string {
     }
     if (normalized !== trimmed) {
         for (const segment of normalized.split("/")) {
-            const trimmedSegment: string = segment.trim();
-            if (
-                trimmedSegment === "" ||
-                DOTS_ONLY_REGEX.test(trimmedSegment) ||
-                TRAILING_DOT_OR_SPACE_REGEX.test(segment) ||
-                segment.includes(":") ||
-                FORBIDDEN_OBJECT_KEYS.has(trimmedSegment.toLowerCase())
-            ) {
+            if (isInvalidPathSegment(segment)) {
                 return "";
             }
         }
@@ -741,6 +913,7 @@ export const util = {
     isExcludedPath,
     isExplicitRootPath,
     normalizeEtag,
+    normalizeServerUrl,
     normalizeVaultPath,
     parseConflictCopyPath,
     runConcurrent,

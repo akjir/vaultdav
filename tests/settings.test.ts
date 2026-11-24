@@ -20,7 +20,10 @@ import {
     MAX_SYNC_INTERVAL_MINUTES,
     MAX_SYNC_LOG_RETENTION_DAYS,
     MIN_SYNC_LOG_RETENTION_DAYS,
+    resolveRemoteBaseDir,
+    resolveWebDavUrlPreview,
     sanitizeSecretId,
+    sanitizeServerUrl,
     VaultDavSettingTab
 } from "../src/settings";
 import {
@@ -157,7 +160,8 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
                     "Server URL",
                     "Username",
                     "App password",
-                    "Remote base directory"
+                    "Remote base directory",
+                    "Resolved WebDAV URL"
                 ]
             },
             {
@@ -182,6 +186,7 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             "Username",
             "App password",
             "Remote base directory",
+            "Resolved WebDAV URL",
             "Sync interval",
             "Conflict strategy",
             "Test connection",
@@ -191,7 +196,7 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         ]);
 
         expect(getSettingByName("Server URL").desc).toBe(
-            "Nextcloud base URL or WebDAV endpoint (https://<domain>)."
+            "Nextcloud host or WebDAV URL (uses https:// if omitted; only http:// and https:// allowed)."
         );
         expect(getSettingByName("Username").desc).toBe("Nextcloud account username.");
         expect(getSettingByName("Username").textComponent?.inputEl.placeholder).toBe(
@@ -204,6 +209,9 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         expect(getSettingByName("App password").textComponent).toBeNull();
         expect(getSettingByName("Remote base directory").desc).toBe(
             "Target remote folder path inside the Nextcloud user files root."
+        );
+        expect(getSettingByName("Resolved WebDAV URL").desc).toBe(
+            "Full WebDAV endpoint constructed from server URL, username, and remote base directory."
         );
         expect(getSettingByName("Sync interval").desc).toBe(
             "Automatic synchronization interval in minutes (0 to disable)."
@@ -275,8 +283,16 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             const inputEl: HTMLInputElement | undefined = setting.textComponent?.inputEl;
             expect(inputEl).toBeDefined();
             expect(inputEl?.autocapitalize).toBe("none");
+            expect(inputEl?.getAttribute("autocapitalize")).toBe("none");
+            expect(inputEl?.getAttribute("autocorrect")).toBe("off");
+            expect(inputEl?.autocomplete).toBe("off");
             expect(inputEl?.spellcheck).toBe(false);
         }
+        expect(
+            getSettingByName("Server URL").textComponent?.inputEl.getAttribute(
+                "inputmode"
+            )
+        ).toBe("url");
 
         const appPasswordSetting: MockSetting = getSettingByName("App password");
         expect(appPasswordSetting.textComponent).toBeNull();
@@ -589,7 +605,8 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
                     "Server URL",
                     "Username",
                     "App password",
-                    "Remote base directory"
+                    "Remote base directory",
+                    "Resolved WebDAV URL"
                 ],
                 type: "group"
             },
@@ -615,26 +632,25 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         ]);
 
         const connectionItems = groups[0]?.items ?? [];
-        expect(connectionItems[0]).toEqual({
-            control: {
-                defaultValue: "",
-                key: "url",
-                placeholder: "https://cloud.example.com",
-                type: "text"
-            },
-            desc: "Nextcloud base URL or WebDAV endpoint (https://<domain>).",
-            name: "Server URL"
-        });
-        expect(connectionItems[1]).toEqual({
-            control: {
-                defaultValue: "",
-                key: "username",
-                placeholder: "Enter username",
-                type: "text"
-            },
-            desc: "Nextcloud account username.",
-            name: "Username"
-        });
+        const urlItem: SettingDefinitionRender | undefined =
+            connectionItems[0] as SettingDefinitionRender | undefined;
+        const usernameItem: SettingDefinitionRender | undefined =
+            connectionItems[1] as SettingDefinitionRender | undefined;
+        const remoteDirItem: SettingDefinitionRender | undefined =
+            connectionItems[3] as SettingDefinitionRender | undefined;
+        const previewItem: SettingDefinitionRender | undefined =
+            connectionItems[4] as SettingDefinitionRender | undefined;
+
+        expect(urlItem?.name).toBe("Server URL");
+        expect(urlItem?.desc).toBe(
+            "Nextcloud host or WebDAV URL (uses https:// if omitted; only http:// and https:// allowed)."
+        );
+        expect(typeof urlItem?.render).toBe("function");
+
+        expect(usernameItem?.name).toBe("Username");
+        expect(usernameItem?.desc).toBe("Nextcloud account username.");
+        expect(typeof usernameItem?.render).toBe("function");
+
         expect(connectionItems[2]).toEqual({
             control: {
                 defaultValue: "",
@@ -644,16 +660,92 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
             desc: "Select or create a secret for your Nextcloud app password.",
             name: "App password"
         });
-        expect(connectionItems[3]).toEqual({
-            control: {
-                defaultValue: "",
-                key: "remoteBaseDir",
-                placeholder: "MyVault",
-                type: "text"
-            },
-            desc: "Target remote folder path inside the Nextcloud user files root.",
-            name: "Remote base directory"
-        });
+
+        expect(remoteDirItem?.name).toBe("Remote base directory");
+        expect(remoteDirItem?.desc).toBe(
+            "Target remote folder path inside the Nextcloud user files root."
+        );
+        expect(typeof remoteDirItem?.render).toBe("function");
+
+        expect(previewItem?.name).toBe("Resolved WebDAV URL");
+        expect(previewItem?.desc).toBe(
+            "Full WebDAV endpoint constructed from server URL, username, and remote base directory."
+        );
+        expect(typeof previewItem?.render).toBe("function");
+
+        // Verify Obsidian 1.13+ declarative render callbacks configure mobile lowercase input attributes and live endpoint preview
+        const renderContainer: HTMLElement = document.createElement("div");
+        const mockGroup: ObsidianSettingGroup = new MockSettingGroup(
+            renderContainer
+        ) as unknown as ObsidianSettingGroup;
+        const renderedUrlSetting: MockSetting = new MockSetting(renderContainer);
+        const renderedUserSetting: MockSetting = new MockSetting(renderContainer);
+        const renderedDirSetting: MockSetting = new MockSetting(renderContainer);
+        const renderedPreviewSetting: MockSetting = new MockSetting(renderContainer);
+
+        const cleanupUrl = urlItem?.render(
+            renderedUrlSetting as unknown as obsidian.Setting,
+            mockGroup
+        );
+        const cleanupUser = usernameItem?.render(
+            renderedUserSetting as unknown as obsidian.Setting,
+            mockGroup
+        );
+        const cleanupDir = remoteDirItem?.render(
+            renderedDirSetting as unknown as obsidian.Setting,
+            mockGroup
+        );
+        const cleanupPreview = previewItem?.render(
+            renderedPreviewSetting as unknown as obsidian.Setting,
+            mockGroup
+        );
+
+        for (const rendered of [
+            renderedUrlSetting,
+            renderedUserSetting,
+            renderedDirSetting
+        ]) {
+            const inputEl: HTMLInputElement | undefined =
+                rendered.textComponent?.inputEl;
+            expect(inputEl?.autocapitalize).toBe("none");
+            expect(inputEl?.getAttribute("autocapitalize")).toBe("none");
+            expect(inputEl?.getAttribute("autocorrect")).toBe("off");
+            expect(inputEl?.autocomplete).toBe("off");
+            expect(inputEl?.spellcheck).toBe(false);
+        }
+        expect(
+            renderedUrlSetting.textComponent?.inputEl.getAttribute("inputmode")
+        ).toBe("url");
+        expect(renderedUrlSetting.textComponent?.inputEl.placeholder).toBe(
+            "https://cloud.example.com"
+        );
+        expect(renderedUserSetting.textComponent?.inputEl.placeholder).toBe(
+            "Enter username"
+        );
+        expect(renderedDirSetting.textComponent?.inputEl.placeholder).toBe(
+            "MyVault"
+        );
+
+        const previewEl: HTMLElement | null =
+            renderedPreviewSetting.descEl.querySelector(
+                ".vaultdav-settings-endpoint-preview"
+            );
+        expect(previewEl?.textContent).toBe(
+            "Enter server URL and username to preview the WebDAV URL."
+        );
+
+        if (typeof cleanupUrl === "function") {
+            cleanupUrl();
+        }
+        if (typeof cleanupUser === "function") {
+            cleanupUser();
+        }
+        if (typeof cleanupDir === "function") {
+            cleanupDir();
+        }
+        if (typeof cleanupPreview === "function") {
+            cleanupPreview();
+        }
 
         const syncItems = groups[1]?.items ?? [];
         expect(syncItems[0]).toEqual({
@@ -876,5 +968,228 @@ describe("VaultDavSettingTab and DEFAULT_SETTINGS", () => {
         await tab.setControlValue("unknown", "ignored");
         await tab.setControlValue("__proto__", "polluted");
         expect(saveSpy.mock.calls.length).toBe(saveCountBeforeUnknown);
+    });
+
+    it("auto-prepends https:// for bare hosts, allows only http:// and https://, updates the resolved WebDAV URL preview live, and normalizes on blur", async () => {
+        const { app, plugin } = createTestPlugin();
+        vi.spyOn(plugin, "saveSettings").mockResolvedValue(undefined);
+
+        expect(sanitizeServerUrl("example.com")).toBe("https://example.com");
+        expect(sanitizeServerUrl("  example.com/nextcloud  ")).toBe(
+            "https://example.com/nextcloud"
+        );
+        expect(sanitizeServerUrl("example.com:8443/nextcloud")).toBe(
+            "https://example.com:8443/nextcloud"
+        );
+        expect(sanitizeServerUrl("http://192.168.1.50:8080/nextcloud")).toBe(
+            "http://192.168.1.50:8080/nextcloud"
+        );
+        expect(sanitizeServerUrl("HTTP://192.168.1.50/")).toBe(
+            "http://192.168.1.50/"
+        );
+        expect(sanitizeServerUrl("http://alice:secret@192.168.1.50/dav")).toBe(
+            "http://192.168.1.50/dav"
+        );
+        expect(sanitizeServerUrl("ftp://example.com")).toBe("");
+        expect(sanitizeServerUrl("file:///etc/passwd")).toBe("");
+        expect(sanitizeServerUrl("javascript:alert(1)")).toBe("");
+        expect(sanitizeServerUrl("davs://example.com")).toBe("");
+        expect(sanitizeServerUrl("ws://example.com")).toBe("");
+        expect(sanitizeServerUrl("http:example.com")).toBe("");
+        expect(sanitizeServerUrl("//example.com")).toBe("");
+        expect(sanitizeServerUrl("/remote.php/dav")).toBe("");
+        expect(sanitizeServerUrl("alice:secret@example.com")).toBe("");
+        expect(hasEmbeddedUrlCredentials("alice:secret@example.com")).toBe(true);
+        expect(hasEmbeddedUrlCredentials("http://alice:secret@192.168.1.50")).toBe(
+            true
+        );
+        expect(hasEmbeddedUrlCredentials("example.com/user@domain")).toBe(false);
+
+        expect(resolveRemoteBaseDir("", "MyVault", ".obsidian")).toBe("MyVault");
+        expect(resolveRemoteBaseDir("  /Vault/Notes/ ", "MyVault", ".obsidian")).toBe(
+            "Vault/Notes"
+        );
+        expect(resolveRemoteBaseDir(".obsidian", ".obsidian", ".obsidian")).toBe(
+            "VaultDAV"
+        );
+
+        expect(
+            resolveWebDavUrlPreview("", "", "", "MyVault", ".obsidian")
+        ).toEqual({
+            isError: false,
+            isReady: false,
+            text: "Enter server URL and username to preview the WebDAV URL."
+        });
+        expect(
+            resolveWebDavUrlPreview("example.com", "", "", "MyVault", ".obsidian")
+        ).toEqual({
+            isError: false,
+            isReady: false,
+            text: "Enter username to preview the WebDAV URL."
+        });
+        expect(
+            resolveWebDavUrlPreview(
+                "example.com",
+                "stefan",
+                "",
+                "Vault",
+                ".obsidian"
+            )
+        ).toEqual({
+            isError: false,
+            isReady: true,
+            text: "https://example.com/remote.php/dav/files/stefan/Vault/"
+        });
+        expect(
+            resolveWebDavUrlPreview(
+                "http://192.168.1.50:8080/nextcloud",
+                "stefan",
+                "Notes/Work",
+                "Vault",
+                ".obsidian"
+            )
+        ).toEqual({
+            isError: false,
+            isReady: true,
+            text: "http://192.168.1.50:8080/nextcloud/remote.php/dav/files/stefan/Notes/Work/"
+        });
+        expect(
+            resolveWebDavUrlPreview(
+                "ftp://example.com",
+                "stefan",
+                "Vault",
+                "Vault",
+                ".obsidian"
+            )
+        ).toEqual({
+            isError: true,
+            isReady: false,
+            text: "Server URL must use http:// or https://."
+        });
+        expect(
+            resolveWebDavUrlPreview(
+                "https://example.com?foo=bar",
+                "stefan",
+                "Vault",
+                "Vault",
+                ".obsidian"
+            )
+        ).toEqual({
+            isError: true,
+            isReady: false,
+            text: "Server URL must not contain query or hash parameters."
+        });
+        expect(
+            resolveWebDavUrlPreview(
+                "https://stefan:supersecret@example.com",
+                "stefan",
+                "Vault",
+                "Vault",
+                ".obsidian"
+            )
+        ).toEqual({
+            isError: false,
+            isReady: true,
+            text: "https://example.com/remote.php/dav/files/stefan/Vault/"
+        });
+        expect(
+            resolveWebDavUrlPreview(
+                "example.com",
+                "stefan:bad",
+                "Vault",
+                "Vault",
+                ".obsidian"
+            )
+        ).toEqual({
+            isError: true,
+            isReady: false,
+            text: "Username must not contain colons, slashes, or control characters."
+        });
+        expect(
+            resolveWebDavUrlPreview(
+                "example.com",
+                "stefan",
+                ".obsidian",
+                "Vault",
+                ".obsidian"
+            )
+        ).toEqual({
+            isError: true,
+            isReady: false,
+            text: "Remote base directory cannot use excluded or invalid paths."
+        });
+
+        // Live UI updates in display()
+        const tab: VaultDavSettingTab = new VaultDavSettingTab(app, plugin);
+        tab.display();
+
+        const urlSetting: MockSetting = getSettingByName("Server URL");
+        const userSetting: MockSetting = getSettingByName("Username");
+        const dirSetting: MockSetting = getSettingByName("Remote base directory");
+        const previewSetting: MockSetting = getSettingByName(
+            "Resolved WebDAV URL"
+        );
+        const previewEl: HTMLElement | null =
+            previewSetting.descEl.querySelector(
+                ".vaultdav-settings-endpoint-preview"
+            );
+        expect(previewEl).not.toBeNull();
+        expect(previewEl?.classList.contains("is-placeholder")).toBe(true);
+        expect(previewEl?.textContent).toBe(
+            "Enter server URL and username to preview the WebDAV URL."
+        );
+
+        // Bare domain automatically assumes https:// and updates preview live
+        if (urlSetting.textComponent !== null) {
+            urlSetting.textComponent.inputEl.value = "example.com";
+        }
+        await urlSetting.textOnChange?.("example.com");
+        expect(plugin.settings.url).toBe("https://example.com");
+        expect(previewEl?.textContent).toBe(
+            "Enter username to preview the WebDAV URL."
+        );
+
+        // Blurring Server URL updates input field to normalized https:// URL
+        urlSetting.textComponent?.inputEl.dispatchEvent(new Event("blur"));
+        expect(urlSetting.textComponent?.inputEl.value).toBe(
+            "https://example.com"
+        );
+
+        await userSetting.textOnChange?.("stefan");
+        expect(previewEl?.classList.contains("is-placeholder")).toBe(false);
+        expect(previewEl?.classList.contains("is-error")).toBe(false);
+        expect(previewEl?.textContent).toBe(
+            "https://example.com/remote.php/dav/files/stefan/MyVault/"
+        );
+
+        await dirSetting.textOnChange?.("Vault");
+        expect(previewEl?.textContent).toBe(
+            "https://example.com/remote.php/dav/files/stefan/Vault/"
+        );
+
+        // Switching to explicit http:// updates preview live
+        await urlSetting.textOnChange?.("http://192.168.1.50:8080/nextcloud");
+        expect(plugin.settings.url).toBe("http://192.168.1.50:8080/nextcloud");
+        expect(previewEl?.textContent).toBe(
+            "http://192.168.1.50:8080/nextcloud/remote.php/dav/files/stefan/Vault/"
+        );
+
+        // Entering forbidden scheme rejects persistence and shows inline error without wiping raw input on blur
+        if (urlSetting.textComponent !== null) {
+            urlSetting.textComponent.inputEl.value = "ftp://example.com";
+        }
+        await urlSetting.textOnChange?.("ftp://example.com");
+        expect(plugin.settings.url).toBe("");
+        expect(previewEl?.classList.contains("is-error")).toBe(true);
+        expect(previewEl?.textContent).toBe(
+            "Server URL must use http:// or https://."
+        );
+        urlSetting.textComponent?.inputEl.dispatchEvent(new Event("blur"));
+        expect(urlSetting.textComponent?.inputEl.value).toBe("ftp://example.com");
+
+        // Hiding tab clears transient drafts and DOM reference safely
+        tab.hide();
+        await tab.setControlValue("url", "example.org");
+        expect(plugin.settings.url).toBe("https://example.org");
     });
 });

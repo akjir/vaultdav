@@ -1626,6 +1626,11 @@ export class SyncLogView extends ItemView {
             cls: "vaultdav-log-search-input"
         });
         searchInput.type = "search";
+        searchInput.autocapitalize = "none";
+        searchInput.setAttribute("autocapitalize", "none");
+        searchInput.setAttribute("autocorrect", "off");
+        searchInput.autocomplete = "off";
+        searchInput.spellcheck = false;
         searchInput.placeholder = "Filter by file path";
         searchInput.value = this.eventSearchQuery;
 
@@ -1787,6 +1792,11 @@ export class SyncLogView extends ItemView {
             cls: "vaultdav-log-run-search-input"
         });
         runSearchInput.type = "search";
+        runSearchInput.autocapitalize = "none";
+        runSearchInput.setAttribute("autocapitalize", "none");
+        runSearchInput.setAttribute("autocorrect", "off");
+        runSearchInput.autocomplete = "off";
+        runSearchInput.spellcheck = false;
         runSearchInput.placeholder = "Search runs by path, error, or date";
         runSearchInput.value = this.runSearchQuery;
         runSearchInput.addEventListener("input", (): void => {

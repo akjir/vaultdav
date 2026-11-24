@@ -10,6 +10,7 @@ import {
     DEFAULT_SETTINGS,
     hasEmbeddedUrlCredentials,
     MAX_SYNC_INTERVAL_MINUTES,
+    resolveRemoteBaseDir,
     VaultDavSettingTab,
     sanitizeAppPassword,
     sanitizeChunkSizeMB,
@@ -165,20 +166,11 @@ export default class VaultDavPlugin extends Plugin implements ProgressReporter {
 
     private getResolvedSettings(): VaultDavSettings {
         const configDir: string = this.app.vault.configDir;
-        const normalizedRemoteBaseDir: string = sanitizeRemoteBaseDir(
+        const fallbackBaseDir: string = resolveRemoteBaseDir(
             this.settings.remoteBaseDir,
-            configDir
-        );
-        const normalizedVaultName: string = sanitizeRemoteBaseDir(
             this.app.vault.getName(),
             configDir
         );
-        const fallbackBaseDir: string =
-            normalizedRemoteBaseDir !== ""
-                ? normalizedRemoteBaseDir
-                : normalizedVaultName !== ""
-                  ? normalizedVaultName
-                  : "VaultDAV";
         return {
             ...this.settings,
             remoteBaseDir: fallbackBaseDir
